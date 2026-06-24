@@ -39,14 +39,10 @@ Sleep 2800ms
 Type "# build a UI before its backend exists — mock the API and reload"
 Enter
 Sleep 800ms
-Type "bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{\"results\":[]}' --reload true"
+Type `bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{"results":[]}' --reload true`
 Enter
-Sleep 2500ms
-
-Type "bun run src/cli.ts list_mocks"
-Enter
-Sleep 2500ms
+Sleep 3000ms
 
 Type "# 33 tools, one direct WebSocket, a bounded timeout on every call."
 Enter
-Sleep 2000ms
+Sleep 2200ms
