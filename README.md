@@ -52,7 +52,7 @@ open -a "Google Chrome" --args --remote-debugging-port=9222
 #   (Linux: google-chrome --remote-debugging-port=9222)
 
 # 2. Add cdp-toolkit to Claude Code at user scope (every project, no install step)
-claude mcp add cdp-toolkit --scope user -- bunx -y cdp-toolkit
+claude mcp add cdp-toolkit --scope user -- npx -y cdp-toolkit   # or: bunx -y cdp-toolkit
 
 # 3. In Claude Code, call a tool to prove it works:
 #    mcp__cdp-toolkit__list_pages
@@ -63,12 +63,12 @@ That's it. Tools appear namespaced as `mcp__cdp-toolkit__<tool>`. The server con
 Prefer the **CLI**? Every tool is runnable directly:
 
 ```bash
-bunx -y --package cdp-toolkit cdp list_pages
-bunx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://example.com
+npx -y --package cdp-toolkit cdp list_pages          # or swap npx → bunx
+npx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://example.com
 # …or from a clone: `bun run src/cli.ts <tool> …`
 ```
 
-**Requirements:** Bun ≥ 1.1 (recommended) or Node ≥ 22 (for the global `WebSocket`). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`.
+**Requirements:** Node ≥ 22 **or** Bun ≥ 1.1 — `npx -y cdp-toolkit` and `bunx -y cdp-toolkit` both work (the published bins are plain Node ESM). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`.
 
 ### MCP client setup
 
@@ -76,7 +76,7 @@ bunx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://e
 <summary><b>Claude Code</b></summary>
 
 ```bash
-claude mcp add cdp-toolkit --scope user -- bunx -y cdp-toolkit
+claude mcp add cdp-toolkit --scope user -- npx -y cdp-toolkit   # or: bunx -y cdp-toolkit
 claude mcp get cdp-toolkit   # status (should show ✓ Connected)
 ```
 A newly-registered server loads on the next Claude Code start; in an existing session, reconnect via `/mcp`.
@@ -89,7 +89,7 @@ Add to your MCP config (e.g. `~/.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "cdp-toolkit": { "command": "bunx", "args": ["-y", "cdp-toolkit"] }
+    "cdp-toolkit": { "command": "npx", "args": ["-y", "cdp-toolkit"] }
   }
 }
 ```

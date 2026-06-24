@@ -8,13 +8,13 @@
     "name": "Stephen Blatt",
     "url": "https://github.com/sblattj"
   },
-  "homepage": "https://github.com/sblatt/cdp-toolkit#readme",
+  "homepage": "https://github.com/sblattj/cdp-toolkit#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sblatt/cdp-toolkit.git"
+    "url": "https://github.com/sblattj/cdp-toolkit.git"
   },
   "bugs": {
-    "url": "https://github.com/sblatt/cdp-toolkit/issues"
+    "url": "https://github.com/sblattj/cdp-toolkit/issues"
   },
   "engines": {
     "bun": ">=1.1.0",
@@ -36,19 +36,26 @@
     "devtools",
     "bun"
   ],
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
-    "cdp-toolkit": "./src/mcp.ts",
-    "cdp": "./src/cli.ts"
+    "cdp-toolkit": "./dist/mcp.js",
+    "cdp": "./dist/cli.js"
   },
   "files": [
+    "dist/",
     "src/",
-    "test/",
     "CONTRACT.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "bun run scripts/build.ts",
+    "prepublishOnly": "bun run build",
     "cdp": "bun run ./src/cli.ts",
     "mcp": "bun run ./src/mcp.ts",
     "typecheck": "tsc --noEmit",
