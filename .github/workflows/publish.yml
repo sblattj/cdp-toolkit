@@ -1,0 +1,45 @@
+name: publish
+
+# Publishes to npm on a v* tag, tokenless, via npm OIDC "trusted publishing"
+# (no NPM_TOKEN secret) with a provenance attestation.
+#
+# ONE-TIME PREREQUISITES (the workflow can't do these for you):
+#   1. The repo must be PUBLIC — provenance attestation requires a public repo.
+#   2. On npmjs.com → the cdp-toolkit package → Settings → Trusted Publisher,
+#      add this GitHub repo + workflow (sblattj/cdp-toolkit, .github/workflows/publish.yml).
+#      For a brand-new package name you typically do the FIRST `npm publish`
+#      manually (npm login + npm publish), then wire trusted publishing for
+#      subsequent releases.
+#   3. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
+#      push a matching tag:  git tag v1.0.1 && git push origin v1.0.1
+#
+# After that, every `git push origin v*` cuts a published, provenance-signed release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build # also runs via prepublishOnly; explicit here as a gate
+      # npm >= 11.5.1 is required for OIDC trusted publishing; refresh it.
+      - run: npm install -g npm@latest
+      - run: npm publish --provenance --access public
