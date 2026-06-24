@@ -19,7 +19,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "1.0.0";
 
 /** Loose dispatch view of the strongly-typed TOOLS registry. */
 const dispatch = TOOLS as Record<string, (args: unknown) => Promise<unknown>>;
