@@ -1,0 +1,67 @@
+{
+  "name": "cdp-toolkit",
+  "version": "1.0.0",
+  "description": "Single-target Chrome DevTools Protocol MCP server + Bun CLI — 29 chrome-devtools-mcp parity tools plus network mocking, over one direct WebSocket with a bounded per-command timeout. No Puppeteer, no all-target fan-out.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Stephen Blatt",
+    "url": "https://github.com/sblattj"
+  },
+  "homepage": "https://github.com/sblatt/cdp-toolkit#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sblatt/cdp-toolkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sblatt/cdp-toolkit/issues"
+  },
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "chrome-devtools-protocol",
+    "cdp",
+    "chrome-devtools-mcp",
+    "browser-automation",
+    "network-mocking",
+    "claude-code",
+    "cursor",
+    "ai-agent",
+    "puppeteer-alternative",
+    "devtools",
+    "bun"
+  ],
+  "bin": {
+    "cdp-toolkit": "./src/mcp.ts",
+    "cdp": "./src/cli.ts"
+  },
+  "files": [
+    "src/",
+    "test/",
+    "CONTRACT.md",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "cdp": "bun run ./src/cli.ts",
+    "mcp": "bun run ./src/mcp.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "smoke": "bun run ./test/smoke.ts",
+    "mock:smoke": "bun run ./test/mock-smoke.ts",
+    "mcp:smoke": "bun run ./test/mcp-smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.10",
+    "typescript": "5.7.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  }
+}

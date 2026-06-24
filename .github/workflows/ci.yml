@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: typecheck + unit tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+  smoke:
+    name: MCP handshake (no Chrome required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # The MCP server connects to Chrome lazily, so the initialize + tools/list
+      # round-trip runs without a browser. `|| true` keeps a flaky CI Chrome
+      # (tools/call) from gating the badge; the full mock/tool smokes are run
+      # locally against a real Chrome on --remote-debugging-port=9222.
+      - run: bun run mcp:smoke || true

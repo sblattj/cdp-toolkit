@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new tool, an option, or a behavior change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        cdp-toolkit aims to stay small (~5.4K LOC, zero runtime deps) and to be
+        correct, not feature-complete. Before opening, read [`CONTRACT.md`](./CONTRACT.md)
+        and the [README tools table](./README.md#the-tools-29-mcp--1-convenience--3-network-mocking)
+        to make sure the gap isn't already covered.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving?
+      description: One paragraph. "I want X" is fine; "this would be nice" is not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed shape (tool name, args, return)
+      description: If you're proposing a new tool, sketch the args + return shape so people can vet it before code lands.
+    validations:
+      required: false

@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a bug, crash, hang, or wrong behavior in one of the 33 tools.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this. Please include the **exact CLI/MCP
+        command** you ran, the **actual** output, and the **expected** output.
+        Vague reports get closed in 14 days. Concrete ones get fixed.
+
+  - type: input
+    id: tool
+    attributes:
+      label: Tool name
+      description: One of the 33 MCP tool names (e.g. `take_snapshot`, `mock_request`).
+      placeholder: take_snapshot
+    validations:
+      required: true
+
+  - type: input
+    id: chrome
+    attributes:
+      label: Chrome version + `--remote-debugging-port`
+      description: e.g. `Chromium 142 with --remote-debugging-port=9222`
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Bun / Node version
+      description: Output of `bun --version` or `node --version`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro
+      description: Minimal command + page URL that reproduces the bug.
+      placeholder: |
+        bun run src/cli.ts navigate_page --target index:0 --url https://example.com
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output
+      description: What you saw.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      description: What you expected.
+    validations:
+      required: true
