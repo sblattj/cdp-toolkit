@@ -1,0 +1,7 @@
+node_modules/
+*.log
+# runtime artifacts (screenshots, traces, heap snapshots, recorder buffers)
+/tmp/cdp-toolkit/
+# internal launch / planning docs — kept locally, NOT part of the public repo
+ANALYSIS.md
+LAUNCH-PLAN.md
