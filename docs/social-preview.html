@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cdp-toolkit social preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    font-family: -apple-system, "SF Pro Display", Inter, system-ui, sans-serif;
+    background:
+      radial-gradient(1100px 620px at 82% -12%, #1d3a4a 0%, #0c1822 46%, #070d14 100%);
+    color: #e7eef5;
+    position: relative;
+  }
+  .accent {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 12px;
+    background: linear-gradient(180deg, #38bdf8 0%, #22d3ee 52%, #f59e0b 100%);
+  }
+  /* faint devtools grid in the corner */
+  .grid {
+    position: absolute; right: -60px; top: -60px; width: 560px; height: 560px;
+    background-image:
+      linear-gradient(to right, rgba(125,211,252,.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(125,211,252,.07) 1px, transparent 1px);
+    background-size: 40px 40px, 40px 40px;
+    transform: rotate(8deg);
+    -webkit-mask-image: radial-gradient(closest-side, #000 60%, transparent 100%);
+            mask-image: radial-gradient(closest-side, #000 60%, transparent 100%);
+  }
+  .wrap { position: relative; padding: 70px 84px; height: 100%; display: flex; flex-direction: column; }
+  .kicker {
+    font: 600 21px/1 "SF Mono", ui-monospace, "JetBrains Mono", monospace;
+    letter-spacing: .2em; text-transform: uppercase; color: #7dd3fc;
+  }
+  .title {
+    margin-top: 24px;
+    font-family: "SF Mono", ui-monospace, "JetBrains Mono", monospace;
+    font-weight: 700; font-size: 108px; letter-spacing: -.03em; line-height: .92;
+  }
+  .title .dot { color: #f59e0b; }
+  .tagline {
+    margin-top: 28px; font-size: 33px; line-height: 1.32; color: #b9c7d6;
+    max-width: 1010px; font-weight: 500;
+  }
+  .tagline b { color: #eef4fa; font-weight: 700; }
+  .chips { margin-top: 36px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .chip {
+    font: 600 22px/1 "SF Mono", ui-monospace, "JetBrains Mono", monospace;
+    padding: 15px 22px; border: 1px solid #2b4a5e; border-radius: 999px;
+    background: rgba(14, 32, 48, .72); color: #9fd3ea;
+  }
+  .chip .n { color: #f59e0b; }
+  .foot {
+    margin-top: auto; display: flex; align-items: center; justify-content: space-between;
+  }
+  .cmd {
+    font: 600 30px/1 "SF Mono", ui-monospace, "JetBrains Mono", monospace; color: #eef4fa;
+    background: #0b1925; border: 1px solid #234055; padding: 21px 30px; border-radius: 14px;
+  }
+  .cmd .p { color: #22d3ee; }
+  .repo {
+    font: 600 26px/1 "SF Mono", ui-monospace, "JetBrains Mono", monospace; color: #8098a9;
+  }
+</style>
+</head>
+<body>
+  <div class="accent"></div>
+  <div class="grid"></div>
+  <div class="wrap">
+    <div class="kicker">MCP server &middot; Chrome DevTools Protocol</div>
+    <div class="title">cdp-toolkit<span class="dot">.</span></div>
+    <div class="tagline">
+      Raw CDP browser automation over <b>one direct WebSocket</b> to the
+      <b>one tab you mean</b> — <b>33 tools</b>, a bounded timeout on every command,
+      built-in network mocking. No Puppeteer, no all-target fan-out.
+    </div>
+    <div class="chips">
+      <div class="chip">1 target &middot; 1 socket</div>
+      <div class="chip"><span class="n">33</span> tools</div>
+      <div class="chip">bounded timeouts</div>
+      <div class="chip">network mocking</div>
+    </div>
+    <div class="foot">
+      <div class="cmd"><span class="p">$</span> npx -y cdp-toolkit</div>
+      <div class="repo">github.com/sblattj/cdp-toolkit</div>
+    </div>
+  </div>
+</body>
+</html>
