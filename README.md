@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A single-target Chrome MCP server that drives one tab over raw Chrome DevTools Protocol — with a bounded timeout on every call.** No Puppeteer, no all-target fan-out, no `Network.enable` hang. Plus a built-in network-mocking fake backend. 33 tools, zero runtime dependencies in the CDP layer.
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call — so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out — plus a built-in network-mocking fake backend. **33 tools.**
 
 > For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably** — not a Puppeteer-managed browser.
 
@@ -11,6 +11,14 @@
 
 <!-- Demo: record with `vhs docs/demo.tape` (see docs/demo.tape) and commit docs/demo.gif -->
 ![cdp-toolkit demo](docs/demo.gif)
+
+## In plain terms
+
+You let an AI agent — Claude Code, Cursor, any MCP host — control a Chrome tab: click, type, read the page, take screenshots, even fake API responses to test a UI before its backend exists. [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) does this too, but it runs a whole Puppeteer browser and talks to *all* your open tabs at once — which is why a single busy tab can freeze it and leave you typing `/mcp` to restart the server mid-task.
+
+`cdp-toolkit` keeps it simple: **one connection to the one tab you point it at, and a time limit on every action.** When something stalls, you get an error back — not a frozen agent. Same things you could do before, minus the wedging and the restarts.
+
+That's the whole pitch. The technical *why* — fan-out, lazy domain enabling, the `Network.enable` hang — is below.
 
 ## Why it exists
 
