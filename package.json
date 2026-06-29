@@ -11,7 +11,7 @@
   "homepage": "https://github.com/sblattj/cdp-toolkit#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sblattj/cdp-toolkit.git"
+    "url": "git+https://github.com/sblattj/cdp-toolkit.git"
   },
   "bugs": {
     "url": "https://github.com/sblattj/cdp-toolkit/issues"
@@ -50,8 +50,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "cdp-toolkit": "./dist/mcp.js",
-    "cdp": "./dist/cli.js"
+    "cdp-toolkit": "dist/mcp.js",
+    "cdp": "dist/cli.js"
   },
   "files": [
     "dist/",
