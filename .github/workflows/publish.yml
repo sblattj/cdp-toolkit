@@ -42,4 +42,18 @@ jobs:
       - run: bun run build # also runs via prepublishOnly; explicit here as a gate
       # npm >= 11.5.1 is required for OIDC trusted publishing; refresh it.
       - run: npm install -g npm@latest
-      - run: npm publish --provenance --access public
+      # Idempotency guard: skip if this version is already on npm (e.g. a v1.0.0
+      # tag cut after the first manual publish) so the run stays green.
+      - name: Check if version already published
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "cdp-toolkit@${VERSION}" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::cdp-toolkit@${VERSION} already on npm — skipping publish."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish to npm
+        if: steps.published.outputs.skip != 'true'
+        run: npm publish --provenance --access public
