@@ -200,9 +200,9 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 | `click` | `Input.dispatchMouseEvent` | No implicit auto-wait/retry — resolves and acts once; re-snapshot between steps. |
 | `hover` | `Input.dispatchMouseEvent` (`mouseMoved`) | Same single-shot model as `click`. |
 | `drag` | `Input.dispatchMouseEvent` (press→move→release) | Synthetic mouse drag; native HTML5 DnD is approximated. |
-| `fill` | `Input.insertText` | Atomic paste-like commit, not per-character keystrokes. |
+| `fill` | `Input.insertText` | Atomic paste-like commit, not per-character keystrokes. For rich-text `contenteditable` editors (Lexical/ProseMirror/Slate), `click` the editor **first** so a trusted caret exists — see [recipe](docs/recipes/typing-into-contenteditable-editors.md). |
 | `fill_form` | per field: `callFunctionOn` + `insertText` | Array of `{uid|selector,value}`; same insertText caveat. |
-| `type_text` | `Input.insertText` | Appends (does not clear first); insertText, not per-key. |
+| `type_text` | `Input.insertText` | Appends (does not clear first); insertText, not per-key. Same `contenteditable` caveat as `fill`. |
 | `press_key` | `Input.dispatchKeyEvent` | Curated named-key table + single chars; not the full Puppeteer KeyInput enum. |
 | `upload_file` | `DOM.setFileInputFiles` | Requires a resolvable `<input type=file>` (uid or selector). |
 | `take_screenshot` | `Page.captureScreenshot` (+ layout metrics) | Clip scale fixed at 1. Full-page uses `captureBeyondViewport` + layout-metrics clip. |
@@ -222,6 +222,12 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 | `mock_request` *(superset)* | `Fetch.*` (+ `Page.reload`) | **A fake backend.** Registers a rule on a target's persistent session: fulfill with a canned response, fail, or continue (with optional `delayMs`/`failRate`). Persists across reloads until `clear_mocks`. Request-stage only. Cached requests aren't intercepted (use `reload:true`). |
 | `list_mocks` *(superset)* | `Runtime.evaluate` (liveness probe) | Lists active mock sessions with rules + hit counts; prunes sessions whose tab closed. |
 | `clear_mocks` *(superset)* | `Fetch.disable` | Tears down the resolved target's mock session (or all with `all:true`). |
+
+## Recipes
+
+Longer-form notes on driver-vs-page gotchas that don't fit a table cell:
+
+- [Typing into rich-text `contenteditable` editors (Lexical, ProseMirror, Slate, Draft.js)](docs/recipes/typing-into-contenteditable-editors.md) — why `fill` silently no-ops or garbles text in a framework editor, and the trusted-click-then-`insertText` ordering that fixes it.
 
 ## How it's built
 
