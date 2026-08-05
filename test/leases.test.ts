@@ -11,10 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   claimLease,
+  isPidAlive,
   leaseFile,
   readLease,
   releaseLease,
+  staleReason,
   tokenParts,
+  type LeaseRecord,
 } from "../src/leases.ts";
 
 let dir = "";
@@ -87,5 +90,72 @@ describe("releaseLease", () => {
 
   test("a malformed token releases nothing and does not throw", async () => {
     expect(await releaseLease("not-a-token")).toEqual({ released: false });
+  });
+});
+
+function recordOf(over: Partial<LeaseRecord> = {}): LeaseRecord {
+  return {
+    backend: "chrome",
+    targetId: "T",
+    nonce: "0123456789abcdef01234567",
+    pid: process.pid,
+    label: "agent-one",
+    createdAt: 1_000,
+    lastUsedAt: 1_000,
+    ttlMs: 900_000,
+    ...over,
+  };
+}
+
+describe("staleReason", () => {
+  test("a live pid inside its TTL is not stale", () => {
+    expect(staleReason(recordOf(), { now: 1_000 + 60_000 })).toBe(false);
+  });
+
+  test("a dead pid is stale regardless of lastUsedAt", () => {
+    // pid 1 is init/launchd and always alive, so use an unallocatable pid instead.
+    expect(isPidAlive(2 ** 31 - 1)).toBe(false);
+    expect(staleReason(recordOf({ pid: 2 ** 31 - 1, lastUsedAt: 1_000 }), { now: 1_100 })).toBe("dead-pid");
+  });
+
+  test("lastUsedAt older than ttlMs is stale", () => {
+    expect(staleReason(recordOf({ lastUsedAt: 1_000, ttlMs: 5_000 }), { now: 1_000 + 5_001 })).toBe("expired");
+  });
+
+  test("a target id missing from the live list is stale", () => {
+    expect(staleReason(recordOf({ targetId: "GONE" }), { now: 1_100, liveIds: ["OTHER"] })).toBe("target-gone");
+    expect(staleReason(recordOf({ targetId: "HERE" }), { now: 1_100, liveIds: ["HERE"] })).toBe(false);
+  });
+
+  test("liveIds is only consulted when supplied", () => {
+    expect(staleReason(recordOf({ targetId: "GONE" }), { now: 1_100 })).toBe(false);
+  });
+});
+
+describe("claimLease reclamation", () => {
+  test("reclaims an expired lease and mints a different nonce", async () => {
+    const first = await claimLease("chrome", "RECLAIM", { label: "stalled", ttlMs: 1, now: 1_000 });
+    const second = await claimLease("chrome", "RECLAIM", { label: "fresh", now: 1_000_000 });
+    expect(second.record.label).toBe("fresh");
+    expect(second.record.nonce).not.toBe(first.record.nonce);
+    expect(tokenParts(second.token)?.nonce).toBe(second.record.nonce);
+  });
+
+  test("reclaims a lease whose target has vanished from the browser", async () => {
+    await claimLease("chrome", "VANISHED", { label: "ghost", now: 1_000 });
+    const retaken = await claimLease("chrome", "VANISHED", { label: "fresh", now: 1_100, liveIds: ["SOMETHING-ELSE"] });
+    expect(retaken.record.label).toBe("fresh");
+  });
+
+  test("does NOT reclaim a live lease inside its TTL", async () => {
+    await claimLease("chrome", "HELD", { label: "working", now: 1_000 });
+    await expect(claimLease("chrome", "HELD", { label: "intruder", now: 1_100 })).rejects.toThrow(/already leased by 'working'/);
+  });
+
+  test("the superseded token no longer releases the reclaimed lease", async () => {
+    const first = await claimLease("chrome", "SUPERSEDED", { label: "stalled", ttlMs: 1, now: 1_000 });
+    await claimLease("chrome", "SUPERSEDED", { label: "fresh", now: 1_000_000 });
+    expect(await releaseLease(first.token)).toEqual({ released: false });
+    expect((await readLease("chrome", "SUPERSEDED"))?.label).toBe("fresh");
   });
 });

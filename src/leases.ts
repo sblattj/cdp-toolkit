@@ -107,9 +107,45 @@ export interface ClaimOptions {
   label: string;
   ttlMs?: number;
   now?: number;
+  /** Live target ids from the browser, enabling the "target-gone" reclamation. */
+  liveIds?: readonly string[];
 }
 
-/** Take exclusive ownership. Throws LeaseConflictError if the tab is held. */
+/** Why an existing lease may be taken over. All three are sufficient alone. */
+export type LeaseStaleReason = "dead-pid" | "expired" | "target-gone";
+
+/** Signal-0 liveness probe. EPERM means the pid exists but belongs to another
+ *  user, which still counts as alive. */
+export function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Classify a lease. `liveIds` is passed in by the caller rather than looked up
+ * here on purpose: it is the only browser-derived input this module needs, and
+ * taking it as data keeps leases.ts free of any CDP or BiDi import, which is
+ * what makes the negative tests cheap to run.
+ */
+export function staleReason(
+  rec: LeaseRecord,
+  opts: { now: number; liveIds?: readonly string[] },
+): LeaseStaleReason | false {
+  if (!isPidAlive(rec.pid)) return "dead-pid";
+  if (opts.now - rec.lastUsedAt > rec.ttlMs) return "expired";
+  if (opts.liveIds && !opts.liveIds.includes(rec.targetId)) return "target-gone";
+  return false;
+}
+
+/** Take exclusive ownership. Throws LeaseConflictError if the tab is held and
+ *  not stale. A stale lease is reclaimed: the old file is unlinked and a fresh
+ *  record with a fresh nonce is created, never overwritten in place, so the
+ *  superseded token stops matching by construction. */
 export async function claimLease(
   backend: LeaseBackend,
   targetId: string,
@@ -117,28 +153,41 @@ export async function claimLease(
 ): Promise<{ token: LeaseToken; record: LeaseRecord }> {
   const now = opts.now ?? Date.now();
   await mkdir(leaseDir(), { recursive: true });
-  const record: LeaseRecord = {
-    backend,
-    targetId,
-    nonce: randomBytes(12).toString("hex"),
-    pid: process.pid,
-    label: opts.label,
-    createdAt: now,
-    lastUsedAt: now,
-    ttlMs: opts.ttlMs ?? leaseTtlMs(),
-  };
-  try {
-    await writeFile(leaseFile(backend, targetId), JSON.stringify(record), { flag: "wx" });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    const existing = await readLease(backend, targetId);
-    throw new LeaseConflictError(
-      `target '${targetId}' is already leased by '${existing?.label ?? "unknown"}' (pid ${existing?.pid ?? "unknown"}); call release_page with that lease's token, or list_leases to inspect it`,
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const record: LeaseRecord = {
+      backend,
       targetId,
-      existing?.label,
-    );
+      // A fresh nonce on EVERY attempt, so a reclamation cannot reuse the
+      // nonce it displaced. This is what invalidates the old owner's token.
+      nonce: randomBytes(12).toString("hex"),
+      pid: process.pid,
+      label: opts.label,
+      createdAt: now,
+      lastUsedAt: now,
+      ttlMs: opts.ttlMs ?? leaseTtlMs(),
+    };
+    try {
+      await writeFile(leaseFile(backend, targetId), JSON.stringify(record), { flag: "wx" });
+      return { token: mintToken(backend, targetId, record.nonce), record };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const existing = await readLease(backend, targetId);
+    if (!existing) continue; // released between our create and our read: retry
+    const stale = staleReason(existing, { now, liveIds: opts.liveIds });
+    if (!stale) {
+      throw new LeaseConflictError(
+        `target '${targetId}' is already leased by '${existing.label}' (pid ${existing.pid}); call release_page with that lease's token, or list_leases to inspect it`,
+        targetId,
+        existing.label,
+      );
+    }
+    await unlink(leaseFile(backend, targetId)).catch(() => undefined);
   }
-  return { token: mintToken(backend, targetId, record.nonce), record };
+  throw new LeaseConflictError(
+    `target '${targetId}' could not be claimed after 3 attempts: another process is claiming and releasing it concurrently`,
+    targetId,
+  );
 }
 
 /** Give up a lease. Idempotent: releasing an already-gone lease is not an error. */
