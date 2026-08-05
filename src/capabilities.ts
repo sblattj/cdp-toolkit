@@ -1,5 +1,5 @@
 /**
- * Per-backend tool availability: filters the 33-tool registry down to what a
+ * Per-backend tool availability: filters the 36-tool registry down to what a
  * given DriverKind can actually run, per ADR-001's rule that tools/list
  * discovers gaps, not runtime "unsupported" throws. Pure and I/O-free: driver
  * construction reads a static readonly `capabilities` set, it does not dial a

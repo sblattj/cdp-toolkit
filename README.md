@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **33 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **36 tools.**
 
 > For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably**, not a Puppeteer-managed browser.
 
@@ -117,7 +117,7 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 - **Single-target reliability.** One WebSocket to one resolved target, a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. There is no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
-- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 33 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 36 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
 
 ## Why raw CDP beats the MCP for known targets
 
@@ -182,10 +182,11 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_TIMEOUT_MS` | `15000` | Per-command timeout. |
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
+| `CDP_LEASE_TTL_MS` | `900000` | How long a tab lease survives without use before another agent can reclaim it. Refreshed on every checked call. |
 
 ## Firefox (WebDriver BiDi)
 
-cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 33-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
+cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 36-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
 
 ```bash
 cdp --browser firefox take_snapshot                 # CLI: explicit flag
@@ -206,7 +207,7 @@ Backend selection precedence: `--browser chrome|firefox` flag, then `CDP_BROWSER
 - `take_heapsnapshot` (needs `heap.snapshot`)
 - `lighthouse_audit` (needs `audit.lighthouse`)
 
-Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), is available under both backends.
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain) and the `claim_page`/`release_page`/`list_leases` lease group, is available under both backends: 30 of the 36 tools.
 
 **Honest capability gaps, not oversold parity:**
 
@@ -217,15 +218,15 @@ Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's 
 - **`locate.text` is not available** (Firefox 153's `browsingContext.locateNodes` rejects the `innerText` locator type as unsupported), unlike Chrome, which has it via `DOM.performSearch`.
 - **No `--browser firefox` attach mode.** By design, per the launch model above: every invocation gets its own throwaway Firefox process and profile.
 
-## The tools (29 parity + 4 superset = 33)
+## The tools (29 parity + 7 superset = 36)
 
-The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`performance_trace` + the `mock_request`/`list_mocks`/`clear_mocks` group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
+The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`performance_trace`, the `mock_request`/`list_mocks`/`clear_mocks` group, and the `claim_page`/`release_page`/`list_leases` lease group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
 
 | MCP name | CDP method(s) | Parity notes / gaps |
 |---|---|---|
 | `list_pages` | `GET /json/list` | `all` flag also exposes worker/background targets; MCP lists only page tabs. |
-| `new_page` | `Target.createTarget` | Returns `{targetId,url}`; does not await navigation (use `navigate_page`). |
-| `close_page` | `Target.closeTarget` | Reports `success:true` on the empty result newer Chromium returns. |
+| `new_page` | `Target.createTarget` (+ lease file) | Returns `{targetId,url}`; does not await navigation (use `navigate_page`). `claim:true` also claims the new tab and returns a `lease` token (`label`/`ttlMs` optional). |
+| `close_page` | `Target.closeTarget` (+ lease file) | Reports `success:true` on the empty result newer Chromium returns. A successful close also releases that tab's lease; a failed close leaves it in place. |
 | `select_page` | `Target.activateTarget` + selected-state file | Writes a flat-file selected target; `resolveTarget` does not read it, so `active` still means `index:0` unless a tool opts in. |
 | `navigate_page` | `Page.navigate` / `Page.reload` + load events | Returns `{url,frameId,waitedFor}` (no auto-snapshot). `waitUntil` supports `load`/`domcontentloaded`. `reload:true` (+ `ignoreCache:true` for a hard reload). |
 | `wait_for` | `Runtime.evaluate` (poll `innerText`) | Text-substring waiting only; throws on timeout rather than returning `{found:false}`. |
@@ -256,6 +257,38 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 | `mock_request` *(superset)* | `Fetch.*` (+ `Page.reload`) | **A fake backend.** Registers a rule on a target's persistent session: fulfill with a canned response, fail, or continue (with optional `delayMs`/`failRate`). Persists across reloads until `clear_mocks`. Request-stage only. Cached requests aren't intercepted (use `reload:true`). |
 | `list_mocks` *(superset)* | `Runtime.evaluate` (liveness probe) | Lists active mock sessions with rules + hit counts; prunes sessions whose tab closed. |
 | `clear_mocks` *(superset)* | `Fetch.disable` | Tears down the resolved target's mock session (or all with `all:true`). |
+| `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens or claims a tab and returns an opaque lease token. MCP only; the CLI refuses it. |
+| `release_page` *(superset)* | lease file | Gives a lease back. Idempotent, and does not close the tab. |
+| `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability. Needs no token; never returns the nonce. |
+
+## Parallel tabs: many agents, one browser
+
+Two agents pointed at the same Chrome both resolve `target: active` to whatever tab the human last focused. Nothing errors. Each one gets plausible, well-formed output from the wrong page: a snapshot of someone else's form, a fill that lands in someone else's field. A crash gets caught; a silent wrong-tab success does not.
+
+`claim_page` fixes that by handing you an opaque lease token for one tab:
+
+```json
+{"tool": "claim_page", "arguments": {"url": "https://example.com", "label": "checkout-agent"}}
+```
+
+```json
+{"lease": "chrome:1A2B...:0f3c...", "targetId": "1A2B...", "url": "https://example.com", "label": "checkout-agent", "ttlMs": 900000, "expiresAt": 1754400000000}
+```
+
+Pass that token as `lease` on every later call against the tab. `new_page` with `claim: true` does the open-and-claim in one call. `release_page` gives it back, `list_leases` shows who holds what.
+
+**Opt in, and only ever a refusal.** A tab nobody claimed behaves exactly as it did before. Omitting `lease` is identical to pre-1.2 behavior in every respect: no default changed, no return shape changed, no previously legal call now needs a new argument. This is why it is 1.2 and not 2.0.
+
+**The one flow that can newly fail.** If tab index 0 is leased and a call arrives with `target: active` (or no target at all) and no `lease`, it is refused, naming the tab, its url, and the label of whoever holds it. Before 1.2 that call silently succeeded against whatever tab happened to be first. That single change is the point of the feature, and it is called out here rather than left to be discovered.
+
+**Reclamation.** A lease is reclaimable when its owning process is gone, when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`), or when its tab is no longer open. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns.
+
+**What this does not do.**
+
+- No fan-out. The shape is many agents with one tab each. One agent driving several tabs at once is a different feature and is not addressed.
+- No isolation. Two leased tabs on one Chrome still share cookies, `localStorage`, and every other origin-scoped store. A lease is ownership of a tab, not isolation of the browser under it.
+- No protection from humans. The lease is enforced against cdp-toolkit's own tool calls. It cannot stop someone clicking into the tab.
+- Not for the CLI. A CLI invocation is one process per call, so a lease it claimed would be reclaimable immediately by the dead-pid rule. `claim_page` is refused there. CLI calls can still present a token minted by the MCP server with `--lease`.
 
 ## How it's built
 
@@ -263,10 +296,12 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 src/
   client.ts          # CdpConnection, openPage/withPage/openBrowser, resolveTarget, timeouts
   types.ts           # Target, TargetSelector, Uid, CDP envelopes
-  index.ts           # TOOLS registry (33) + re-exported client primitives
+  index.ts           # TOOLS registry (36) + re-exported client primitives
   cli.ts             # the Bun CLI
   mcp.ts             # stdio MCP server (exposes TOOLS via @modelcontextprotocol/sdk)
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)
+  leases.ts          # lease records, staleness, reclamation, assertLeaseOk
+  leases-tools.ts    # claim_page / release_page / list_leases
   tools/
     pages.ts navigation.ts evaluate.ts snapshot.ts input.ts
     screenshot.ts emulation.ts dialogs.ts recorder.ts console.ts

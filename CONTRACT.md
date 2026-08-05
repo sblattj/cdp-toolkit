@@ -12,6 +12,7 @@ writing a module.
 3. **TypeScript strict.** `tsc --noEmit` must pass with `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`. Import types with `import type`. Use `.ts` extensions in imports (e.g. `import { withPage } from "../client.ts"`).
 4. **One module per assigned bundle.** Write only the files you are assigned. Never edit `client.ts`, `types.ts`, or another agent's file.
 5. **Tool fn naming = camelCase of the MCP tool name.** `take_snapshot` → `export async function takeSnapshot(...)`. `list_network_requests` → `listNetworkRequests`. The integration step maps mechanically, so the names must be exact.
+6. **Never re-resolve a target outside a choke point.** There are exactly three functions that turn a `TargetSelector` into a concrete tab, and all three call `assertLeaseOk`: `resolveTarget` (`src/client.ts`, Chrome), `resolveContext` (`src/bidi/driver.ts`, Firefox), and `resolvePage` (`src/shared-tools.ts`, used by `close_page` and `select_page`). A new tool must go through one of them. If you add a fourth resolution path, it must call `assertLeaseOk` too, or every tool on that path silently loses lease protection. Do NOT add a lease check to an individual tool: that puts the burden on every future contributor to remember it, and one forgotten tool defeats the feature for that tool. A lease conflict throws `LeaseConflictError` rather than being modelled as a capability gap under ADR-001. That departure is deliberate and reviewed: a runtime ownership collision between two agents is not a missing backend capability, so it cannot be discovered at `tools/list` time and must surface at call time.
 
 ## Core client API (from `src/client.ts`)
 
@@ -60,6 +61,7 @@ export async function click(args: ClickArgs): Promise<unknown>;
 - Artifacts (PNG, trace, heapsnapshot, lighthouse report): write under `ARTIFACT_DIR` = `process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit"`. `mkdir -p` it. Filenames: `<tool>-<targetIdShort>-<isoish>.<ext>` where you derive a stamp from `Date.now()` at call time (allowed in normal runtime; only the Workflow *script* sandbox forbids it, modules run normally).
 - Selected-target state file (for `select_page`): `process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit"` + `/selected`. Contains a bare targetId. `resolveTarget` does NOT read it; tools may read it as a fallback default if you choose, but the simplest correct behavior is fine.
 - Recorder buffers: `${ARTIFACT_DIR}/rec-<targetId>.jsonl`.
+- Lease files: `${ARTIFACT_DIR}/lease-<backend>-<targetId>.json`, one per leased tab, backend is `chrome` or `firefox`. Written with the `wx` exclusive-create flag so two simultaneous claims cannot both win. Keyed by backend plus id because a CDP targetId and a BiDi context id are not disjoint by construction.
 
 ## The element-reference scheme (READ if you touch snapshot or input)
 

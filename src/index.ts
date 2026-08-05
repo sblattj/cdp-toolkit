@@ -57,7 +57,7 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * (`performance_trace`, a robust single-call trace : the start/stop pair cannot
  * span two stateless CLI processes), plus a 3-tool network-mocking group
  * (mock_request/list_mocks/clear_mocks : a persistent per-target fake backend).
- * 33 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * 36 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
