@@ -183,6 +183,40 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
 
+## Firefox (WebDriver BiDi)
+
+cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 33-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
+
+```bash
+cdp --browser firefox take_snapshot                 # CLI: explicit flag
+CDP_BROWSER=firefox cdp take_snapshot                # CLI: env var (same precedence, lower priority)
+cdp --capabilities --browser firefox                 # see what's available and why the rest isn't
+```
+
+Backend selection precedence: `--browser chrome|firefox` flag, then `CDP_BROWSER`, then `chrome`. For the MCP server, set `CDP_BROWSER=firefox` (or pass `--browser firefox` in its launch args) in your MCP client config; the backend is fixed for the life of that server process.
+
+**Firefox is launched, never attached to.** Unlike Chrome, there is no way to add a debug port to an already-running Firefox: the flag only takes effect on the process's original launch, so relaunching the binary against a running instance hands off and exits silently, opening no port (verified against Firefox 153.0.3). `--browser firefox` therefore always starts a fresh Firefox process with a throwaway profile:
+
+- **CLI** (one process per invocation): each command launches Firefox, runs exactly one tool call, and disposes the session and kills the process before exiting, win or lose. State does not carry between separate CLI invocations: there is no running Firefox left afterward for a second command to find.
+- **MCP server** (long-lived): the first Firefox tool call launches one Firefox process and memoizes its BiDi session for the life of the server; every later Firefox call reuses it. The session is torn down on `SIGINT`/`SIGTERM`/stdin close. Multi-step Firefox workflows (navigate, then snapshot, then click) need the MCP server, not the CLI, for exactly this reason.
+
+**Tool availability is filtered per backend**, not per call: `tools/list` (MCP) and `--list`/`--capabilities` (CLI) only ever advertise a tool the selected browser can actually run. A tool is never listed and then thrown from at call time. Under Firefox, four tool groups are absent because Firefox 153's BiDi implementation has no equivalent domain:
+
+- `performance_start_trace`, `performance_stop_trace`, `performance_analyze_insight`, `performance_trace` (needs `trace.performance`)
+- `take_heapsnapshot` (needs `heap.snapshot`)
+- `lighthouse_audit` (needs `audit.lighthouse`)
+
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), is available under both backends.
+
+**Honest capability gaps, not oversold parity:**
+
+- **No accessibility tree.** `take_snapshot` under Chrome reads a native a11y tree (`Accessibility.getFullAXTree`). Firefox 153's BiDi has no equivalent domain, so the Firefox snapshot is a DOM-heuristic walk that infers roles from tag/attribute conventions. It is good enough to find and click things; it is not a substitute for a real accessibility audit.
+- **No atomic text insert.** Chrome's `fill`/`type_text` commit a value in one `Input.insertText` call. BiDi has no equivalent primitive, so Firefox always synthesizes real per-character keystrokes via `input.performActions` (one `<select>` exception: an exact-match value/index assignment, since typeahead-by-first-letter cannot reliably commit an arbitrary option).
+- **Thin emulation.** Only viewport size/DPR and `userAgent` are applied. CPU throttling, media-feature emulation (e.g. `prefers-color-scheme`), and network-condition throttling are not available: Firefox 153 does not implement the underlying BiDi commands.
+- **No tracing, heap snapshots, or Lighthouse.** See the capability list above; there is no BiDi equivalent for any of the three.
+- **`locate.text` is not available** (Firefox 153's `browsingContext.locateNodes` rejects the `innerText` locator type as unsupported), unlike Chrome, which has it via `DOM.performSearch`.
+- **No `--browser firefox` attach mode.** By design, per the launch model above: every invocation gets its own throwaway Firefox process and profile.
+
 ## The tools (29 parity + 4 superset = 33)
 
 The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`performance_trace` + the `mock_request`/`list_mocks`/`clear_mocks` group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
