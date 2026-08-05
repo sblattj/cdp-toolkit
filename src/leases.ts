@@ -15,6 +15,15 @@
  * WHY THE TOKEN EMBEDS A NONCE. Reclaiming a stale lease mints a fresh nonce,
  * so the superseded token stops matching by construction rather than by a check
  * someone could forget to write. See assertLeaseOk.
+ *
+ * THE ONE WRITE THAT COULD BREAK THAT GUARANTEE is touchLease, because it is
+ * the only write here that is not an exclusive create. Everything else either
+ * creates with "wx" or unlinks, so a record can never be modified in place and
+ * a nonce can never survive a reclamation. touchLease has to rewrite an
+ * existing file, so it re-reads and re-checks the nonce immediately before
+ * writing and writes only what it just read. Anyone adding a second
+ * non-exclusive write to this module owes the same guard, or the whole feature
+ * loses the property it rests on.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
@@ -243,10 +252,35 @@ export function leaseFromArgs(args: unknown): LeaseToken | undefined {
   return typeof lease === "string" && lease.length > 0 ? lease : undefined;
 }
 
-/** Refresh lastUsedAt. Every checked call already touches this file, so keeping
- *  an active lease alive needs no separate heartbeat. */
+/**
+ * Refresh lastUsedAt. Every checked call already touches this file, so keeping
+ * an active lease alive needs no separate heartbeat.
+ *
+ * THIS IS THE ONE WRITE IN THIS MODULE THAT IS NOT AN EXCLUSIVE CREATE, so it
+ * is the one write that could violate the nonce guarantee. `rec` was read some
+ * time ago by the caller; between that read and this write another process can
+ * reclaim the tab, which unlinks the file and creates a new one with a fresh
+ * nonce. A blind `writeFile` of `rec` would then clobber the new owner's record
+ * with the old nonce: the new owner's token would start failing and the
+ * superseded one would start passing. That is the two-owner failure inverted.
+ *
+ * So this re-reads and compares the nonce immediately before writing, and
+ * writes the record it just read rather than the caller's older copy. A lease
+ * that was reclaimed or released underneath us is left alone.
+ *
+ * Errors are swallowed DELIBERATELY: this is a heartbeat, and a tool call that
+ * did real work must not fail because a lastUsedAt refresh could not be
+ * persisted. The cost of that choice is real and worth stating plainly: an
+ * EACCES or ENOSPC here means the holder's lease quietly stops being refreshed
+ * and expires under it after ttlMs, with no signal anywhere. If lease
+ * expiry-under-load ever gets reported, this silence is the first place to look.
+ */
 export async function touchLease(rec: LeaseRecord, now: number = Date.now()): Promise<void> {
-  await writeFile(leaseFile(rec.backend, rec.targetId), JSON.stringify({ ...rec, lastUsedAt: now }), "utf8").catch(() => undefined);
+  const current = await readLease(rec.backend, rec.targetId);
+  if (!current || current.nonce !== rec.nonce) return; // reclaimed or released: not ours to write
+  await writeFile(leaseFile(current.backend, current.targetId), JSON.stringify({ ...current, lastUsedAt: now }), "utf8").catch(
+    () => undefined,
+  );
 }
 
 export interface LeaseCheckContext {
@@ -304,17 +338,31 @@ export async function assertLeaseOk(
       targetId,
     );
   }
-  if (!held) {
-    throw new LeaseConflictError(
-      `${where} is not leased any more: the token you passed belongs to a lease that was released or reclaimed. Call claim_page again to take the tab.`,
-      targetId,
-    );
-  }
+  // The "is this token even about this tab" question comes FIRST, before the
+  // "is this tab leased" question. Order matters: holding a token for TAB-A
+  // must not change what happens when you touch an unrelated TAB-C. If the
+  // mismatch check ran second, a token for another tab would fall into the
+  // !held branch below and refuse every unleased tab with a message about a
+  // lease that was "released or reclaimed", which is both wrong and confusing.
+  // Under the ambient dispatch scope that is the COMMON case, not an edge one:
+  // any agent holding one tab that touches a second unleased tab in the same
+  // call arrives here, select_page via activatePage included.
   if (parts.backend !== backend || parts.targetId !== targetId) {
+    // The token is about a different tab, so it says nothing about this one.
+    // An unleased tab is open to everyone, token in hand or not.
+    if (!held) return;
     throw new LeaseConflictError(
       `the lease token you passed is for ${parts.backend} target '${parts.targetId}', not ${where}, which is leased by '${held.label}'. Resolve the tab you actually hold, or claim this one.`,
       targetId,
       held.label,
+    );
+  }
+  // From here the token names THIS tab, so the caller believes it holds this
+  // tab. Being wrong about that is an error, never a pass-through.
+  if (!held) {
+    throw new LeaseConflictError(
+      `${where} is not leased any more: the token you passed belongs to a lease that was released or reclaimed. Call claim_page again to take the tab.`,
+      targetId,
     );
   }
   // The nonce match is what makes reclamation safe. Without it a stalled agent
