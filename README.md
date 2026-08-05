@@ -281,7 +281,7 @@ Pass that token as `lease` on every later call against the tab. `new_page` with 
 
 **The one flow that can newly fail.** If tab index 0 is leased and a call arrives with `target: active` (or no target at all) and no `lease`, it is refused, naming the tab, its url, and the label of whoever holds it. Before 1.2 that call silently succeeded against whatever tab happened to be first. That single change is the point of the feature, and it is called out here rather than left to be discovered.
 
-**Reclamation.** A lease is reclaimable when its owning process is gone, when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`), or when its tab is no longer open. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns.
+**Reclamation.** A lease is reclaimable when its owning process is gone, or when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`). Those two are the whole list. A lease whose tab is no longer open is *reported* by `list_leases` as `target-gone`, which is useful to see, but that report is not what frees it: such a record is freed by the same two rules as any other, whichever lands first. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns.
 
 **What this does not do.**
 
