@@ -10,28 +10,26 @@ name: publish
 #      For a brand-new package name you typically do the FIRST `npm publish`
 #      manually (npm login + npm publish), then wire trusted publishing for
 #      subsequent releases.
-#   3. npm OIDC trusted publishing requires npm 11.5.1 or newer. The Node 22
-#      setup below ships npm 10.x, so the job upgrades npm explicitly before
-#      publishing. On an older npm the CLI never performs the OIDC token
-#      exchange, and the publish fails with a confusing E404 instead of a
-#      permission error, because provenance signing to Sigstore still
-#      succeeds (it is a separate OIDC path) right up until the actual
-#      registry PUT.
-#   4. The `actions/setup-node` step below MUST be given
-#      `registry-url: "https://registry.npmjs.org"`. We tried removing it on
-#      the theory that it was the cause of an E404 (see below), and that made
-#      things strictly worse: without it npm never attempts any auth at all
-#      and fails immediately with ENEEDAUTH ("You need to authorize this
-#      machine using `npm login`"). So registry-url stays; it is required,
-#      not the problem.
-#   5. Trusted Publisher entries created on npmjs.com after 2026-05-20 also
-#      have an "Allowed actions" selector (`npm publish`, `npm stage publish`,
-#      or both) that must explicitly include `npm publish`. Provenance
-#      attestation can succeed even when this is misconfigured, since it is a
-#      separate OIDC path from the registry PUT — so a run that signs
-#      provenance to Sigstore and then 404s on the actual publish PUT is
-#      consistent with "npm publish" not being in the allowed actions on the
-#      npmjs.com side, not with a workflow-file problem.
+#   3. npm OIDC trusted publishing requires npm 11.5.1 or newer AND Node
+#      22.14.0 or newer, per npm's docs (docs.npmjs.com/trusted-publishers).
+#      The setup-node step below pins Node 22.x, which satisfies the Node
+#      requirement; the job upgrades npm explicitly afterward to satisfy the
+#      npm one, then echoes `npm --version` so the log proves which version
+#      actually ran.
+#   4. `actions/setup-node` below must keep
+#      `registry-url: "https://registry.npmjs.org"`. This matches npm's own
+#      documented example for GitHub Actions trusted publishing. We tried
+#      removing it once on a theory that it was interfering with OIDC; that
+#      was wrong and made things worse — without it npm attempts no auth at
+#      all and fails immediately with ENEEDAUTH ("You need to authorize this
+#      machine using `npm login`"). Keep it.
+#   5. Trusted Publisher entries on npmjs.com also have an "Allowed actions"
+#      selector (`npm publish`, `npm stage publish`, or both; entries created
+#      after 2026-05-20 require an explicit choice). If a publish signs
+#      provenance to Sigstore successfully and then still 404s on the actual
+#      registry PUT, check that selector first — it is unconfirmed as OUR
+#      cause, but it is the one documented setting that would produce exactly
+#      that split (provenance is a separate OIDC path from the publish PUT).
 #   6. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
 #      push a matching tag:  git tag v1.0.1 && git push origin v1.0.1
 #
