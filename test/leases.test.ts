@@ -11,9 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TOOL_NAMES } from "../src/index.ts";
 import { MANIFEST } from "../src/manifest.ts";
+import type { BrowserDriver, PageInfo } from "../src/driver.ts";
+import { closePage, newPage, selectPage } from "../src/shared-tools.ts";
 import {
   assertLeaseOk,
   claimLease,
+  LeaseConflictError,
+  releaseLeaseFor,
   currentLease,
   leaseFromArgs,
   isPidAlive,
@@ -460,5 +464,182 @@ describe("registry and manifest wiring", () => {
       const required = spec.inputSchema.required ?? [];
       expect(required.includes("lease"), spec.name).toBe(spec.name === "release_page");
     }
+  });
+});
+
+describe("close_page clears the lease (spec section 6)", () => {
+  test("releaseLeaseFor drops a lease without needing its token", async () => {
+    await claimLease("chrome", "CLOSING", { label: "agent-one" });
+    expect(await releaseLeaseFor("chrome", "CLOSING")).toEqual({ released: true });
+    expect(await readLease("chrome", "CLOSING")).toBeUndefined();
+  });
+
+  test("releaseLeaseFor on an unleased tab is not an error", async () => {
+    expect(await releaseLeaseFor("chrome", "NEVER-LEASED")).toEqual({ released: false });
+  });
+
+  test("a tab closed out of band is reclaimable via the live-id list", async () => {
+    await claimLease("chrome", "CLOSED-BY-HUMAN", { label: "agent-one", now: 1_000 });
+    // The tab is gone from the browser but the file survives: the third
+    // staleness condition, not the TTL, is what frees it.
+    const retaken = await claimLease("chrome", "CLOSED-BY-HUMAN", { label: "agent-two", now: 1_100, liveIds: [] });
+    expect(retaken.record.label).toBe("agent-two");
+  });
+});
+
+/* ------------------------- the tab lifecycle, end to end ------------------------- */
+
+/**
+ * Minimal BrowserDriver stand-in: only the five members the three tools under
+ * test touch. `hidden` models targets that appear ONLY in the `all:true`
+ * listing (a worker, an iframe), which is the one resolvePage branch whose hit
+ * is not a member of the page list.
+ */
+function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[] } = {}) {
+  const pages: PageInfo[] = [...(opts.pages ?? [])];
+  const hidden: PageInfo[] = [...(opts.hidden ?? [])];
+  const closed: string[] = [];
+  const activated: string[] = [];
+  let created = 0;
+  const driver = {
+    scheme: opts.scheme ?? "cdp",
+    async listPages(o?: { all?: boolean }): Promise<PageInfo[]> {
+      return o?.all ? [...pages, ...hidden] : [...pages];
+    },
+    async newPage(url?: string): Promise<PageInfo> {
+      const p: PageInfo = { id: `NEW-${++created}`, url: url ?? "about:blank", title: "", type: "page" };
+      pages.push(p);
+      return p;
+    },
+    async closePage(id: string): Promise<{ success: boolean }> {
+      closed.push(id);
+      const i = pages.findIndex((p) => p.id === id);
+      if (i >= 0) pages.splice(i, 1);
+      return { success: true };
+    },
+    async activatePage(id: string): Promise<PageInfo> {
+      activated.push(id);
+      return [...pages, ...hidden].find((p) => p.id === id) ?? { id, url: "", title: "" };
+    },
+  };
+  return { driver: driver as unknown as BrowserDriver, closed, activated, pages };
+}
+
+const page = (id: string, url = `https://example.test/${id}`): PageInfo => ({ id, url, title: id, type: "page" });
+
+describe("new_page claims the tab it opens", () => {
+  test("claim:true returns a token that is a real, readable lease on the new tab", async () => {
+    const { driver } = stubDriver();
+    const res = await newPage(driver, { claim: true, label: "agent-one" });
+    expect(res.lease).toBeDefined();
+    expect(tokenParts(res.lease!)).toMatchObject({ backend: "chrome", targetId: res.targetId });
+    const rec = await readLease("chrome", res.targetId);
+    expect(rec?.label).toBe("agent-one");
+    expect(tokenParts(res.lease!)?.nonce).toBe(rec!.nonce);
+    expect(res.label).toBe("agent-one");
+    expect(res.expiresAt).toBe(rec!.lastUsedAt + rec!.ttlMs);
+  });
+
+  test("the claimed tab is then closed to everyone else", async () => {
+    const { driver, closed } = stubDriver();
+    const res = await newPage(driver, { claim: true, label: "agent-one" });
+    await expect(closePage(driver, { target: res.targetId })).rejects.toThrow(LeaseConflictError);
+    expect(closed).toEqual([]);
+  });
+
+  test("no claim means no lease and the pre-1.2 return shape, byte for byte", async () => {
+    const { driver } = stubDriver();
+    const res = await newPage(driver, { url: "https://example.test/x" });
+    expect(res).toEqual({ targetId: "NEW-1", url: "https://example.test/x" });
+    expect(await readLease("chrome", "NEW-1")).toBeUndefined();
+  });
+
+  test("claim:true with no label records pid-<pid>", async () => {
+    const { driver } = stubDriver();
+    const res = await newPage(driver, { claim: true });
+    expect((await readLease("chrome", res.targetId))?.label).toBe(`pid-${process.pid}`);
+  });
+
+  test("ttlMs is honoured on the claim", async () => {
+    const { driver } = stubDriver();
+    const res = await newPage(driver, { claim: true, ttlMs: 5_000 });
+    expect((await readLease("chrome", res.targetId))?.ttlMs).toBe(5_000);
+  });
+
+  test("a bidi driver claims under the firefox backend, not chrome", async () => {
+    const { driver } = stubDriver({ scheme: "bidi" });
+    const res = await newPage(driver, { claim: true, label: "ffx" });
+    expect(await readLease("firefox", res.targetId)).toBeDefined();
+    expect(await readLease("chrome", res.targetId)).toBeUndefined();
+    expect(tokenParts(res.lease!)?.backend).toBe("firefox");
+  });
+});
+
+describe("close_page and select_page are the third choke point", () => {
+  test("close_page frees the lease of the tab it closed", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A")] });
+    const { token } = await claimLease("chrome", "A", { label: "agent-one" });
+    const res = await withLeaseScope(token, () => closePage(driver, { target: "A" }));
+    expect(res).toEqual({ closed: "A", success: true, leaseReleased: true });
+    expect(closed).toEqual(["A"]);
+    expect(await readLease("chrome", "A")).toBeUndefined();
+  });
+
+  test("closing an unleased tab reports no release and is otherwise unchanged", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A")] });
+    const res = await closePage(driver, { target: "A" });
+    expect(res).toEqual({ closed: "A", success: true });
+    expect(closed).toEqual(["A"]);
+  });
+
+  test("an unleased caller cannot close a tab another agent holds, and the lease survives", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A")] });
+    await claimLease("chrome", "A", { label: "agent-one" });
+    await expect(closePage(driver, { target: "A" })).rejects.toThrow(/leased by 'agent-one'/);
+    expect(closed).toEqual([]);
+    expect(await readLease("chrome", "A")).toBeDefined();
+  });
+
+  test("holding tab A's token does not license closing tab B", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A"), page("B")] });
+    const { token } = await claimLease("chrome", "A", { label: "agent-one" });
+    await claimLease("chrome", "B", { label: "agent-two" });
+    await expect(withLeaseScope(token, () => closePage(driver, { target: "B" }))).rejects.toThrow(LeaseConflictError);
+    expect(closed).toEqual([]);
+    expect(await readLease("chrome", "B")).toBeDefined();
+  });
+
+  test("every selector form reaches the gate, not just a bare id", async () => {
+    const { driver } = stubDriver({ pages: [page("A", "https://example.test/only")] });
+    await claimLease("chrome", "A", { label: "agent-one" });
+    for (const target of ["A", "active", "index:0", "url:only", "title:A"]) {
+      await expect(closePage(driver, { target })).rejects.toThrow(LeaseConflictError);
+    }
+  });
+
+  test("a leased NON-page target resolved off the all:true listing is protected too", async () => {
+    // The one resolvePage branch whose hit is absent from the page list. Passing
+    // the page ids as liveIds here would classify this healthy lease as
+    // target-gone and let the call through.
+    const { driver, closed } = stubDriver({ pages: [page("A")], hidden: [{ id: "WORKER-1", url: "about:blank", title: "w", type: "worker" }] });
+    await claimLease("chrome", "WORKER-1", { label: "agent-one" });
+    await expect(closePage(driver, { target: "WORKER-1" })).rejects.toThrow(LeaseConflictError);
+    expect(closed).toEqual([]);
+  });
+
+  test("a stale lease never blocks a close, and closing clears the file", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A")] });
+    await claimLease("chrome", "A", { label: "ghost", ttlMs: 1, now: 1_000 });
+    const res = await closePage(driver, { target: "A" });
+    expect(closed).toEqual(["A"]);
+    expect(res.leaseReleased).toBe(true);
+    expect(await readLease("chrome", "A")).toBeUndefined();
+  });
+
+  test("select_page refuses a tab another agent holds and never activates it", async () => {
+    const { driver, activated } = stubDriver({ pages: [page("A")] });
+    await claimLease("chrome", "A", { label: "agent-one" });
+    await expect(selectPage(driver, { target: "A" })).rejects.toThrow(LeaseConflictError);
+    expect(activated).toEqual([]);
   });
 });

@@ -38,6 +38,7 @@ import type {
   BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
+import { assertLeaseOk, claimLease, leaseTtlMs, releaseLeaseFor, type LeaseBackend, type LeaseToken } from "./leases.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
@@ -47,6 +48,12 @@ class SharedToolError extends Error {}
 /** Trim a PageInfo down to the legacy 3-field {id,url,title} target shape used everywhere except list_pages. */
 function target3(p: PageInfo): { id: string; url: string; title: string } {
   return { id: p.id, url: p.url, title: p.title };
+}
+
+/** Same discriminator leases-tools.ts uses: the driver's own uid scheme tag
+ *  ("cdp" for Chrome, "bidi" for Firefox). */
+function backendOf(driver: BrowserDriver): LeaseBackend {
+  return driver.scheme === "bidi" ? "firefox" : "chrome";
 }
 
 /* -------------------------------- page acquisition -------------------------------- */
@@ -61,14 +68,31 @@ async function withPage<T>(driver: BrowserDriver, target: TargetSelector | undef
   }
 }
 
+async function resolvePage(driver: BrowserDriver, selector?: TargetSelector): Promise<PageInfo> {
+  const pages = await driver.listPages();
+  const hit = await pickPage(driver, pages, selector);
+  // THE third choke point. close_page and select_page resolve here and nowhere
+  // else, so the lease check has to be here too, not only in resolveTarget /
+  // resolveContext. Closing someone else's leased tab is the worst version of
+  // the collision this feature exists to stop.
+  //
+  // Deliberately NOT passing liveIds, matching resolveTarget and resolveContext.
+  // For every branch but one it would be inert (hit is an element of `pages`),
+  // and for the bare-id branch it would be actively wrong: that branch can
+  // return a non-page target off the `all:true` listing, whose id is absent
+  // from `pages`, so passing pages' ids would report a perfectly healthy lease
+  // as target-gone and wave the caller straight through it.
+  await assertLeaseOk(backendOf(driver), hit.id, { url: hit.url, title: hit.title });
+  return hit;
+}
+
 /**
  * Same TargetSelector grammar as client.ts's resolveTarget. Matches its one asymmetry exactly:
  * every branch resolves against page-type targets only EXCEPT a bare-id lookup, which (like
  * legacy resolveTarget's `targets.find`) searches the FULL unfiltered listing, so passing an
  * exact non-page targetId (a worker, an iframe) still resolves.
  */
-async function resolvePage(driver: BrowserDriver, selector?: TargetSelector): Promise<PageInfo> {
-  const pages = await driver.listPages();
+async function pickPage(driver: BrowserDriver, pages: PageInfo[], selector?: TargetSelector): Promise<PageInfo> {
   if (selector === undefined || selector === "active") {
     if (!pages.length) throw new SharedToolError("no page targets open");
     return pages[0]!;
@@ -114,16 +138,33 @@ export async function listPages(driver: BrowserDriver, args: { all?: boolean } =
   return { pages, count: pages.length };
 }
 
-export async function newPage(driver: BrowserDriver, args: { url?: string } = {}): Promise<{ targetId: string; url: string }> {
+export async function newPage(
+  driver: BrowserDriver,
+  args: { url?: string; claim?: boolean; label?: string; ttlMs?: number } = {},
+): Promise<{ targetId: string; url: string; lease?: LeaseToken; label?: string; expiresAt?: number }> {
   const p = await driver.newPage(args.url);
-  return { targetId: p.id, url: p.url };
+  if (args.claim !== true) return { targetId: p.id, url: p.url };
+  // Atomic in the sense that matters: the tab is claimed before this call
+  // returns, so no other agent can see it unclaimed and take it first.
+  const { record, token } = await claimLease(backendOf(driver), p.id, {
+    label: typeof args.label === "string" && args.label.length ? args.label : `pid-${process.pid}`,
+    ttlMs: typeof args.ttlMs === "number" && args.ttlMs > 0 ? args.ttlMs : leaseTtlMs(),
+  });
+  return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
 }
 
-export async function closePage(driver: BrowserDriver, args: { target?: TargetSelector }): Promise<{ closed: string; success: boolean }> {
+export async function closePage(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector },
+): Promise<{ closed: string; success: boolean; leaseReleased?: boolean }> {
   if (args.target === undefined || args.target === "") throw new SharedToolError("close_page requires an explicit target; refusing to guess which page to close");
   const p = await resolvePage(driver, args.target);
   const res = await driver.closePage(p.id);
-  return { closed: p.id, success: res.success };
+  // Closing a leased tab must not leave its lease file behind waiting on the
+  // TTL. resolvePage above already refused this call unless the caller holds
+  // the lease, so no token is needed here.
+  const released = await releaseLeaseFor(backendOf(driver), p.id);
+  return { closed: p.id, success: res.success, ...(released.released ? { leaseReleased: true } : {}) };
 }
 
 async function writeSelectedFile(id: string): Promise<void> {
