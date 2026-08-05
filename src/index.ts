@@ -19,6 +19,7 @@
 // the byte-identical-Chrome-behavior contract this bind honors, and for the 7 tools that stay
 // two implementations (console/network/mock, immediately below, unchanged from before).
 import { createCdpDriver } from "./cdp/driver.ts";
+import { LEASE_TOOLS } from "./leases-tools.ts";
 import { SHARED_TOOLS } from "./shared-tools.ts";
 // --- console + network (read the recorder buffer) ---
 import { listConsoleMessages, getConsoleMessage } from "./tools/console.ts";
@@ -110,6 +111,10 @@ export const TOOLS = {
   mock_request: mockRequest,
   list_mocks: listMocks,
   clear_mocks: clearMocks,
+  // tab leases (3) : opt-in ownership so many agents can share one browser
+  claim_page: onCdp(LEASE_TOOLS.claim_page),
+  release_page: onCdp(LEASE_TOOLS.release_page),
+  list_leases: onCdp(LEASE_TOOLS.list_leases),
 } satisfies Record<string, (args: never) => Promise<unknown>>;
 
 /** Canonical MCP tool name accepted by the registry. */
