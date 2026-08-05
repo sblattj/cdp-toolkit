@@ -21,6 +21,7 @@ import { MANIFEST } from "./manifest.ts";
 import { resolveBrowserKind, stripBrowserFlag, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
+import { leaseFromArgs, withLeaseScope } from "./leases.ts";
 
 const VERSION = "1.1.0";
 
@@ -65,30 +66,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
-  if (BROWSER === "chrome") {
-    const fn = dispatch[name];
-    if (!fn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
+  // ONE lease scope per dispatch, wrapping BOTH backend branches. This is the
+  // reason no tool takes a lease parameter: the token rides the async context
+  // down to whichever resolution path the tool eventually reaches, so a tool
+  // added tomorrow is covered with no action from whoever writes it. Reading
+  // 'lease' off args here is the only place the MCP layer knows the key exists.
+  return withLeaseScope(leaseFromArgs(args), async () => {
+    if (BROWSER === "chrome") {
+      const fn = dispatch[name];
+      if (!fn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
+      try {
+        const result = await fn(args);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+      }
+    }
+
+    // Firefox: one BiDi session memoized for the life of this server process (lifetime "session",
+    // ADR-001); launched lazily on the first Firefox tool call, torn down on shutdown below.
+    const neutralFn = neutralDispatch[name];
+    if (!neutralFn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
     try {
-      const result = await fn(args);
+      const session = await getOrCreateFirefoxSession();
+      const result = await neutralFn(session.driver, args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
     }
-  }
-
-  // Firefox: one BiDi session memoized for the life of this server process (lifetime "session",
-  // ADR-001); launched lazily on the first Firefox tool call, torn down on shutdown below.
-  const neutralFn = neutralDispatch[name];
-  if (!neutralFn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
-  try {
-    const session = await getOrCreateFirefoxSession();
-    const result = await neutralFn(session.driver, args);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
-  }
+  });
 });
 
 auditCoverage();

@@ -232,6 +232,17 @@ export function currentLease(): LeaseToken | undefined {
   return leaseScope.getStore();
 }
 
+/** Pull the token off a tool's loosely-typed args object at the dispatch site.
+ *  Kept here rather than duplicated in mcp.ts and cli.ts so the two entry points
+ *  can never disagree about what counts as a token. An empty string is treated
+ *  as absent: a caller that sends lease:"" means "no lease", and letting it
+ *  through would trip the malformed-token branch with a confusing message. */
+export function leaseFromArgs(args: unknown): LeaseToken | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const lease = (args as { lease?: unknown }).lease;
+  return typeof lease === "string" && lease.length > 0 ? lease : undefined;
+}
+
 /** Refresh lastUsedAt. Every checked call already touches this file, so keeping
  *  an active lease alive needs no separate heartbeat. */
 export async function touchLease(rec: LeaseRecord, now: number = Date.now()): Promise<void> {

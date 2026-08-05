@@ -26,6 +26,7 @@ import { TOOLS, TOOL_NAMES, type ToolName } from "./index.ts";
 import { resolveBrowserKind, stripBrowserFlag, startFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
+import { leaseFromArgs, withLeaseScope } from "./leases.ts";
 
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
@@ -168,30 +169,36 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  if (browser === "chrome") {
-    const fn = TOOLS[parsed.tool];
-    // The registry's value type is the union of all tool signatures; each tool
-    // validates its own args at runtime, so we hand the parsed object through.
-    const result = await (fn as (args: unknown) => Promise<unknown>)(parsed.args);
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return 0;
-  }
+  // ONE lease scope per invocation, wrapping BOTH backend branches, exactly as
+  // mcp.ts does. `--lease <token>` lands in parsed.args like any other flag, so
+  // no tool signature changes and a tool added later is covered for free.
+  const tool = parsed.tool;
+  return withLeaseScope(leaseFromArgs(parsed.args), async () => {
+    if (browser === "chrome") {
+      const fn = TOOLS[tool];
+      // The registry's value type is the union of all tool signatures; each tool
+      // validates its own args at runtime, so we hand the parsed object through.
+      const result = await (fn as (args: unknown) => Promise<unknown>)(parsed.args);
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    }
 
-  // Firefox: one process per invocation. Launch, run exactly one tool call, always dispose,
-  // even if the tool call itself throws, so the spawned Firefox process never leaks.
-  const neutralFn = FIREFOX_TOOLS[parsed.tool];
-  if (!neutralFn) {
-    process.stderr.write(`${JSON.stringify({ error: `tool '${parsed.tool}' has no Firefox implementation wired` })}\n`);
-    return 1;
-  }
-  const session = await startFirefoxSession();
-  try {
-    const result = await neutralFn(session.driver, parsed.args as never);
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return 0;
-  } finally {
-    await session.dispose();
-  }
+    // Firefox: one process per invocation. Launch, run exactly one tool call, always dispose,
+    // even if the tool call itself throws, so the spawned Firefox process never leaks.
+    const neutralFn = FIREFOX_TOOLS[tool];
+    if (!neutralFn) {
+      process.stderr.write(`${JSON.stringify({ error: `tool '${tool}' has no Firefox implementation wired` })}\n`);
+      return 1;
+    }
+    const session = await startFirefoxSession();
+    try {
+      const result = await neutralFn(session.driver, parsed.args as never);
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } finally {
+      await session.dispose();
+    }
+  });
 }
 
 main()

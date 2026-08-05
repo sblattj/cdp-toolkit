@@ -13,6 +13,7 @@ import {
   assertLeaseOk,
   claimLease,
   currentLease,
+  leaseFromArgs,
   isPidAlive,
   leaseFile,
   readLease,
@@ -228,6 +229,38 @@ describe("withLeaseScope", () => {
     await withLeaseScope(token, async () => {
       expect(currentLease()).toBe(token);
       await assertLeaseOk("chrome", "AMBIENT", {});
+    });
+  });
+});
+
+describe("leaseFromArgs (what the dispatch sites hand to withLeaseScope)", () => {
+  test("reads a token off a tool args object", () => {
+    expect(leaseFromArgs({ target: "index:0", lease: "chrome:T:0123456789abcdef01234567" })).toBe(
+      "chrome:T:0123456789abcdef01234567",
+    );
+  });
+
+  test("args with no lease key yield undefined, which is what keeps unleased calls unchanged", () => {
+    expect(leaseFromArgs({ target: "index:0" })).toBeUndefined();
+  });
+
+  test("a non-object, null, or empty-string lease is absent rather than malformed", () => {
+    expect(leaseFromArgs(undefined)).toBeUndefined();
+    expect(leaseFromArgs(null)).toBeUndefined();
+    expect(leaseFromArgs("chrome:T:abc")).toBeUndefined();
+    expect(leaseFromArgs({ lease: "" })).toBeUndefined();
+    expect(leaseFromArgs({ lease: 42 })).toBeUndefined();
+  });
+
+  test("end to end: args -> leaseFromArgs -> withLeaseScope -> assertLeaseOk", async () => {
+    const { token } = await claimLease("chrome", "DISPATCH", { label: "agent-one" });
+    const args = { target: "index:0", lease: token };
+    await withLeaseScope(leaseFromArgs(args), async () => {
+      await assertLeaseOk("chrome", "DISPATCH", {});
+    });
+    // The same tab without the token in scope is still refused.
+    await withLeaseScope(leaseFromArgs({ target: "index:0" }), async () => {
+      await expect(assertLeaseOk("chrome", "DISPATCH", {})).rejects.toThrow(/is leased by 'agent-one'/);
     });
   });
 });
