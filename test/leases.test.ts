@@ -20,6 +20,7 @@ import {
   releaseLease,
   staleReason,
   tokenParts,
+  touchLease,
   withLeaseScope,
   type LeaseRecord,
 } from "../src/leases.ts";
@@ -262,5 +263,104 @@ describe("leaseFromArgs (what the dispatch sites hand to withLeaseScope)", () =>
     await withLeaseScope(leaseFromArgs({ target: "index:0" }), async () => {
       await expect(assertLeaseOk("chrome", "DISPATCH", {})).rejects.toThrow(/is leased by 'agent-one'/);
     });
+  });
+});
+
+describe("assertLeaseOk branch order (fix round 1, Important 1)", () => {
+  test("a token for TAB-A does not poison an UNRELATED unleased tab", async () => {
+    const a = await claimLease("chrome", "HOLD-A", { label: "agent-one" });
+    // TAB-C has no lease at all. Today anyone may resolve it; holding a token
+    // for a different tab must not change that. Under the ambient dispatch
+    // scope this is the common case, not an edge case: any agent holding one
+    // tab that touches a second unleased tab in the same call lands here.
+    await expect(assertLeaseOk("chrome", "FREE-C", { lease: a.token })).resolves.toBeUndefined();
+  });
+
+  test("the unrelated-tab pass-through does not depend on the tab being a page we own", async () => {
+    const a = await claimLease("chrome", "HOLD-A2", { label: "agent-one" });
+    // Same shape across backends: a chrome token against an unleased firefox id.
+    await expect(assertLeaseOk("firefox", "FREE-FF", { lease: a.token })).resolves.toBeUndefined();
+  });
+
+  test("but a token for TAB-A against a tab someone ELSE holds is still refused", async () => {
+    const a = await claimLease("chrome", "HOLD-A3", { label: "agent-one" });
+    await claimLease("chrome", "HELD-B3", { label: "agent-two" });
+    await expect(assertLeaseOk("chrome", "HELD-B3", { lease: a.token })).rejects.toThrow(
+      /is for chrome target 'HOLD-A3'/,
+    );
+  });
+
+  test("REGRESSION GUARD for NEGATIVE 2: same targetId with no live lease still errors", async () => {
+    // This is the case the reorder must NOT hollow out. It differs from the
+    // pass-through above by exactly one thing: the token's targetId matches the
+    // tab being resolved, so the caller believes it holds THIS tab and is wrong.
+    const { token } = await claimLease("chrome", "GONE-2", { label: "agent-one" });
+    await releaseLease(token);
+    await expect(assertLeaseOk("chrome", "GONE-2", { lease: token })).rejects.toThrow(/released or reclaimed/);
+  });
+});
+
+describe("touchLease (fix round 1, Important 2)", () => {
+  test("refreshes lastUsedAt for the record it still owns", async () => {
+    const { record } = await claimLease("chrome", "TOUCH-OK", { label: "agent-one", now: 1_000 });
+    await touchLease(record, 5_000);
+    const after = await readLease("chrome", "TOUCH-OK");
+    expect(after?.lastUsedAt).toBe(5_000);
+    expect(after?.nonce).toBe(record.nonce);
+    expect(after?.createdAt).toBe(1_000);
+  });
+
+  test("CANNOT resurrect a superseded lease it no longer owns", async () => {
+    const first = await claimLease("chrome", "TOUCH-RACE", { label: "stalled", ttlMs: 1, now: 1_000 });
+    const second = await claimLease("chrome", "TOUCH-RACE", { label: "fresh", now: 1_000_000 });
+    // The stalled owner's in-flight heartbeat lands AFTER the reclamation.
+    await touchLease(first.record, 2_000_000);
+    const after = await readLease("chrome", "TOUCH-RACE");
+    // The new owner's record must survive intact: nonce, label, and lastUsedAt.
+    expect(after?.nonce).toBe(second.record.nonce);
+    expect(after?.label).toBe("fresh");
+    expect(after?.lastUsedAt).toBe(second.record.lastUsedAt);
+    // And the new owner's token must still pass the gate.
+    await expect(assertLeaseOk("chrome", "TOUCH-RACE", { lease: second.token, now: 1_000_000 })).resolves.toBeUndefined();
+  });
+
+  test("a lease released underneath a heartbeat is not recreated by it", async () => {
+    const { token, record } = await claimLease("chrome", "TOUCH-REL", { label: "agent-one" });
+    await releaseLease(token);
+    await touchLease(record, 9_000);
+    expect(await readLease("chrome", "TOUCH-REL")).toBeUndefined();
+  });
+});
+
+describe("withLeaseScope concurrency", () => {
+  test("two concurrent scopes stay isolated across awaits", async () => {
+    const one = await claimLease("chrome", "CONC-1", { label: "agent-one" });
+    const two = await claimLease("chrome", "CONC-2", { label: "agent-two" });
+    const seen: string[] = [];
+    await Promise.all([
+      withLeaseScope(one.token, async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        seen.push(`one:${currentLease() === one.token}`);
+        await assertLeaseOk("chrome", "CONC-1", {});
+        // The other agent's tab must still be refused from inside this scope.
+        await expect(assertLeaseOk("chrome", "CONC-2", {})).rejects.toThrow(/is leased by 'agent-two'/);
+      }),
+      withLeaseScope(two.token, async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        seen.push(`two:${currentLease() === two.token}`);
+        await assertLeaseOk("chrome", "CONC-2", {});
+        await expect(assertLeaseOk("chrome", "CONC-1", {})).rejects.toThrow(/is leased by 'agent-one'/);
+      }),
+    ]);
+    expect(seen.sort()).toEqual(["one:true", "two:true"]);
+  });
+
+  test("a scope does not leak out of its own callback", async () => {
+    const { token } = await claimLease("chrome", "NOLEAK", { label: "agent-one" });
+    await withLeaseScope(token, async () => {
+      expect(currentLease()).toBe(token);
+    });
+    expect(currentLease()).toBeUndefined();
+    await expect(assertLeaseOk("chrome", "NOLEAK", {})).rejects.toThrow(/is leased by 'agent-one'/);
   });
 });

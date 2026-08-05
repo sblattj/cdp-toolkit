@@ -200,12 +200,14 @@ export async function resolveTarget(selector: TargetSelector, opts: { lease?: st
   const hit = pickTarget(targets, selector);
   // THE Chrome choke point. Every tool reaches a page through here, so a tool
   // added after this shipped is protected with no action from its author.
-  await assertLeaseOk("chrome", hit.id, {
-    lease: opts.lease,
-    url: hit.url,
-    title: hit.title,
-    liveIds: targets.map((t) => t.id),
-  });
+  //
+  // Deliberately NOT passing liveIds. It would be inert here: pickTarget
+  // returns an element of `targets`, so hit.id is always a member of that list
+  // and the "target-gone" staleness condition could never fire for the very
+  // target we just resolved. Passing it would only suggest a check is happening
+  // that is not. target-gone earns its keep on claim, and on a list_leases
+  // reap, where a record's id may genuinely be absent from the browser.
+  await assertLeaseOk("chrome", hit.id, { lease: opts.lease, url: hit.url, title: hit.title });
   return hit;
 }
 
