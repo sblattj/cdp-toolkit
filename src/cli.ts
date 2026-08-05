@@ -23,12 +23,16 @@
  *   - --list  -> all tool names (one per line) to stdout, exit 0.
  */
 import { TOOLS, TOOL_NAMES, type ToolName } from "./index.ts";
+import { resolveBrowserKind, stripBrowserFlag, startFirefoxSession } from "./backend.ts";
+import { toolAvailability } from "./capabilities.ts";
+import { NEUTRAL_TOOLS } from "./neutral.ts";
 
-const USAGE = `cdp-toolkit — raw single-target CDP, 29-tool chrome-devtools-mcp parity.
+const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
 Usage:
-  bun run src/cli.ts <tool> [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
-  bun run src/cli.ts --list
+  bun run src/cli.ts <tool> [--browser chrome|firefox] [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
+  bun run src/cli.ts --list [--browser chrome|firefox]
+  bun run src/cli.ts --capabilities [--browser chrome|firefox]
 
 Examples:
   bun run src/cli.ts list_pages
@@ -36,9 +40,17 @@ Examples:
   bun run src/cli.ts click --target index:0 --uid 42
   bun run src/cli.ts evaluate_script --json '{"expression":"1+2"}'
   bun run src/cli.ts take_screenshot --target url:example --fullPage true
+  bun run src/cli.ts --browser firefox take_snapshot
+  bun run src/cli.ts --capabilities --browser firefox
+
+Backend selection: --browser chrome|firefox, else the CDP_BROWSER env var, else "chrome" (default,
+zero behavior change for existing users). Firefox is LAUNCHED per invocation (it cannot be attached
+to), used for exactly one tool call, then disposed before the process exits.
 
 Target selector grammar: active | index:N | url:<substr> | title:<substr> | <targetId>
-Run with --list to print every available tool name.`;
+Run with --list to print every tool name available under the selected backend.
+Run with --capabilities to see, per tool, whether it is available and (if not) which capability
+the selected backend is missing.`;
 
 /** Coerce a raw CLI string into boolean / number / string. */
 function coerce(raw: string): boolean | number | string {
@@ -54,12 +66,13 @@ function coerce(raw: string): boolean | number | string {
 interface ParsedArgs {
   tool?: string;
   list: boolean;
+  capabilities: boolean;
   args: Record<string, unknown>;
 }
 
-/** Parse process argv (already sliced to drop the runtime + script). */
+/** Parse process argv (already sliced to drop the runtime + script, and with --browser already stripped). */
 function parseArgv(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { list: false, args: {} };
+  const out: ParsedArgs = { list: false, capabilities: false, args: {} };
   // Collect flag pairs separately so --json can be merged BEFORE individual
   // flags override it, regardless of token order.
   let jsonObj: Record<string, unknown> | undefined;
@@ -69,6 +82,10 @@ function parseArgv(argv: string[]): ParsedArgs {
     const token = argv[i]!;
     if (token === "--list") {
       out.list = true;
+      continue;
+    }
+    if (token === "--capabilities") {
+      out.capabilities = true;
       continue;
     }
     if (token.startsWith("--")) {
@@ -109,10 +126,23 @@ function isToolName(name: string): name is ToolName {
 }
 
 async function main(): Promise<number> {
-  const parsed = parseArgv(process.argv.slice(2));
+  const rawArgv = process.argv.slice(2);
+  const browser = resolveBrowserKind(rawArgv);
+  const parsed = parseArgv(stripBrowserFlag(rawArgv));
+  const availability = toolAvailability(browser);
+  const availableSet = new Set(availability.available);
+
+  if (parsed.capabilities) {
+    const lines = [`backend: ${browser}`, "", "available:"];
+    for (const name of availability.available) lines.push(`  ${name}`);
+    lines.push("", "unavailable:");
+    for (const u of availability.unavailable) lines.push(`  ${u.name}  (needs: ${u.missing.join(", ")})`);
+    process.stdout.write(`${lines.join("\n")}\n`);
+    return 0;
+  }
 
   if (parsed.list) {
-    process.stdout.write(`${TOOL_NAMES.join("\n")}\n`);
+    process.stdout.write(`${availability.available.join("\n")}\n`);
     return 0;
   }
 
@@ -128,12 +158,40 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const fn = TOOLS[parsed.tool];
-  // The registry's value type is the union of all tool signatures; each tool
-  // validates its own args at runtime, so we hand the parsed object through.
-  const result = await (fn as (args: unknown) => Promise<unknown>)(parsed.args);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  return 0;
+  if (!availableSet.has(parsed.tool)) {
+    const gap = availability.unavailable.find((u) => u.name === parsed.tool);
+    process.stderr.write(
+      `${JSON.stringify({
+        error: `tool '${parsed.tool}' is not available under --browser ${browser}${gap ? ` (needs: ${gap.missing.join(", ")})` : ""}. Run --capabilities --browser ${browser} to see the full list.`,
+      })}\n`,
+    );
+    return 1;
+  }
+
+  if (browser === "chrome") {
+    const fn = TOOLS[parsed.tool];
+    // The registry's value type is the union of all tool signatures; each tool
+    // validates its own args at runtime, so we hand the parsed object through.
+    const result = await (fn as (args: unknown) => Promise<unknown>)(parsed.args);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+
+  // Firefox: one process per invocation. Launch, run exactly one tool call, always dispose,
+  // even if the tool call itself throws, so the spawned Firefox process never leaks.
+  const neutralFn = NEUTRAL_TOOLS[parsed.tool];
+  if (!neutralFn) {
+    process.stderr.write(`${JSON.stringify({ error: `tool '${parsed.tool}' has no Firefox implementation wired` })}\n`);
+    return 1;
+  }
+  const session = await startFirefoxSession();
+  try {
+    const result = await neutralFn(session.driver, parsed.args as never);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  } finally {
+    await session.dispose();
+  }
 }
 
 main()
