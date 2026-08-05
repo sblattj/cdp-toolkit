@@ -9,6 +9,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TOOL_NAMES } from "../src/index.ts";
+import { MANIFEST } from "../src/manifest.ts";
 import {
   assertLeaseOk,
   claimLease,
@@ -16,6 +18,7 @@ import {
   leaseFromArgs,
   isPidAlive,
   leaseFile,
+  listLeases,
   readLease,
   releaseLease,
   staleReason,
@@ -382,5 +385,49 @@ describe("backend keying (spec section 8)", () => {
     await releaseLease(chrome.token);
     expect(await readLease("chrome", "PAIRED")).toBeUndefined();
     expect((await readLease("firefox", "PAIRED"))?.label).toBe("firefox-agent");
+  });
+});
+
+describe("listLeases", () => {
+  test("reports every lease with its liveness and staleness", async () => {
+    await claimLease("chrome", "ALIVE", { label: "agent-one", now: 1_000 });
+    await claimLease("firefox", "STALE", { label: "agent-two", ttlMs: 1, now: 1_000 });
+    const rows = (await listLeases({ now: 1_000_000 })).sort((a, b) => a.targetId.localeCompare(b.targetId));
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toMatchObject({ backend: "chrome", targetId: "ALIVE", label: "agent-one", pidAlive: true, stale: "expired" });
+    expect(rows[1]).toMatchObject({ backend: "firefox", targetId: "STALE", label: "agent-two", pidAlive: true, stale: "expired" });
+    expect(rows[0]?.createdAt).toBe(1_000);
+    expect(rows[0]?.ttlMs).toBe(900_000);
+  });
+
+  test("returns an empty list when nothing is leased", async () => {
+    expect(await listLeases({ now: 1_000 })).toEqual([]);
+  });
+});
+
+describe("registry and manifest wiring", () => {
+  test("the three lease tools are registered", () => {
+    expect(TOOL_NAMES).toContain("claim_page");
+    expect(TOOL_NAMES).toContain("release_page");
+    expect(TOOL_NAMES).toContain("list_leases");
+    expect(TOOL_NAMES.length).toBe(36);
+  });
+
+  test("every tool has a manifest schema and vice versa", () => {
+    expect(MANIFEST.map((s) => s.name).sort()).toEqual([...TOOL_NAMES].sort());
+  });
+
+  test("every tool that resolves a target accepts an optional lease", () => {
+    for (const spec of MANIFEST) {
+      if (spec.name === "claim_page" || spec.name === "list_leases") continue;
+      expect(spec.inputSchema.properties?.lease, `${spec.name} is missing the lease property`).toBeDefined();
+    }
+  });
+
+  test("only release_page requires a lease", () => {
+    for (const spec of MANIFEST) {
+      const required = spec.inputSchema.required ?? [];
+      expect(required.includes("lease"), spec.name).toBe(spec.name === "release_page");
+    }
   });
 });

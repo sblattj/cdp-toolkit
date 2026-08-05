@@ -29,6 +29,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "all": {
           "type": "boolean",
           "description": "Include non-page targets (service/shared workers, background pages) when true; otherwise only page-type tabs are listed."
@@ -44,9 +48,21 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "url": {
           "type": "string",
           "description": "URL to open in the new tab; defaults to about:blank."
+        },
+        "claim": {
+          "type": "boolean",
+          "description": "Claim the new tab atomically as part of creating it and return a lease token alongside {targetId,url}. Default false, which is byte-identical to the pre-1.2 behavior."
+        },
+        "label": {
+          "type": "string",
+          "description": "Agent label recorded on the lease when claim:true, surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
         }
       },
       "required": [],
@@ -59,6 +75,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -76,6 +96,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -93,6 +117,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -131,6 +159,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -160,6 +192,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring."
@@ -189,6 +225,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default, = first page-type target) | 'index:N' (Nth page-type target, 0-based) | 'url:<substring>' | 'title:<substring>' | '<32-hex targetId>' (exact target by id)."
@@ -208,6 +248,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -244,6 +288,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -267,6 +315,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -315,6 +367,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -344,6 +400,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -386,6 +446,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -415,6 +479,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -443,6 +511,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -478,6 +550,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector. undefined or 'active' -> first page target; '<32-hex targetId>' -> exact target by id; 'index:N' -> Nth page target (0-based); 'url:<substring>' -> first page whose url contains substring; 'title:<substring>' -> first page whose title contains substring."
@@ -525,6 +601,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -621,6 +701,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -655,6 +739,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (or omitted) for the first page-type target | 'index:N' (0-based) | 'url:<substring>' | 'title:<substring>' | a 32-hex <targetId>."
@@ -688,6 +776,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
@@ -711,6 +803,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
@@ -730,6 +826,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
@@ -757,6 +857,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
@@ -788,6 +892,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -810,6 +918,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -825,6 +937,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "tracePath": {
           "type": "string",
           "description": "Filesystem path to a trace JSON file written by performance_trace or performance_stop_trace (bare array OR {traceEvents:[...]}). Required."
@@ -840,6 +956,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -874,6 +994,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
@@ -893,6 +1017,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "url": {
           "type": "string",
           "description": "The URL to audit. Required — never points at a user tab implicitly."
@@ -933,6 +1061,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target selector: active | index:N | url:<substr> | title:<substr> | <targetId>. Defaults to the active page."
@@ -999,6 +1131,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Unused filter placeholder; list_mocks returns all active sessions."
@@ -1014,6 +1150,10 @@ export const MANIFEST: ToolSpec[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
         "target": {
           "type": "string",
           "description": "Target selector whose mock session to clear. Defaults to the active page. Ignored when all:true."
@@ -1023,6 +1163,60 @@ export const MANIFEST: ToolSpec[] = [
           "description": "Clear every active mock session instead of just the resolved target's."
         }
       },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "claim_page",
+    "description": "Take exclusive ownership of a browser tab and return an opaque lease token. With no targetId, opens a fresh tab (optionally at url) and claims it, so 'give me my own tab' is one call. Any later tool call against a leased tab must carry the matching token in its 'lease' argument or it is refused, naming the holder. The lease is reclaimable once its owning process dies, its ttlMs elapses without use, or its tab is closed. Refused from the CLI: a CLI invocation is one process per call, so its lease would be reclaimable immediately.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "targetId": {
+          "type": "string",
+          "description": "Claim this already-open page target instead of opening a new tab. Must be an exact target id, not a selector."
+        },
+        "url": {
+          "type": "string",
+          "description": "When opening a fresh tab, navigate it here. Ignored when targetId is given."
+        },
+        "label": {
+          "type": "string",
+          "description": "Agent label recorded on the lease and surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
+        },
+        "ttlMs": {
+          "type": "number",
+          "description": "How long the lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15 minutes). Every checked call refreshes it, so an active agent never expires."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "release_page",
+    "description": "Release a held lease, given its token. Idempotent: releasing an already-released, reclaimed, or expired lease reports released:false rather than erroring. Does not close the tab.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "The opaque token claim_page (or new_page with claim:true) returned."
+        }
+      },
+      "required": [
+        "lease"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_leases",
+    "description": "Enumerate every active lease for diagnosis: backend, target id, agent label, pid, createdAt, lastUsedAt, ttlMs, whether the owning process is still alive, and whether the lease is reclaimable and why. Requires no token. Never returns the lease nonce, so this cannot be used to forge a token.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
       "required": [],
       "additionalProperties": false
     }

@@ -27,7 +27,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** Opaque ownership token. Hold it, pass it back, never parse or build one. */
@@ -378,4 +378,70 @@ export async function assertLeaseOk(
     );
   }
   await touchLease(held, now);
+}
+
+/* ------------------------------- enumeration ------------------------------- */
+
+export interface LeaseSummary {
+  backend: LeaseBackend;
+  targetId: string;
+  label: string;
+  pid: number;
+  createdAt: number;
+  lastUsedAt: number;
+  ttlMs: number;
+  pidAlive: boolean;
+  stale: LeaseStaleReason | false;
+}
+
+const LEASE_FILE_RE = /^lease-(chrome|firefox)-.+\.json$/;
+
+/**
+ * Enumerate every lease on disk. Diagnosis only, so it needs no token.
+ *
+ * `liveIds` comes from ONE browser, but this enumeration spans both backends,
+ * so `liveBackend` names which backend those ids belong to and the target-gone
+ * test is applied only to records of that backend. Without that scoping, a
+ * caller listing from Chrome would see every Firefox lease reported as
+ * target-gone (its context ids are simply not in Chrome's target list), which
+ * reads as "free to take" for a lease that is very much held.
+ */
+export async function listLeases(
+  opts: { now?: number; liveIds?: readonly string[]; liveBackend?: LeaseBackend } = {},
+): Promise<LeaseSummary[]> {
+  const now = opts.now ?? Date.now();
+  let names: string[] = [];
+  try {
+    names = await readdir(leaseDir());
+  } catch {
+    return [];
+  }
+  const out: LeaseSummary[] = [];
+  for (const name of names) {
+    if (!LEASE_FILE_RE.test(name)) continue;
+    let rec: LeaseRecord;
+    try {
+      rec = JSON.parse(await readFile(join(leaseDir(), name), "utf8")) as LeaseRecord;
+    } catch {
+      continue;
+    }
+    if (typeof rec?.nonce !== "string" || typeof rec?.pid !== "number") continue;
+    out.push({
+      backend: rec.backend,
+      targetId: rec.targetId,
+      label: rec.label,
+      pid: rec.pid,
+      createdAt: rec.createdAt,
+      lastUsedAt: rec.lastUsedAt,
+      ttlMs: rec.ttlMs,
+      pidAlive: isPidAlive(rec.pid),
+      // The nonce never leaves this function: it is not in LeaseSummary, so a
+      // diagnosis read can never be turned into a forged token.
+      stale: staleReason(rec, {
+        now,
+        liveIds: opts.liveBackend === undefined || opts.liveBackend === rec.backend ? opts.liveIds : undefined,
+      }),
+    });
+  }
+  return out;
 }

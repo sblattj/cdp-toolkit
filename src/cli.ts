@@ -49,6 +49,8 @@ zero behavior change for existing users). Firefox is LAUNCHED per invocation (it
 to), used for exactly one tool call, then disposed before the process exits.
 
 Target selector grammar: active | index:N | url:<substr> | title:<substr> | <targetId>
+Leases: pass --lease <token> to act on a tab another agent claimed with claim_page (MCP only).
+Run list_leases to see who holds what; release_page --lease <token> gives a lease back.
 Run with --list to print every tool name available under the selected backend.
 Run with --capabilities to see, per tool, whether it is available and (if not) which capability
 the selected backend is missing.`;
@@ -164,6 +166,22 @@ async function main(): Promise<number> {
     process.stderr.write(
       `${JSON.stringify({
         error: `tool '${parsed.tool}' is not available under --browser ${browser}${gap ? ` (needs: ${gap.missing.join(", ")})` : ""}. Run --capabilities --browser ${browser} to see the full list.`,
+      })}\n`,
+    );
+    return 1;
+  }
+
+  // Decision: the CLI cannot claim a lease. Per backend.ts, a CLI invocation is
+  // one process per call, so the claiming process is already dead by the next
+  // call and the dead-pid rule would make the lease reclaimable at once,
+  // regardless of ttlMs. A lease that is reclaimable on arrival is worse than
+  // no lease, because it reads as protection that is not there. Every OTHER
+  // CLI call still goes through assertLeaseOk and may present --lease.
+  if (parsed.tool === "claim_page") {
+    process.stderr.write(
+      `${JSON.stringify({
+        error:
+          "claim_page is not available from the CLI: a CLI invocation is one process per call, so the lease it claimed would be reclaimable immediately by the dead-pid rule. Claim from the cdp-toolkit MCP server, which is long lived, then pass the token to CLI calls with --lease <token>.",
       })}\n`,
     );
     return 1;
