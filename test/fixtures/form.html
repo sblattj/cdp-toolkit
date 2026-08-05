@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>form fixture</title>
+<style>body{font-family:sans-serif;margin:2rem}label{display:block;margin:.5rem 0}</style>
+</head>
+<body>
+<form id="the-form" data-testid="the-form">
+  <label>Name
+    <input id="name-input" data-testid="name-input" type="text" value="prefilled name">
+  </label>
+  <label>Notes
+    <textarea id="notes-input" data-testid="notes-input"></textarea>
+  </label>
+  <label>Color
+    <select id="color-select" data-testid="color-select">
+      <option value="red">Red</option>
+      <option value="green">Green</option>
+      <option value="blue">Blue</option>
+    </select>
+  </label>
+  <label>
+    <input id="agree-checkbox" data-testid="agree-checkbox" type="checkbox">
+    Agree
+  </label>
+  <fieldset id="size-group" data-testid="size-group">
+    <legend>Size</legend>
+    <label><input type="radio" name="size" id="size-small" data-testid="size-small" value="small"> Small</label>
+    <label><input type="radio" name="size" id="size-large" data-testid="size-large" value="large"> Large</label>
+  </fieldset>
+  <button id="submit-button" data-testid="submit-button" type="submit">Submit</button>
+</form>
+<div id="result" data-testid="result">no submission yet</div>
+<script>
+  document.getElementById("the-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = document.getElementById("name-input").value;
+    document.getElementById("result").textContent = "submitted: " + name;
+  });
+</script>
+</body>
+</html>
