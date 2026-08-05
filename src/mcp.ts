@@ -20,7 +20,7 @@ import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
 import { resolveBrowserKind, stripBrowserFlag, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
-import { NEUTRAL_TOOLS } from "./neutral.ts";
+import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 
 const VERSION = "1.0.0";
 
@@ -32,7 +32,7 @@ const AVAILABLE_NAMES = new Set<string>(AVAILABILITY.available);
 
 /** Loose dispatch view of the strongly-typed TOOLS registry. */
 const dispatch = TOOLS as Record<string, (args: unknown) => Promise<unknown>>;
-const neutralDispatch = NEUTRAL_TOOLS as Record<string, (driver: import("./driver.ts").BrowserDriver, args: unknown) => Promise<unknown>>;
+const neutralDispatch = FIREFOX_TOOLS as Record<string, (driver: import("./driver.ts").BrowserDriver, args: unknown) => Promise<unknown>>;
 
 /** Warn (to stderr) about any registry/manifest drift, but don't fail startup. */
 function auditCoverage(): void {

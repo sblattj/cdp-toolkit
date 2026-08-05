@@ -185,6 +185,8 @@ export interface PageInfo {
   id: string;
   url: string;
   title: string;
+  /** CDP target type ("page", "iframe", "worker", ...), when the driver has one. Additive: BiDi leaves it unset. */
+  type?: string;
 }
 
 /** How a caller points at an element. Exactly one field is set. */
@@ -249,8 +251,10 @@ export interface EmulationOptions {
   cpuThrottlingRate?: number; // "emulate.cpuThrottling"
   media?: string; // "emulate.mediaFeatures"
   mediaFeatures?: ReadonlyArray<{ name: string; value: string }>; // "emulate.mediaFeatures"
-  /** Requires "emulate.networkConditions". */
-  networkConditions?: { offline?: boolean; latency?: number; downloadThroughput?: number; uploadThroughput?: number };
+  /** Requires "emulate.networkConditions". connectionType is additive: CDP's optional
+   *  Network.ConnectionType hint ("wifi", "cellular4g", ...); drivers without a matching
+   *  concept simply ignore it. */
+  networkConditions?: { offline?: boolean; latency?: number; downloadThroughput?: number; uploadThroughput?: number; connectionType?: string };
   clearOverrides?: boolean;
 }
 
@@ -268,6 +272,13 @@ export interface DialogInfo {
   message: string;
   url: string;
   defaultPrompt?: string;
+}
+
+/** One dialog the driver answered, echoing back how it was answered. */
+export interface HandledDialogInfo extends DialogInfo {
+  accept: boolean;
+  promptText?: string;
+  handled: true;
 }
 
 export interface InterceptRule {
@@ -314,9 +325,12 @@ export interface BrowserDriver {
   /** "accessibility-tree" when snapshots come from a native a11y dump. */
   readonly snapshotFidelity: "accessibility-tree" | "dom-heuristic";
 
-  listPages(): Promise<PageInfo[]>;
+  /** opts.all: include non-page targets (workers, iframes, ...) when the driver has that concept. */
+  listPages(opts?: { all?: boolean }): Promise<PageInfo[]>;
   newPage(url?: string): Promise<PageInfo>;
-  closePage(id: string): Promise<void>;
+  /** success mirrors the underlying protocol's own success signal when it has one (CDP's
+   *  Target.closeTarget); a driver without such a signal reports true once close resolves. */
+  closePage(id: string): Promise<{ success: boolean }>;
   /** Bring a page to the front. Also writes the selected-page state file. */
   activatePage(id: string): Promise<PageInfo>;
 
@@ -336,7 +350,7 @@ export interface PageDriver {
   /* navigation */
   navigate(opts: NavigateOptions): Promise<NavigateResult>;
   /** Poll until `text` appears in the rendered body, or reject with "timeout". */
-  waitForText(text: string, timeoutMs?: number): Promise<{ found: true; elapsedMs: number }>;
+  waitForText(text: string, timeoutMs?: number, pollMs?: number): Promise<{ found: true; elapsedMs: number }>;
 
   /* script */
   /** Evaluate an expression, or call it as a function when `args` is given. */
@@ -379,8 +393,15 @@ export interface PageDriver {
   waitForEvent(event: DriverEvent, predicate?: (p: Record<string, unknown>) => boolean, timeoutMs?: number): Promise<Record<string, unknown>>;
 
   /* dialogs */
-  /** Answer the next user prompt. Combine with waitForEvent("dialog") to arm first. */
-  handleDialog(accept: boolean, promptText?: string): Promise<DialogInfo>;
+  /** Answer the next user prompt. Combine with waitForEvent("dialog") to arm first.
+   *  opts.timeoutMs: how long to wait for a dialog to open (default 15000).
+   *  opts.autoMs: instead of waiting for exactly one dialog, answer every dialog that
+   *  opens during this window (ms) and resolve with the list, never throwing on none. */
+  handleDialog(
+    accept: boolean,
+    promptText?: string,
+    opts?: { timeoutMs?: number; autoMs?: number },
+  ): Promise<HandledDialogInfo | { handled: HandledDialogInfo[]; count: number }>;
 
   /* network */
   /** Begin retaining response bodies. REQUIRED before getResponseBody unless

@@ -10,7 +10,7 @@ import type { Target, TargetSelector } from "../types.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, type BrowserDriver, type Capability, type DialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
   type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
@@ -114,15 +114,27 @@ function propValue(node: AxNode, name: string): string | undefined {
 function isInteractive(role: string | undefined): boolean {
   return !!role && (INTERACTIVE_ROLES.has(role) || INTERACTIVE_ROLES.has(role.toLowerCase()));
 }
+/**
+ * Copied verbatim (semantics, not just shape) from src/tools/snapshot.ts's `formatNode` extras
+ * block, key order and all: value(quoted)/checked(unquoted, excluded only when literally
+ * "false")/expanded(unquoted, included whenever the property is present AT ALL, INCLUDING the
+ * literal string "false" - a legacy quirk, not a bug this migration is allowed to fix)/
+ * disabled(bare token)/url(unquoted)/focused(bare token). The render step (shared-tools.ts)
+ * reproduces the exact quoting per key; this function only decides which keys are present and
+ * with what value, in this order (a Record preserves string-key insertion order).
+ */
 function axExtras(node: AxNode): Record<string, string> {
   const extras: Record<string, string> = {};
   const value = axString(node.value);
   if (value) extras.value = value;
-  for (const k of ["checked", "expanded", "url"] as const) {
-    const v = propValue(node, k);
-    if (v && v !== "false") extras[k] = v;
-  }
+  const checked = propValue(node, "checked");
+  if (checked && checked !== "false") extras.checked = checked;
+  const expanded = propValue(node, "expanded");
+  if (expanded) extras.expanded = expanded;
   if (propValue(node, "disabled") === "true") extras.disabled = "true";
+  const url = propValue(node, "url");
+  if (url) extras.url = url;
+  if (propValue(node, "focused") === "true") extras.focused = "true";
   return extras;
 }
 /* ------------------------------- locator helpers ------------------------------- */
@@ -212,17 +224,29 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
   readonly info: PageInfo;
-  private readonly enabledDomains = new Set<string>(["Page", "Runtime"]);
+  // Deliberately empty: page() does NOT eagerly enable Page/Runtime. Every domain is turned on
+  // lazily, by the same method and with the same catch/no-catch nuance as the legacy tools/*.ts
+  // module it replaces, so no tool call gets an extra CDP round-trip (or extra domain-enabled
+  // side effect) it did not have before this migration. See the per-method comments below.
+  private readonly enabledDomains = new Set<string>();
   private released = false;
   constructor(private readonly conn: CdpConnection, target: Target, readonly browser: BrowserDriver) {
-    this.info = { id: target.id, url: target.url, title: target.title };
+    this.info = { id: target.id, url: target.url, title: target.title, type: target.type };
   }
   private async ensureDomain(name: string): Promise<void> {
     if (this.enabledDomains.has(name)) return;
     this.enabledDomains.add(name);
     await this.conn.send(`${name}.enable`);
   }
+  /** Same as ensureDomain but tolerates the enable call itself failing (matches a legacy
+   *  `.catch(() => undefined)` site); a failed enable is NOT re-attempted on the next call. */
+  private async ensureDomainSoft(name: string): Promise<void> {
+    if (this.enabledDomains.has(name)) return;
+    this.enabledDomains.add(name);
+    await this.conn.send(`${name}.enable`).catch(() => undefined);
+  }
   async navigate(opts: NavigateOptions): Promise<NavigateResult> {
+    await this.ensureDomain("Page");
     const reload = opts.reload === true;
     if (!reload && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
     const waitUntil = opts.waitUntil ?? "load";
@@ -250,14 +274,15 @@ class CdpPageDriver implements PageDriver {
     // closest honest mapping onto CDP's milestone events.
     return { url, contextId, ...(reloaded ? { reloaded } : {}), waitedFor: settled ?? "timeout" };
   }
-  async waitForText(text: string, timeoutMs = 15_000): Promise<{ found: true; elapsedMs: number }> {
+  async waitForText(text: string, timeoutMs = 15_000, pollMs = 250): Promise<{ found: true; elapsedMs: number }> {
+    await this.ensureDomain("Runtime");
     const start = Date.now();
     const expr = `(() => { const b = document.body; return !!b && typeof b.innerText === 'string' && b.innerText.includes(${JSON.stringify(text)}); })()`;
     for (;;) {
       const { result } = await this.conn.send<{ result: { value?: unknown } }>("Runtime.evaluate", { expression: expr, returnByValue: true });
       if (result?.value === true) return { found: true, elapsedMs: Date.now() - start };
       if (Date.now() - start >= timeoutMs) throw driverError("timeout", `waitForText: '${text}' not found within ${timeoutMs}ms`);
-      await new Promise((r) => setTimeout(r, Math.min(250, Math.max(0, timeoutMs - (Date.now() - start)))));
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(0, timeoutMs - (Date.now() - start)))));
     }
   }
   private async callFn(objectId: string, functionDeclaration: string, args: readonly unknown[], awaitPromise: boolean): Promise<unknown> {
@@ -268,6 +293,10 @@ class CdpPageDriver implements PageDriver {
     return unwrap(res.result);
   }
   async evaluate(expression: string, opts?: { args?: readonly unknown[]; awaitPromise?: boolean }): Promise<unknown> {
+    // Uncaught, matching tools/evaluate.ts's evaluateScript. resize_page's legacy Runtime.enable is
+    // soft-caught instead; since Runtime.enable does not fail against a live connected page, the two
+    // call sites converging on one hard enable here is not expected to be observable in practice.
+    await this.ensureDomain("Runtime");
     const awaitPromise = opts?.awaitPromise ?? true;
     if (opts?.args && opts.args.length > 0) {
       const globalObj = await this.conn.send<{ result: { objectId?: string } }>("Runtime.evaluate", { expression: "globalThis", returnByValue: false });
@@ -291,17 +320,25 @@ class CdpPageDriver implements PageDriver {
     for (const n of nodes) byId.set(n.nodeId, n);
     const roots = nodes.filter((n) => !n.parentId || !byId.has(n.parentId));
     const out: SnapshotNode[] = [];
+    // Depth propagation copied verbatim from src/tools/snapshot.ts's `walk`: a node that was NOT
+    // emitted (ignored, or a structurally-empty full-mode container) does not consume an indent
+    // level, so its children render as if it were never there. In interactiveOnly mode nothing
+    // increments, matching the legacy flat (unindented) rendering. This must stay exact: it is a
+    // real difference from "always depth+1", and getting it wrong changes indentation on any real
+    // page with generic wrapper elements.
     const walk = (node: AxNode, depth: number): void => {
       const role = axString(node.role);
       const name = axString(node.name);
       const backendNodeId = node.backendDOMNodeId;
-      if (!node.ignored && backendNodeId !== undefined && (interactiveOnly ? isInteractive(role) : !!(role || name))) {
+      const emitted = !node.ignored && backendNodeId !== undefined && (interactiveOnly ? isInteractive(role) : !!(role || name));
+      if (emitted) {
         const extras = axExtras(node);
-        out.push({ uid: encodeUid(backendNodeId), role: role ?? "generic", depth, ...(name ? { name } : {}), ...(Object.keys(extras).length ? { extras } : {}) });
+        out.push({ uid: encodeUid(backendNodeId as number), role: role ?? "generic", depth, ...(name ? { name } : {}), ...(Object.keys(extras).length ? { extras } : {}) });
       }
+      const childDepth = emitted && !interactiveOnly ? depth + 1 : depth;
       for (const childId of node.childIds ?? []) {
         const child = byId.get(childId);
-        if (child) walk(child, depth + 1);
+        if (child) walk(child, childDepth);
       }
     };
     for (const root of roots) walk(root, 0);
@@ -371,6 +408,7 @@ class CdpPageDriver implements PageDriver {
     await this.conn.send("DOM.setFileInputFiles", { files: [...files], objectId });
   }
   async screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }> {
+    await this.ensureDomain("Page");
     const format = opts?.format ?? "png";
     const quality = format === "jpeg" ? (opts?.quality ?? 80) : undefined;
     const params: Record<string, unknown> = { format, captureBeyondViewport: true };
@@ -388,12 +426,17 @@ class CdpPageDriver implements PageDriver {
       await this.conn.send("Emulation.setUserAgentOverride", { userAgent: "" }).catch(c);
       await this.conn.send("Emulation.setCPUThrottlingRate", { rate: 1 }).catch(c);
       await this.conn.send("Emulation.setEmulatedMedia", { media: "", features: [] }).catch(c);
-      await this.ensureDomain("Network").catch(c);
+      await this.ensureDomainSoft("Network");
       await this.conn.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(c);
       return { applied: [] };
     }
     const applied: string[] = [];
-    if (opts.width != null && opts.height != null) {
+    // Copied verbatim from src/tools/emulation.ts `emulate`: width/height are required TOGETHER,
+    // not silently skipped when only one is given.
+    if (opts.width != null || opts.height != null) {
+      if (opts.width == null || opts.height == null) {
+        throw driverError("page-error", "emulate device metrics require both width and height");
+      }
       await this.conn.send("Emulation.setDeviceMetricsOverride", {
         width: opts.width,
         height: opts.height,
@@ -407,23 +450,26 @@ class CdpPageDriver implements PageDriver {
       applied.push("userAgent");
     }
     if (opts.cpuThrottlingRate != null) {
+      if (opts.cpuThrottlingRate < 1) throw driverError("page-error", "cpuThrottlingRate must be >= 1");
       await this.conn.send("Emulation.setCPUThrottlingRate", { rate: opts.cpuThrottlingRate });
       applied.push("cpuThrottlingRate");
     }
     if (opts.media != null || opts.mediaFeatures != null) {
       await this.conn.send("Emulation.setEmulatedMedia", { media: opts.media ?? "", features: opts.mediaFeatures ?? [] });
-      applied.push("mediaFeatures");
+      // Legacy string is "emulatedMedia", NOT "mediaFeatures" - a real applied[] value, not a label.
+      applied.push("emulatedMedia");
     }
     if (opts.networkConditions != null) {
       const n = opts.networkConditions;
-      // Network domain must be enabled before emulateNetworkConditions; enabled lazily here,
-      // not by page(), so a caller that never emulates network conditions never pays for it.
-      await this.ensureDomain("Network");
+      // Network.enable is soft-caught here, matching legacy exactly; the following
+      // emulateNetworkConditions call is NOT caught, so a genuine failure still propagates.
+      await this.ensureDomainSoft("Network");
       await this.conn.send("Network.emulateNetworkConditions", {
         offline: n.offline ?? false,
         latency: n.latency ?? 0,
         downloadThroughput: n.downloadThroughput ?? -1,
         uploadThroughput: n.uploadThroughput ?? -1,
+        ...(n.connectionType ? { connectionType: n.connectionType } : {}),
       });
       applied.push("networkConditions");
     }
@@ -448,21 +494,44 @@ class CdpPageDriver implements PageDriver {
     if (spec.domain) await this.ensureDomain(spec.domain);
     return this.conn.waitFor<Record<string, unknown>>(spec.method, predicate, timeoutMs);
   }
-  // Adapted from src/tools/dialogs.ts `armDialogHandler` / `handleDialog`.
-  async handleDialog(accept: boolean, promptText?: string): Promise<DialogInfo> {
+  // Copied verbatim (behaviorally) from src/tools/dialogs.ts `armDialogHandler` / `handleDialog`:
+  // one persistent Page.javascriptDialogOpening listener, answered as each dialog opens (not a
+  // poll loop), so timing/ordering under rapid-succession dialogs matches legacy exactly.
+  private armDialog(accept: boolean, promptText: string | undefined, onHandled: (d: HandledDialogInfo) => void): () => void {
+    return this.conn.on("Page.javascriptDialogOpening", (params) => {
+      const p = params as { type: string; message: string; url: string; defaultPrompt?: string };
+      void this.conn.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) })
+        .then(() => onHandled({
+          type: p.type, message: p.message, url: p.url,
+          ...(p.defaultPrompt !== undefined ? { defaultPrompt: p.defaultPrompt } : {}),
+          accept, ...(promptText !== undefined ? { promptText } : {}), handled: true,
+        }))
+        .catch(() => undefined); // connection may have raced closed; the awaiter times out
+    });
+  }
+  async handleDialog(
+    accept: boolean,
+    promptText?: string,
+    opts?: { timeoutMs?: number; autoMs?: number },
+  ): Promise<HandledDialogInfo | { handled: HandledDialogInfo[]; count: number }> {
     await this.ensureDomain("Page");
-    return new Promise<DialogInfo>((resolve, reject) => {
+    if (opts?.autoMs !== undefined) {
+      const handled: HandledDialogInfo[] = [];
+      const off = this.armDialog(accept, promptText, (d) => handled.push(d));
+      await new Promise<void>((resolve) => setTimeout(resolve, opts.autoMs));
+      off();
+      return { handled, count: handled.length };
+    }
+    const timeoutMs = opts?.timeoutMs ?? 15_000;
+    return new Promise<HandledDialogInfo>((resolve, reject) => {
       const timer = setTimeout(() => {
         off();
-        reject(driverError("timeout", "handleDialog: no dialog opened within 15000ms"));
-      }, 15_000);
-      const off = this.conn.on("Page.javascriptDialogOpening", (params) => {
-        const p = params as { type: string; message: string; url: string; defaultPrompt?: string };
+        reject(driverError("timeout", `handleDialog: no dialog opened within ${timeoutMs}ms`));
+      }, timeoutMs);
+      const off = this.armDialog(accept, promptText, (d) => {
         clearTimeout(timer);
         off();
-        void this.conn.send("Page.handleJavaScriptDialog", { accept, ...(promptText !== undefined ? { promptText } : {}) })
-          .then(() => resolve({ type: p.type, message: p.message, url: p.url, ...(p.defaultPrompt !== undefined ? { defaultPrompt: p.defaultPrompt } : {}) }))
-          .catch(reject);
+        resolve(d);
       });
     });
   }
@@ -527,9 +596,12 @@ class CdpBrowserDriver implements BrowserDriver {
   readonly capabilities = CDP_CAPABILITIES;
   readonly uidStability: UidStability = "browser-node";
   readonly snapshotFidelity = "accessibility-tree" as const;
-  async listPages(): Promise<PageInfo[]> {
+  // Copied verbatim from src/tools/pages.ts `listPages`: "all" toggles the type filter, and
+  // "type" rides on every returned entry (both were dropped by the earlier generic mapping).
+  async listPages(opts?: { all?: boolean }): Promise<PageInfo[]> {
     const targets = await listTargets();
-    return targets.filter((t) => t.type === "page").map((t) => ({ id: t.id, url: t.url, title: t.title }));
+    const filtered = opts?.all ? targets : targets.filter((t) => t.type === "page");
+    return filtered.map((t) => ({ id: t.id, url: t.url, title: t.title, type: t.type }));
   }
   async newPage(url?: string): Promise<PageInfo> {
     return withBrowserConn(async (conn) => {
@@ -538,8 +610,14 @@ class CdpBrowserDriver implements BrowserDriver {
       return { id: targetId, url: url ?? "about:blank", title: "" };
     });
   }
-  async closePage(id: string): Promise<void> {
-    await withBrowserConn((conn) => conn.send("Target.closeTarget", { targetId: id }));
+  /** Copied verbatim from src/tools/pages.ts `closePage`: the actual `success` field is
+   *  propagated (defaulting true only when the response omits it, matching newer Chromium
+   *  builds), never hardcoded. */
+  async closePage(id: string): Promise<{ success: boolean }> {
+    return withBrowserConn(async (conn) => {
+      const res = await conn.send<{ success?: boolean }>("Target.closeTarget", { targetId: id });
+      return { success: res.success ?? true };
+    });
   }
   async activatePage(id: string): Promise<PageInfo> {
     const target = await resolveTarget(id).catch(noSuchTarget);
@@ -548,12 +626,11 @@ class CdpBrowserDriver implements BrowserDriver {
   }
   async page(selector: TargetSelector): Promise<PageDriver> {
     const { conn, target } = await openPage(selector).catch(noSuchTarget);
-    await conn.send("Page.enable");
-    await conn.send("Runtime.enable");
-    // Deliberately NOT enabling Network here: "no eager Network.enable hang" is a documented
-    // design property of this toolkit, and enabling it on every page() acquisition would cost
-    // every caller that never touches the network. Network is enabled lazily instead, only when
-    // a Network-dependent path (startBodyCapture, emulate's networkConditions) is actually used.
+    // Deliberately NOT enabling ANY domain here (previously eagerly enabled Page+Runtime on every
+    // acquisition, which is exactly the "no eager domain enabling" policy violation this migration
+    // fixed: click/hover/drag/fill/etc never enabled any domain under the legacy tools/input.ts,
+    // so a Chrome click through this driver must not either). Every domain is enabled lazily by
+    // the PageDriver method that actually needs it, matching each legacy tool's own timing.
     return new CdpPageDriver(conn, target, this);
   }
   async dispose(): Promise<void> {}

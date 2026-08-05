@@ -25,7 +25,7 @@
 import type { TargetSelector } from "../types.ts";
 import {
   UID_STAMP_ATTR, isDriverError,
-  type BrowserDriver, type Capability, type DialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type SnapshotNode, type UidStability,
@@ -309,7 +309,7 @@ class BidiPageDriver implements PageDriver {
       throw mapBidiError(e);
     }
   }
-  async waitForText(text: string, timeoutMs = 15_000): Promise<{ found: true; elapsedMs: number }> {
+  async waitForText(text: string, timeoutMs = 15_000, pollMs = 250): Promise<{ found: true; elapsedMs: number }> {
     const start = Date.now();
     const expr = `(() => { const b = document.body; return !!b && typeof b.innerText === 'string' && b.innerText.includes(${JSON.stringify(text)}); })()`;
     for (;;) {
@@ -318,7 +318,7 @@ class BidiPageDriver implements PageDriver {
         .catch(() => false);
       if (found) return { found: true, elapsedMs: Date.now() - start };
       if (Date.now() - start >= timeoutMs) throw driverError("timeout", `waitForText: '${text}' not found within ${timeoutMs}ms`);
-      await new Promise((r) => setTimeout(r, Math.min(250, Math.max(0, timeoutMs - (Date.now() - start)))));
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(0, timeoutMs - (Date.now() - start)))));
     }
   }
 
@@ -541,16 +541,42 @@ class BidiPageDriver implements PageDriver {
     }
   }
 
-  async handleDialog(accept: boolean, promptText?: string): Promise<DialogInfo> {
+  private async handleOneDialog(accept: boolean, promptText: string | undefined, timeoutMs: number): Promise<HandledDialogInfo> {
     const opened = await this.conn
-      .waitFor("browsingContext.userPromptOpened", (p) => p.context === this.contextId, 15_000)
-      .catch(() => { throw driverError("timeout", "handleDialog: no dialog opened within 15000ms"); });
+      .waitFor("browsingContext.userPromptOpened", (p) => p.context === this.contextId, timeoutMs)
+      .catch(() => { throw driverError("timeout", `handleDialog: no dialog opened within ${timeoutMs}ms`); });
     try {
       await this.conn.send("browsingContext.handleUserPrompt", { context: this.contextId, accept, ...(promptText !== undefined ? { userText: promptText } : {}) });
     } catch (e) {
       throw mapBidiError(e);
     }
-    return { type: opened.type, message: opened.message, url: this.info.url, ...(opened.defaultValue !== undefined ? { defaultPrompt: opened.defaultValue } : {}) };
+    return {
+      type: opened.type, message: opened.message, url: this.info.url,
+      ...(opened.defaultValue !== undefined ? { defaultPrompt: opened.defaultValue } : {}),
+      accept, ...(promptText !== undefined ? { promptText } : {}), handled: true,
+    };
+  }
+  /** autoMs: no persistent-listener primitive on this transport, so this polls handleOneDialog with a
+   *  short per-iteration timeout until the window elapses. A dialog opening in the few-ms gap between
+   *  iterations could theoretically be missed; Firefox has no prior handle_dialog contract to preserve,
+   *  so this is an accepted approximation rather than a byte-identical port of anything. */
+  async handleDialog(
+    accept: boolean,
+    promptText?: string,
+    opts?: { timeoutMs?: number; autoMs?: number },
+  ): Promise<HandledDialogInfo | { handled: HandledDialogInfo[]; count: number }> {
+    if (opts?.autoMs !== undefined) {
+      const deadline = Date.now() + opts.autoMs;
+      const handled: HandledDialogInfo[] = [];
+      while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        const d = await this.handleOneDialog(accept, promptText, Math.min(250, remaining)).catch(() => undefined);
+        if (d) handled.push(d);
+      }
+      return { handled, count: handled.length };
+    }
+    return this.handleOneDialog(accept, promptText, opts?.timeoutMs ?? 15_000);
   }
 
   // Response bodies need network.addDataCollector armed BEFORE the request, per the established
@@ -661,10 +687,11 @@ class BidiBrowserDriver implements BrowserDriver {
       conn.release();
     }
   }
-  async closePage(id: string): Promise<void> {
+  async closePage(id: string): Promise<{ success: boolean }> {
     const conn = await getConnection(this.port, this.timeoutMs);
     try {
       await conn.send("browsingContext.close", { context: id }).catch((e) => { throw mapBidiError(e); });
+      return { success: true };
     } finally {
       conn.release();
     }

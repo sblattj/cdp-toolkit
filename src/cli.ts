@@ -25,7 +25,7 @@
 import { TOOLS, TOOL_NAMES, type ToolName } from "./index.ts";
 import { resolveBrowserKind, stripBrowserFlag, startFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
-import { NEUTRAL_TOOLS } from "./neutral.ts";
+import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
@@ -179,7 +179,7 @@ async function main(): Promise<number> {
 
   // Firefox: one process per invocation. Launch, run exactly one tool call, always dispose,
   // even if the tool call itself throws, so the spawned Firefox process never leaks.
-  const neutralFn = NEUTRAL_TOOLS[parsed.tool];
+  const neutralFn = FIREFOX_TOOLS[parsed.tool];
   if (!neutralFn) {
     process.stderr.write(`${JSON.stringify({ error: `tool '${parsed.tool}' has no Firefox implementation wired` })}\n`);
     return 1;
