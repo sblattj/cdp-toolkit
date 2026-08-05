@@ -1,8 +1,8 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call — so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out — plus a built-in network-mocking fake backend. **33 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **33 tools.**
 
-> For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably** — not a Puppeteer-managed browser.
+> For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably**, not a Puppeteer-managed browser.
 
 [![CI](https://github.com/sblattj/cdp-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/sblattj/cdp-toolkit/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/cdp-toolkit?color=cb3837&logo=npm)](https://www.npmjs.com/package/cdp-toolkit)
@@ -14,41 +14,41 @@
 
 ## In plain terms
 
-You let an AI agent — Claude Code, Cursor, any MCP host — control a Chrome tab: click, type, read the page, take screenshots, even fake API responses to test a UI before its backend exists. [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) does this too, but it runs a whole Puppeteer browser and talks to *all* your open tabs at once — which is why a single busy tab can freeze it and leave you typing `/mcp` to restart the server mid-task.
+You let an AI agent (Claude Code, Cursor, any MCP host) control a Chrome tab: click, type, read the page, take screenshots, even fake API responses to test a UI before its backend exists. [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) does this too, but it runs a whole Puppeteer browser and talks to *all* your open tabs at once, which is why a single busy tab can freeze it and leave you typing `/mcp` to restart the server mid-task.
 
-`cdp-toolkit` keeps it simple: **one connection to the one tab you point it at, and a time limit on every action.** When something stalls, you get an error back — not a frozen agent. Same things you could do before, minus the wedging and the restarts.
+`cdp-toolkit` keeps it simple: **one connection to the one tab you point it at, and a time limit on every action.** When something stalls, you get an error back, not a frozen agent. Same things you could do before, minus the wedging and the restarts.
 
-That's the whole pitch. The technical *why* — fan-out, lazy domain enabling, the `Network.enable` hang — is below.
+That's the whole pitch. The technical *why* (fan-out, lazy domain enabling, the `Network.enable` hang) is below.
 
 ## Why it exists
 
 If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) ever **wedged your agent on a busy tab**, you've met its design: it manages a Puppeteer browser, fans every operation out across *all* attached targets, and enables the `Network` domain on connect so it can passively buffer everything. That generality is exactly what makes it fragile once you already know which tab you want to drive.
 
-`cdp-toolkit` makes the opposite bet. Every tool attaches **one** direct WebSocket to **one** resolved target, enables only the CDP domains it needs, and enforces a **per-command timeout** so a stuck renderer can never hang the caller. For driving a tab you already have in hand — the common automation and evidence-gathering case — it's materially more robust.
+`cdp-toolkit` makes the opposite bet. Every tool attaches **one** direct WebSocket to **one** resolved target, enables only the CDP domains it needs, and enforces a **per-command timeout** so a stuck renderer can never hang the caller. For driving a tab you already have in hand, the common automation and evidence-gathering case, it's materially more robust.
 
 ## cdp-toolkit vs chrome-devtools-mcp
 
 | | **cdp-toolkit** | **chrome-devtools-mcp** |
 |---|---|---|
-| **Target scope** | one resolved tab (`active` / `index:N` / `url:` / `title:`) | all attached targets — fan-out can stall on an unrelated tab |
-| **`Network.enable`** | lazy — only when a tool needs it | eager on connect — a known hang on busy renderers |
-| **Per-command timeout** | ✅ bounded (`CDP_TIMEOUT_MS`, 15s default) — rejects, never hangs | ❌ none — a stuck renderer blocks indefinitely |
+| **Target scope** | one resolved tab (`active` / `index:N` / `url:` / `title:`) | all attached targets; fan-out can stall on an unrelated tab |
+| **`Network.enable`** | lazy, only when a tool needs it | eager on connect, a known hang on busy renderers |
+| **Per-command timeout** | ✅ bounded (`CDP_TIMEOUT_MS`, 15s default), rejects, never hangs | ❌ none; a stuck renderer blocks indefinitely |
 | **Element refs** | stateless `backendDOMNodeId` (resolved on demand) | server-side handle table (can drift / expire) |
 | **Network mocking** | ✅ persistent per-target fake backend | ❌ not available |
 | **Runtime deps** | CDP/CLI layer: native `WebSocket` + `fetch` (the MCP server adds only the MCP SDK) | Puppeteer stack |
-| **Auto-wait / retry** | ❌ single-shot — re-snapshot between steps | ✅ Puppeteer's auto-wait envelope |
+| **Auto-wait / retry** | ❌ single-shot; re-snapshot between steps | ✅ Puppeteer's auto-wait envelope |
 
-**Use `chrome-devtools-mcp`** if you need multi-target autonomy or Puppeteer's auto-wait/retry on an *unknown* page. **Use `cdp-toolkit`** when you have one tab in hand and need it not to hang. They coexist — `cdp-toolkit`'s tools are namespaced `mcp__cdp-toolkit__*`, distinct from `mcp__chrome-devtools__*`.
+**Use `chrome-devtools-mcp`** if you need multi-target autonomy or Puppeteer's auto-wait/retry on an *unknown* page. **Use `cdp-toolkit`** when you have one tab in hand and need it not to hang. They coexist: `cdp-toolkit`'s tools are namespaced `mcp__cdp-toolkit__*`, distinct from `mcp__chrome-devtools__*`.
 
 ## Is this for you?
 
-**Yes, if you —**
+**Yes, if you:**
 - drive one known tab from Claude Code / Cursor / any MCP host and want it to never wedge;
 - need to **mock a backend** to build or test a UI before the real API exists;
 - have been bitten by the eager-`Network.enable` hang on a busy renderer.
 
-**Probably not, if you —**
-- need cross-browser (Firefox / WebKit) — use [`playwright-mcp`](https://github.com/microsoft/playwright-mcp);
+**Probably not, if you:**
+- need cross-browser (Firefox / WebKit), use [`playwright-mcp`](https://github.com/microsoft/playwright-mcp);
 - need Puppeteer's auto-wait/retry envelope for an unknown, changing page;
 - want one server to fan out across *all* your open tabs at once.
 
@@ -76,7 +76,7 @@ npx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://ex
 # …or from a clone: `bun run src/cli.ts <tool> …`
 ```
 
-**Requirements:** Node ≥ 22 **or** Bun ≥ 1.1 — `npx -y cdp-toolkit` and `bunx -y cdp-toolkit` both work (the published bins are plain Node ESM). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`.
+**Requirements:** Node ≥ 22 **or** Bun ≥ 1.1: `npx -y cdp-toolkit` and `bunx -y cdp-toolkit` both work (the published bins are plain Node ESM). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`.
 
 ### MCP client setup
 
@@ -116,8 +116,8 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 ## Key capabilities
 
 - **Single-target reliability.** One WebSocket to one resolved target, a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. There is no broadcast step that can stall on a wedged tab.
-- **Network mocking — build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
-- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 33 single-purpose tools — no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
+- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 33 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
 
 ## Why raw CDP beats the MCP for known targets
 
@@ -130,9 +130,9 @@ Each point below leads with the symptom you've probably hit, then the cause, the
 
 The trade-off is generality: this toolkit targets one known page at a time and does **not** replicate Puppeteer's auto-wait/retry envelope. Re-`take_snapshot` between steps rather than expecting an implicit wait.
 
-## Network mocking — a fake backend for building/testing UIs
+## Network mocking: a fake backend for building/testing UIs
 
-Build and test a UI before its backend (or its data) exists. `mock_request` arms a persistent per-target interception session; mock several endpoints by calling it repeatedly, then iterate on the page — the mocks survive reloads and navigations until `clear_mocks`.
+Build and test a UI before its backend (or its data) exists. `mock_request` arms a persistent per-target interception session; mock several endpoints by calling it repeatedly, then iterate on the page; the mocks survive reloads and navigations until `clear_mocks`.
 
 ```bash
 # Return empty search results and reload to see how the UI renders the zero state
@@ -231,7 +231,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 | `wait_for` | `Runtime.evaluate` (poll `innerText`) | Text-substring waiting only; throws on timeout rather than returning `{found:false}`. |
 | `evaluate_script` | `Runtime.evaluate` / `callFunctionOn` | No live `page`/element handle; `args` are plain JSON. Main-world context only. |
 | `take_snapshot` | `Accessibility.getFullAXTree` | uid is the raw `backendDOMNodeId` (stateless, non-sequential). Full tree in one shot; frames flattened. `interactiveOnly` is a toolkit addition. |
-| `click` | `Input.dispatchMouseEvent` | No implicit auto-wait/retry — resolves and acts once; re-snapshot between steps. |
+| `click` | `Input.dispatchMouseEvent` | No implicit auto-wait/retry; resolves and acts once; re-snapshot between steps. |
 | `hover` | `Input.dispatchMouseEvent` (`mouseMoved`) | Same single-shot model as `click`. |
 | `drag` | `Input.dispatchMouseEvent` (press→move→release) | Synthetic mouse drag; native HTML5 DnD is approximated. |
 | `fill` | `Input.insertText` | Atomic paste-like commit, not per-character keystrokes. |
@@ -247,11 +247,11 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 4 superset tools (`p
 | `get_console_message` | reads the shared "latest" buffer | Index into the latest capture; throws if out of range. |
 | `list_network_requests` | `Network.*` events (+ `Page.reload`) | Correlated rows from the per-capture buffer; redirect chains collapse to the first row. No timing breakdown / POST data. |
 | `get_network_request` | above + `Network.getResponseBody` | Bodies only via a fresh reload capture (CDP serves bodies from the live session); `includeBody` matches by **url**. |
-| `performance_start_trace` | `Tracing.start` / `dataCollected` | Works ONLY within one process — a live trace buffer is bound to its connection. Use `performance_trace` for robustness. |
+| `performance_start_trace` | `Tracing.start` / `dataCollected` | Works ONLY within one process; a live trace buffer is bound to its connection. Use `performance_trace` for robustness. |
 | `performance_stop_trace` | `Tracing.end` / `tracingComplete` | Must run in the SAME process as `performance_start_trace`; throws a clear error otherwise. |
 | `performance_analyze_insight` | parses a trace JSON file | A **CDP-native approximation** of the MCP insight analyzer (FCP/LCP/CLS/TBT/long-tasks); close but not byte-identical. Requires an explicit `tracePath`. |
 | `take_heapsnapshot` | `HeapProfiler.takeHeapSnapshot` | Returns `{path,bytes,chunks,target}`; does not parse the snapshot (load the `.heapsnapshot` in the DevTools Memory panel). |
-| `lighthouse_audit` | **none (non-CDP)** — spawns `npx --yes lighthouse …` | The toolkit's sole non-CDP tool. Defaults to the desktop preset. Returns numeric category scores (full report on disk). |
+| `lighthouse_audit` | **none (non-CDP)**, spawns `npx --yes lighthouse …` | The toolkit's sole non-CDP tool. Defaults to the desktop preset. Returns numeric category scores (full report on disk). |
 | `performance_trace` *(superset)* | `Tracing.*` (+ `Page.reload`) | **Toolkit convenience.** A robust single-call trace: start → optional reload → capture for `durationMs` → end → write the trace JSON → return `{path,bytes,events,metrics}`. Preferred over the `start`/`stop` pair (CDP tracing is browser-global and bound to one connection). |
 | `mock_request` *(superset)* | `Fetch.*` (+ `Page.reload`) | **A fake backend.** Registers a rule on a target's persistent session: fulfill with a canned response, fail, or continue (with optional `delayMs`/`failRate`). Persists across reloads until `clear_mocks`. Request-stage only. Cached requests aren't intercepted (use `reload:true`). |
 | `list_mocks` *(superset)* | `Runtime.evaluate` (liveness probe) | Lists active mock sessions with rules + hit counts; prunes sessions whose tab closed. |
@@ -282,7 +282,7 @@ Each module ends with a footer comment listing the exact CDP methods it uses and
 
 ## Contributing
 
-Issues and PRs welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) and the [`good first issue`](https://github.com/sblattj/cdp-toolkit/labels/good%20first%20issue) label. By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md).
+Issues and PRs welcome, see [`CONTRIBUTING.md`](./CONTRIBUTING.md) and the [`good first issue`](https://github.com/sblattj/cdp-toolkit/labels/good%20first%20issue) label. By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## License
 

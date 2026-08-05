@@ -1,13 +1,13 @@
 /**
- * network_mock.ts — a per-target FAKE BACKEND for the page: intercept matching
+ * network_mock.ts: a per-target FAKE BACKEND for the page: intercept matching
  * requests via the CDP Fetch domain and fulfill them with a canned response,
  * fail (abort) them, or let them continue (optionally with fault injection).
  * The rod `HijackRequests` capability the read-only console/network tools lack.
  *
  * This file is split into two layers:
  *   1. PURE logic (urlMatches / selectRule / buildFulfillParams / effectiveAction)
- *      — no browser, unit-tested in test/network_mock.test.ts.
- *   2. STATEFUL tools (mockRequest / listMocks / clearMocks) — hold a persistent
+ *      No browser needed, unit-tested in test/network_mock.test.ts.
+ *   2. STATEFUL tools (mockRequest / listMocks / clearMocks): hold a persistent
  *      CDP connection per target; integration-tested in test/mock-smoke.ts.
  */
 import { CdpError, openPage, resolveTarget } from "../client.ts";
@@ -15,7 +15,7 @@ import type { CdpConnection } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 
 /* ============================================================================
- * LAYER 1 — pure logic (no I/O)
+ * LAYER 1: pure logic (no I/O)
  * ========================================================================== */
 
 export type MockAction = "fulfill" | "fail" | "continue";
@@ -111,7 +111,7 @@ export function effectiveAction(rule: { action: MockAction; failRate?: number },
 }
 
 /* ============================================================================
- * LAYER 2 — stateful tools (persistent per-target CDP connection)
+ * LAYER 2: stateful tools (persistent per-target CDP connection)
  *
  * A "fake backend" is a per-target SESSION holding ONE persistent CDP connection
  * with the Fetch domain enabled. Each session carries a list of rules; an
@@ -122,7 +122,7 @@ export function effectiveAction(rule: { action: MockAction; failRate?: number },
  * Persistence works because the MCP server process is long-lived across tool
  * calls, so this module-level `sessions` map and its open connections outlive a
  * single call. (The stateless CLI process exits after one command, so persistent
- * mocking is an MCP-server capability — like the recorder's background mode.)
+ * mocking is an MCP-server capability, like the recorder's background mode.)
  *
  * SAFETY: every paused request MUST be answered or the renderer hangs. A request
  * that pauses but matches no rule is continued untouched.
@@ -182,7 +182,7 @@ function registerHandler(session: MockSession): void {
         session.intercepted.push({ url: p.request.url, method: p.request.method, action: act });
       })
       .catch((e) => {
-        // Tab navigated away mid-flight or the connection dropped — best-effort.
+        // Tab navigated away mid-flight or the connection dropped, best-effort.
         if (/closed|connection|Target|Inspected/i.test(String(e))) session.dead = true;
       });
   });
@@ -359,7 +359,7 @@ export async function clearMocks(args: ClearMocksArgs = {}): Promise<{ cleared: 
  *   Page.enable + Page.reload (reload:true), Runtime.evaluate (liveness probe).
  * Model: persistent per-target session (like recorder.ts), MCP-server-scoped state.
  * Parity gaps vs rod HijackRequests / chrome-devtools-mcp:
- *   - Request-stage only — no live Response-body rewriting (add requestStage:"Response"
+ *   - Request-stage only, no live Response-body rewriting (add requestStage:"Response"
  *     + Fetch.getResponseBody/continueResponse for that).
  *   - Persistence is in-process: works via the long-lived MCP server, not the
  *     one-shot CLI (mirrors the recorder's background mode).

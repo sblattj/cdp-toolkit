@@ -1,5 +1,5 @@
 /**
- * recorder.ts — the stateful console+network capture engine.
+ * recorder.ts: the stateful console+network capture engine.
  *
  * RECORDER MODEL
  * ==============
@@ -22,7 +22,7 @@
  *
  * CAPTURE MODEL (what the tool surface actually uses)
  * ---------------------------------------------------
- * The console/network tools drive `captureWindow()` — a one-shot reload capture
+ * The console/network tools drive `captureWindow()`, a one-shot reload capture
  * that records BOTH domains into a UNIQUE per-capture file
  * (`rec-<targetId>-<captureId>.jsonl`) and, on stop, publishes that capture as
  * the target's shared "latest" buffer (`rec-<targetId>.jsonl`). Capturing both
@@ -154,7 +154,7 @@ export async function startRecorder(target: TargetSelector, opts: RecorderOption
       try {
         await conn.send("Log.enable");
       } catch {
-        /* Log not supported on this target type — Runtime events still flow */
+        /* Log not supported on this target type; Runtime events still flow */
       }
       for (const ev of CONSOLE_EVENTS) {
         unsubs.push(conn.on(ev, (params) => persist("console", ev, params)));
@@ -165,7 +165,7 @@ export async function startRecorder(target: TargetSelector, opts: RecorderOption
     throw err;
   }
 
-  // Stop accepting new events, then let queued appends settle — without closing
+  // Stop accepting new events, then let queued appends settle, without closing
   // the connection (response bodies stay fetchable on `conn`).
   const flush = async (): Promise<void> => {
     for (const off of unsubs) off();
@@ -195,7 +195,7 @@ export async function startRecorder(target: TargetSelector, opts: RecorderOption
 export interface CaptureWindow {
   /** The unique per-capture buffer file (read this for isolated results). */
   file: string;
-  /** Live connection (open until stop) — for Network.getResponseBody etc. */
+  /** Live connection (open until stop), for Network.getResponseBody etc. */
   conn: CdpConnection;
   /** Resolved target identity. */
   resolved: { id: string; url: string; title: string };

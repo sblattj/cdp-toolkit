@@ -1,5 +1,5 @@
 /**
- * MCP server smoke test — spawns src/mcp.ts as a real stdio MCP server via the
+ * MCP server smoke test: spawns src/mcp.ts as a real stdio MCP server via the
  * official SDK client, performs the initialize/tools/list handshake, and (if the
  * manifest is populated and Chrome is reachable) round-trips a real tool call
  * against a throwaway page. Run with `bun run mcp:smoke`.
@@ -25,10 +25,10 @@ function callText(res: { content: Array<{ type: string; text?: string }>; isErro
 
 try {
   await client.connect(transport);
-  console.log("✅ initialize — connected to cdp-toolkit MCP server");
+  console.log("✅ initialize: connected to cdp-toolkit MCP server");
 
   const { tools } = await client.listTools();
-  console.log(`✅ tools/list — ${tools.length} tools advertised`);
+  console.log(`✅ tools/list: ${tools.length} tools advertised`);
   const names = new Set(tools.map((t) => t.name));
   if (tools.length) {
     const sample = tools.find((t) => t.name === "click");
@@ -41,20 +41,20 @@ try {
     try {
       const created = await client.callTool({ name: "new_page", arguments: { url: "about:blank" } });
       targetId = JSON.parse(callText(created as never)).targetId as string;
-      console.log(`✅ tools/call new_page — targetId=${targetId.slice(0, 8)}`);
+      console.log(`✅ tools/call new_page: targetId=${targetId.slice(0, 8)}`);
 
       const ev = await client.callTool({ name: "evaluate_script", arguments: { target: targetId, expression: "2+40" } });
       const val = JSON.parse(callText(ev as never));
-      console.log(`${val === 42 ? "✅" : "❌"} tools/call evaluate_script — 2+40 => ${val}`);
+      console.log(`${val === 42 ? "✅" : "❌"} tools/call evaluate_script: 2+40 => ${val}`);
       if (val !== 42) exitCode = 1;
     } finally {
       if (targetId) {
         await client.callTool({ name: "close_page", arguments: { target: targetId } });
-        console.log("✅ tools/call close_page — throwaway page cleaned up");
+        console.log("✅ tools/call close_page: throwaway page cleaned up");
       }
     }
   } else {
-    console.log("ℹ️  manifest not yet populated (or Chrome down) — skipped live tools/call round-trip");
+    console.log("ℹ️  manifest not yet populated (or Chrome down), skipped live tools/call round-trip");
   }
 } catch (err) {
   console.error(`❌ FATAL: ${err instanceof Error ? err.message : String(err)}`);

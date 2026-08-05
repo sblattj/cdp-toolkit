@@ -1,5 +1,5 @@
 /**
- * console.ts — read console output captured by the recorder.
+ * console.ts: read console output captured by the recorder.
  *
  *   list_console_messages -> listConsoleMessages
  *   get_console_message   -> getConsoleMessage
@@ -135,7 +135,7 @@ async function readConsoleEntries(file: string): Promise<ConsoleEntry[]> {
 }
 
 /**
- * list_console_messages — return console output for the target. With
+ * list_console_messages: return console output for the target. With
  * `reload:true`, records a fresh capture window by reloading the page.
  */
 export async function listConsoleMessages(args: ListConsoleMessagesArgs = {}): Promise<{
@@ -166,7 +166,7 @@ export async function listConsoleMessages(args: ListConsoleMessagesArgs = {}): P
 }
 
 /**
- * get_console_message — return a single console entry by index from the
+ * get_console_message: return a single console entry by index from the
  * existing buffer for the target. Throws if the index is out of range.
  */
 export async function getConsoleMessage(args: GetConsoleMessageArgs = {}): Promise<ConsoleEntry> {

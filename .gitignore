@@ -1,9 +1,9 @@
 node_modules/
 *.log
-# build output — rebuilt at publish via the prepublishOnly hook, never committed
+# build output, rebuilt at publish via the prepublishOnly hook, never committed
 dist/
 # runtime artifacts (screenshots, traces, heap snapshots, recorder buffers)
 /tmp/cdp-toolkit/
-# internal launch / planning docs — kept locally, NOT part of the public repo
+# internal launch / planning docs, kept locally, NOT part of the public repo
 ANALYSIS.md
 LAUNCH-PLAN.md

@@ -1,5 +1,5 @@
 /**
- * evaluate_script — run arbitrary JavaScript in a page's main context over raw
+ * evaluate_script: run arbitrary JavaScript in a page's main context over raw
  * CDP and return the evaluated value.
  *
  * Two modes, selected by whether `args` is supplied:
@@ -148,7 +148,7 @@ export async function evaluateScript(args: EvaluateScriptArgs): Promise<unknown>
  *
  * Parity gaps vs chrome-devtools-mcp evaluate_script:
  *   - MCP injects a typed `page`/element handle into the evaluated function; here `args` are plain
- *     JSON-serializable values passed positionally — no live element/page handle is bound.
+ *     JSON-serializable values passed positionally; no live element/page handle is bound.
  *   - Non-serializable return values (DOM nodes, functions, circular objects) come back as their CDP
  *     `description` string rather than a structured handle, since returnByValue is used.
  *   - No isolated-world/contextId selection: evaluation runs in the page's default main-world context.

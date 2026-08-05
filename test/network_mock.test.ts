@@ -1,5 +1,5 @@
 /**
- * Unit tests for the PURE logic of network_mock.ts — the bug-prone parts that
+ * Unit tests for the PURE logic of network_mock.ts: the bug-prone parts that
  * need no browser: CDP urlPattern glob matching, rule selection (pattern +
  * method), fulfill-param construction (header merge + base64), and the
  * fault-injection decision. The stateful CDP I/O is covered by test/mock-smoke.ts
@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { urlMatches, selectRule, buildFulfillParams, effectiveAction } from "../src/tools/network_mock.ts";
 
-describe("urlMatches — CDP urlPattern glob", () => {
+describe("urlMatches: CDP urlPattern glob", () => {
   test("'*' matches a run of characters", () => {
     expect(urlMatches("*/api/users*", "https://x.com/api/users?page=1")).toBe(true);
   });
@@ -35,7 +35,7 @@ describe("urlMatches — CDP urlPattern glob", () => {
   });
 });
 
-describe("selectRule — first match by order, with method filter", () => {
+describe("selectRule: first match by order, with method filter", () => {
   const rules = [
     { urlPattern: "*/api/a*", action: "fulfill" as const },
     { urlPattern: "*/api/*", action: "fail" as const, method: "POST" },
@@ -56,7 +56,7 @@ describe("selectRule — first match by order, with method filter", () => {
   });
 });
 
-describe("buildFulfillParams — headers + base64 body", () => {
+describe("buildFulfillParams: headers + base64 body", () => {
   test("base64-encodes the body and carries the status", () => {
     const p = buildFulfillParams("req1", { status: 201, body: '{"ok":true}', contentType: "application/json", headers: {} });
     expect(p.requestId).toBe("req1");
@@ -83,7 +83,7 @@ describe("buildFulfillParams — headers + base64 body", () => {
   });
 });
 
-describe("effectiveAction — fault injection", () => {
+describe("effectiveAction: fault injection", () => {
   test("failRate above the roll forces a fail", () => {
     expect(effectiveAction({ action: "fulfill", failRate: 0.5 }, 0.1)).toBe("fail");
   });

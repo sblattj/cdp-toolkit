@@ -6,11 +6,11 @@
  * code itself is Node-portable (it relies only on `node:` builtins + the global
  * `fetch`/`WebSocket` available in Node >= 22). So we bundle each entrypoint to
  * plain Node ESM and rewrite the bin shebangs to `node`. That makes the package
- * runnable via BOTH `bunx -y cdp-toolkit` and `npx -y cdp-toolkit` — npx is the
+ * runnable via BOTH `bunx -y cdp-toolkit` and `npx -y cdp-toolkit`, and npx is the
  * dominant MCP-install idiom, so this widens the audience without giving up Bun.
  *
  * `@modelcontextprotocol/sdk` stays EXTERNAL (a real runtime dependency, resolved
- * from node_modules by the consumer) — we bundle only our own code.
+ * from node_modules by the consumer); we bundle only our own code.
  *
  * dist/ is gitignored and rebuilt at publish time via the `prepublishOnly` hook.
  */

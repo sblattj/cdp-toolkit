@@ -2,7 +2,7 @@
  * End-to-end smoke for network mocking (mock_request / list_mocks / clear_mocks)
  * against the live Chrome on CDP_BASE (default http://127.0.0.1:9222).
  *
- * HERMETIC: it mocks https://mock.invalid/* — CDP Fetch intercepts at the REQUEST
+ * HERMETIC: it mocks https://mock.invalid/*: CDP Fetch intercepts at the REQUEST
  * stage (before DNS), so the canned response is served with no real network. The
  * page fetches that URL; we assert it receives the mocked body, that list_mocks
  * reports the active session + hit, that clear_mocks tears it down, and that the
@@ -17,7 +17,7 @@ type Check = { name: string; ok: boolean; detail: string };
 const checks: Check[] = [];
 function record(name: string, ok: boolean, detail: string): void {
   checks.push({ name, ok, detail });
-  console.log(`${ok ? "✅" : "❌"} ${name} — ${detail}`);
+  console.log(`${ok ? "✅" : "❌"} ${name}: ${detail}`);
 }
 
 // A page that, on load, fetches the (to-be-mocked) URL and stashes the result.

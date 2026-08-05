@@ -1,5 +1,5 @@
 /**
- * heap.ts — `take_heapsnapshot` over raw CDP.
+ * heap.ts: `take_heapsnapshot` over raw CDP.
  *
  * Captures a V8 heap snapshot of a page target and writes it as a
  * `.heapsnapshot` file (the JSON format DevTools' Memory panel loads).
@@ -7,7 +7,7 @@
  * CDP semantics this module relies on:
  *   - `HeapProfiler.takeHeapSnapshot` streams the snapshot back as a sequence
  *     of `HeapProfiler.addHeapSnapshotChunk` events. The command's own result
- *     does NOT carry the data — it resolves only after the final chunk has been
+ *     does NOT carry the data; it resolves only after the final chunk has been
  *     emitted. So we subscribe to the chunk event first, accumulate every
  *     chunk's string, then `await` the command; once it resolves we have the
  *     complete snapshot and join the chunks into one JSON document.
@@ -103,7 +103,7 @@ export async function takeHeapsnapshot(
  *
  * Parity gaps vs chrome-devtools-mcp `take_heapsnapshot`:
  *   - reportProgress is forced false; no incremental progress callbacks surfaced.
- *   - Returns {path,bytes,chunks,target} only — does not parse/summarize the
+ *   - Returns {path,bytes,chunks,target} only; does not parse/summarize the
  *     snapshot (node counts, retained sizes); the .heapsnapshot file is for the
  *     DevTools Memory panel to load, matching the MCP tool's artifact behavior.
  * --------------------------------------------------------------------------*/

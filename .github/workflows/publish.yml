@@ -4,7 +4,7 @@ name: publish
 # (no NPM_TOKEN secret) with a provenance attestation.
 #
 # ONE-TIME PREREQUISITES (the workflow can't do these for you):
-#   1. The repo must be PUBLIC — provenance attestation requires a public repo.
+#   1. The repo must be PUBLIC: provenance attestation requires a public repo.
 #   2. On npmjs.com → the cdp-toolkit package → Settings → Trusted Publisher,
 #      add this GitHub repo + workflow (sblattj/cdp-toolkit, .github/workflows/publish.yml).
 #      For a brand-new package name you typically do the FIRST `npm publish`
@@ -20,14 +20,14 @@ name: publish
 #      `registry-url: "https://registry.npmjs.org"`. This matches npm's own
 #      documented example for GitHub Actions trusted publishing. We tried
 #      removing it once on a theory that it was interfering with OIDC; that
-#      was wrong and made things worse — without it npm attempts no auth at
+#      was wrong and made things worse, because without it npm attempts no auth at
 #      all and fails immediately with ENEEDAUTH ("You need to authorize this
 #      machine using `npm login`"). Keep it.
 #   5. Trusted Publisher entries on npmjs.com also have an "Allowed actions"
 #      selector (`npm publish`, `npm stage publish`, or both; entries created
 #      after 2026-05-20 require an explicit choice). If a publish signs
 #      provenance to Sigstore successfully and then still 404s on the actual
-#      registry PUT, check that selector first — it is unconfirmed as OUR
+#      registry PUT, check that selector first; it is unconfirmed as OUR
 #      cause, but it is the one documented setting that would produce exactly
 #      that split (provenance is a separate OIDC path from the publish PUT).
 #   6. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
@@ -72,7 +72,7 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           if npm view "cdp-toolkit@${VERSION}" version >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::cdp-toolkit@${VERSION} already on npm — skipping publish."
+            echo "::notice::cdp-toolkit@${VERSION} already on npm, skipping publish."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi

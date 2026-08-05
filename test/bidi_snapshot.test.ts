@@ -107,7 +107,7 @@ describe("buildSnapshotFunctionSource", () => {
   });
 
   test("carries no em dash or en dash", () => {
-    expect(/—|–/.test(buildSnapshotFunctionSource())).toBe(false);
+    expect(/\u2014|\u2013/.test(buildSnapshotFunctionSource())).toBe(false);
   });
 
   test("is valid JavaScript (parses without throwing)", () => {
