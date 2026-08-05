@@ -49,9 +49,11 @@ Both are opt in. Pick Firefox explicitly or you get Chrome as before; omit
   `target: active` (or no target at all) and no `lease`, it is now refused,
   naming the tab, its url, and the label of the holder. Before 1.2 that call
   silently succeeded against whatever tab happened to be first. Nothing else
-  newly fails: an unleased tab is always allowed, a stale lease (dead owner,
-  elapsed TTL, closed tab) never blocks, and no default, return shape, or
-  previously legal call changed.
+  newly fails: an unleased tab is always allowed, a stale lease (dead owner or
+  elapsed TTL) never blocks, and no default, return shape, or previously legal
+  call changed. A lease whose tab is no longer open is reported by `list_leases`
+  as `target-gone`, but that report is not what frees it: it is freed by the
+  same two rules, whichever lands first.
 - `close_page` releases that tab's lease when the close actually succeeds, and
   leaves the lease in place when it does not.
 - Enforcement lives at the three target resolution choke points (`resolveTarget`
