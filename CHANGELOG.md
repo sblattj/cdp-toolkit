@@ -7,17 +7,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [1.2.0] - 2026-08-05
 
-Lease based tab ownership, so several agents can drive the same browser without
-stealing each other's tab. Opt in: omit `lease` and every call behaves exactly
-as it did in 1.1.
+Two things landed since 1.0: a second backend, Firefox over WebDriver BiDi,
+alongside the existing Chrome over CDP; and lease based tab ownership, so
+several agents can drive the same browser without stealing each other's tab.
+Both are opt in. Pick Firefox explicitly or you get Chrome as before; omit
+`lease` and every call behaves exactly as it did in 1.0.
 
 ### Added
 
+- **A second backend: Firefox over WebDriver BiDi**, behind the same tool
+  surface as Chrome over CDP. Chrome stays the default; select Firefox with
+  `--browser firefox` (CLI) or `CDP_BROWSER=firefox` (CLI or MCP server).
+- **Per-backend tool filtering.** `tools/list` (MCP) and `--list`/
+  `--capabilities` (CLI) only ever advertise a tool the selected browser can
+  actually run; a tool a backend cannot run is absent from the listing rather
+  than throwing at call time. Firefox lacks the accessibility tree, atomic
+  text insert, full emulation, tracing, heap snapshots, and Lighthouse audits;
+  everything else, including network mocking and the lease group below, runs
+  on both backends.
+- **A Firefox smoke job in CI**, gating the new backend the same way the
+  existing Chrome smoke gates the old one.
 - **Three tools**: `claim_page` (take a tab, or open and take one in a single
   call, and get back an opaque lease token), `release_page` (idempotent, and
   does not close the tab), and `list_leases` (who holds what, with pid liveness
   and reclaimability; needs no token and never returns the lease nonce).
-- **An optional `lease` argument on the other 33 tools.** Present it and a tab
+- **An optional `lease` argument on the other tools.** Present it and a tab
   you hold keeps answering you; omit it and an unleased tab behaves as before.
   `release_page` is the one tool where the token is required.
 - **`new_page` gained `claim`, `label`, and `ttlMs`.** With `claim:true` the new
