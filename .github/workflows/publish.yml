@@ -17,13 +17,22 @@ name: publish
 #      permission error, because provenance signing to Sigstore still
 #      succeeds (it is a separate OIDC path) right up until the actual
 #      registry PUT.
-#   4. The `actions/setup-node` step below must NOT be given a `registry-url`
-#      input. Passing one makes setup-node write an .npmrc with a placeholder
-#      NODE_AUTH_TOKEN, which makes npm think auth is already configured and
-#      skip the OIDC trusted-publish exchange entirely, producing the same
-#      confusing E404 from a different direction. The registry defaults to
-#      npmjs.org anyway, so nothing is lost by leaving it out.
-#   5. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
+#   4. The `actions/setup-node` step below MUST be given
+#      `registry-url: "https://registry.npmjs.org"`. We tried removing it on
+#      the theory that it was the cause of an E404 (see below), and that made
+#      things strictly worse: without it npm never attempts any auth at all
+#      and fails immediately with ENEEDAUTH ("You need to authorize this
+#      machine using `npm login`"). So registry-url stays; it is required,
+#      not the problem.
+#   5. Trusted Publisher entries created on npmjs.com after 2026-05-20 also
+#      have an "Allowed actions" selector (`npm publish`, `npm stage publish`,
+#      or both) that must explicitly include `npm publish`. Provenance
+#      attestation can succeed even when this is misconfigured, since it is a
+#      separate OIDC path from the registry PUT — so a run that signs
+#      provenance to Sigstore and then 404s on the actual publish PUT is
+#      consistent with "npm publish" not being in the allowed actions on the
+#      npmjs.com side, not with a workflow-file problem.
+#   6. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
 #      push a matching tag:  git tag v1.0.1 && git push origin v1.0.1
 #
 # After that, every `git push origin v*` cuts a published, provenance-signed release.
@@ -45,15 +54,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # No registry-url here on purpose: setting it makes setup-node write an
-      # .npmrc with a placeholder NODE_AUTH_TOKEN, which makes npm think auth
-      # is already configured and skip the OIDC trusted-publish exchange, so
-      # the publish PUT goes out with a garbage token and the registry answers
-      # a confusing E404 instead of a permission error. The registry defaults
-      # to npmjs.org anyway, so leaving this out costs nothing.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          registry-url: "https://registry.npmjs.org"
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
@@ -74,6 +78,11 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+      # --loglevel verbose is temporary instrumentation: it makes npm's OIDC
+      # attempt (or lack of one) visible in the run log instead of inferred,
+      # since npm's normal output does not otherwise distinguish "OIDC token
+      # exchange happened and was rejected" from "OIDC was never attempted."
+      # Remove once trusted publishing is confirmed working end to end.
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --loglevel verbose
