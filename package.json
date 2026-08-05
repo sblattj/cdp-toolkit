@@ -1,7 +1,7 @@
 {
   "name": "cdp-toolkit",
-  "version": "1.1.0",
-  "description": "A lightweight chrome-devtools-mcp alternative: a single-target MCP server + CLI that drives one tab over a direct WebSocket with a bounded timeout on every call, so a stuck page can't wedge your agent or force a /mcp restart. Chrome over CDP and Firefox over WebDriver BiDi, with tools a backend can't run absent from tools/list rather than throwing mid-task. 33 tools including built-in network mocking. No Puppeteer, no all-target fan-out.",
+  "version": "1.2.0",
+  "description": "A lightweight chrome-devtools-mcp alternative: a single-target MCP server + CLI that drives one tab over a direct WebSocket with a bounded timeout on every call, so a stuck page can't wedge your agent or force a /mcp restart. Chrome over CDP and Firefox over WebDriver BiDi, with tools a backend can't run absent from tools/list rather than throwing mid-task. 36 tools including built-in network mocking. No Puppeteer, no all-target fan-out.",
   "type": "module",
   "license": "MIT",
   "author": {

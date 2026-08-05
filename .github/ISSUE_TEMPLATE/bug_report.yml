@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug, crash, hang, or wrong behavior in one of the 33 tools.
+description: Report a bug, crash, hang, or wrong behavior in one of the 36 tools.
 labels: ["bug"]
 body:
   - type: markdown

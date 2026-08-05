@@ -226,7 +226,7 @@ export async function releaseLeaseFor(backend: LeaseBackend, targetId: string): 
  * This exists so enforcement can stay at ONE point per resolution path while
  * the token still reaches it. The token arrives as a key on a tool's args
  * object, many frames above resolveTarget, and threading a parameter through
- * all 33 tools would put the burden on every future contributor to remember
+ * all 36 tools would put the burden on every future contributor to remember
  * the check exists: one missed tool would silently defeat the feature for that
  * tool. mcp.ts and cli.ts open this scope once per dispatch instead, so a tool
  * added tomorrow is covered with no action from whoever writes it.

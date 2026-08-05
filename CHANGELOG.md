@@ -5,6 +5,52 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-05
+
+Lease based tab ownership, so several agents can drive the same browser without
+stealing each other's tab. Opt in: omit `lease` and every call behaves exactly
+as it did in 1.1.
+
+### Added
+
+- **Three tools**: `claim_page` (take a tab, or open and take one in a single
+  call, and get back an opaque lease token), `release_page` (idempotent, and
+  does not close the tab), and `list_leases` (who holds what, with pid liveness
+  and reclaimability; needs no token and never returns the lease nonce).
+- **An optional `lease` argument on the other 33 tools.** Present it and a tab
+  you hold keeps answering you; omit it and an unleased tab behaves as before.
+  `release_page` is the one tool where the token is required.
+- **`new_page` gained `claim`, `label`, and `ttlMs`.** With `claim:true` the new
+  tab is claimed as part of creating it and the response carries a `lease`
+  token, so no other agent can see the tab unclaimed and take it first.
+- **`CDP_LEASE_TTL_MS`** (default `900000`, 15 minutes): how long a lease
+  survives without use before another agent can reclaim it. Every checked call
+  refreshes it, so a working agent never expires and needs no heartbeat.
+- Lease files under `CDP_ARTIFACT_DIR`, one per leased tab, created with the
+  `wx` exclusive flag so two simultaneous claims cannot both win.
+
+### Changed
+
+- **The one behavior change.** If tab index 0 is leased and a call arrives with
+  `target: active` (or no target at all) and no `lease`, it is now refused,
+  naming the tab, its url, and the label of the holder. Before 1.2 that call
+  silently succeeded against whatever tab happened to be first. Nothing else
+  newly fails: an unleased tab is always allowed, a stale lease (dead owner,
+  elapsed TTL, closed tab) never blocks, and no default, return shape, or
+  previously legal call changed.
+- `close_page` releases that tab's lease when the close actually succeeds, and
+  leaves the lease in place when it does not.
+- Enforcement lives at the three target resolution choke points (`resolveTarget`
+  for Chrome, `resolveContext` for Firefox, `resolvePage` for `close_page` and
+  `select_page`), never in individual tools, so a tool added later is covered
+  with no action from whoever writes it.
+- `claim_page` is refused from the CLI. A CLI invocation is one process per
+  call, so a lease it claimed would be reclaimable immediately under the dead
+  pid rule. It is still listed by `--list`, and CLI calls can still present a
+  token minted by the MCP server via `--lease`.
+- Tool count is now 36 (29 parity + 7 superset); 30 under Firefox, which lacks
+  the six capability gated tools.
+
 ## [1.0.0] - 2026-06-24
 
 First public release.

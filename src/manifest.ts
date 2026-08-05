@@ -63,6 +63,10 @@ export const MANIFEST: ToolSpec[] = [
         "label": {
           "type": "string",
           "description": "Agent label recorded on the lease when claim:true, surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
+        },
+        "ttlMs": {
+          "type": "number",
+          "description": "How long the lease taken by claim:true survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15 minutes). Every checked call refreshes it, so an active agent never expires. Ignored without claim:true."
         }
       },
       "required": [],
