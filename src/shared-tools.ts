@@ -160,11 +160,16 @@ export async function closePage(
   if (args.target === undefined || args.target === "") throw new SharedToolError("close_page requires an explicit target; refusing to guess which page to close");
   const p = await resolvePage(driver, args.target);
   const res = await driver.closePage(p.id);
+  // A failed close (target refused to close, or was already gone) must leave
+  // the lease intact: the caller still owns a tab that never actually closed,
+  // and releasing it here would let another agent claim a tab this one still
+  // thinks it holds.
+  if (!res.success) return { closed: p.id, success: false, leaseReleased: false };
   // Closing a leased tab must not leave its lease file behind waiting on the
   // TTL. resolvePage above already refused this call unless the caller holds
   // the lease, so no token is needed here.
   const released = await releaseLeaseFor(backendOf(driver), p.id);
-  return { closed: p.id, success: res.success, ...(released.released ? { leaseReleased: true } : {}) };
+  return { closed: p.id, success: true, ...(released.released ? { leaseReleased: true } : {}) };
 }
 
 async function writeSelectedFile(id: string): Promise<void> {
