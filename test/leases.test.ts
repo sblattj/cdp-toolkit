@@ -495,7 +495,7 @@ describe("close_page clears the lease (spec section 6)", () => {
  * listing (a worker, an iframe), which is the one resolvePage branch whose hit
  * is not a member of the page list.
  */
-function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[] } = {}) {
+function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean } = {}) {
   const pages: PageInfo[] = [...(opts.pages ?? [])];
   const hidden: PageInfo[] = [...(opts.hidden ?? [])];
   const closed: string[] = [];
@@ -513,6 +513,10 @@ function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageIn
     },
     async closePage(id: string): Promise<{ success: boolean }> {
       closed.push(id);
+      // Mirrors CdpDriver.closePage: success reflects the real
+      // Target.closeTarget result and is never hardcoded, so a stub that
+      // models a refused/already-gone close must not remove the page either.
+      if (opts.failClose) return { success: false };
       const i = pages.findIndex((p) => p.id === id);
       if (i >= 0) pages.splice(i, 1);
       return { success: true };
@@ -583,6 +587,15 @@ describe("close_page and select_page are the third choke point", () => {
     expect(res).toEqual({ closed: "A", success: true, leaseReleased: true });
     expect(closed).toEqual(["A"]);
     expect(await readLease("chrome", "A")).toBeUndefined();
+  });
+
+  test("a failed close (driver returns success:false) does not release the lease", async () => {
+    const { driver, closed } = stubDriver({ pages: [page("A")], failClose: true });
+    const { token } = await claimLease("chrome", "A", { label: "agent-one" });
+    const res = await withLeaseScope(token, () => closePage(driver, { target: "A" }));
+    expect(res).toEqual({ closed: "A", success: false, leaseReleased: false });
+    expect(closed).toEqual(["A"]);
+    expect(await readLease("chrome", "A")).toBeDefined();
   });
 
   test("closing an unleased tab reports no release and is otherwise unchanged", async () => {
