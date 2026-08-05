@@ -259,7 +259,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`p
 | `clear_mocks` *(superset)* | `Fetch.disable` | Tears down the resolved target's mock session (or all with `all:true`). |
 | `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens or claims a tab and returns an opaque lease token. MCP only; the CLI refuses it. |
 | `release_page` *(superset)* | lease file | Gives a lease back. Idempotent, and does not close the tab. |
-| `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability. Needs no token; never returns the nonce. |
+| `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability. Needs no token; never returns the nonce. A lease file that could not be read or parsed is reported as an `unreadable` row instead of being skipped. |
 
 ## Parallel tabs: many agents, one browser
 
@@ -282,6 +282,8 @@ Pass that token as `lease` on every later call against the tab. `new_page` with 
 **What can newly fail.** Any call that resolves to a leased tab without presenting that tab's token is refused, naming the tab, its url, and the label of whoever holds it. That is every selector form, not one of them: `active` or no target at all, `index:N`, `url:<substring>`, `title:<substring>`, and a bare targetId all reach the same check. The case worth singling out is `active` (or no target) against a leased tab index 0, because there you did not name the tab and before 1.2 the call silently succeeded against whatever tab happened to be first. That refusal is the point of the feature, and it is called out here rather than left to be discovered.
 
 **Reclamation.** A lease is reclaimable when its owning process is gone, or when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`). Those two are the whole list. A lease whose tab is no longer open is *reported* by `list_leases` as `target-gone`, which is useful to see, but that report is not what frees it: such a record is freed by the same two rules as any other, whichever lands first. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns.
+
+**Unreadable lease files.** A row in `list_leases` can carry `unreadable`, holding the errno (for example `EACCES`) or `"unparseable"`, when the lease file exists but could not be read or parsed. On such a row `label`, `pid`, `createdAt`, `lastUsedAt`, and `ttlMs` are zero placeholders, not real values, since they live inside the file that could not be read. `stale` is always `false` on that row, deliberately: `stale` is what a reader treats as free to take, and an unreadable lease must never read that way.
 
 **What this does not do.**
 

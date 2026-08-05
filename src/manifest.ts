@@ -1217,7 +1217,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_leases",
-    "description": "Enumerate every active lease for diagnosis: backend, target id, agent label, pid, createdAt, lastUsedAt, ttlMs, whether the owning process is still alive, and whether the lease is reclaimable and why. Requires no token. Never returns the lease nonce, so this cannot be used to forge a token.",
+    "description": "Enumerate every active lease for diagnosis: backend, target id, agent label, pid, createdAt, lastUsedAt, ttlMs, whether the owning process is still alive, and whether the lease is reclaimable and why. Requires no token. Never returns the lease nonce, so this cannot be used to forge a token. A row for a lease file that could not be read or parsed instead carries `unreadable` (the errno, or \"unparseable\"), with label, pid, and the timestamp fields as zero placeholders and stale always false, since stale is what marks a lease free to take and an unreadable one must never read that way.",
     "inputSchema": {
       "type": "object",
       "properties": {},
