@@ -4,6 +4,7 @@
  * the primitives exported here. See CONTRACT.md.
  */
 import type { CdpResponse, Target, TargetSelector } from "./types.ts";
+import { assertLeaseOk } from "./leases.ts";
 
 /** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
 export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
@@ -191,9 +192,24 @@ export async function browserWsUrl(): Promise<string> {
   return v.webSocketDebuggerUrl;
 }
 
-/** Resolve a TargetSelector to a concrete page target. See types.ts for grammar. */
-export async function resolveTarget(selector: TargetSelector): Promise<Target> {
+/** Resolve a TargetSelector to a concrete page target. See types.ts for grammar.
+ *  opts.lease is for library callers; the MCP/CLI path supplies the token through
+ *  the ambient lease scope instead (see leases.ts). */
+export async function resolveTarget(selector: TargetSelector, opts: { lease?: string } = {}): Promise<Target> {
   const targets = await listTargets();
+  const hit = pickTarget(targets, selector);
+  // THE Chrome choke point. Every tool reaches a page through here, so a tool
+  // added after this shipped is protected with no action from its author.
+  await assertLeaseOk("chrome", hit.id, {
+    lease: opts.lease,
+    url: hit.url,
+    title: hit.title,
+    liveIds: targets.map((t) => t.id),
+  });
+  return hit;
+}
+
+function pickTarget(targets: Target[], selector: TargetSelector): Target {
   const pages = targets.filter((t) => t.type === "page");
   if (!selector || selector === "active") {
     if (!pages.length) throw new CdpError("no page targets open");
@@ -230,9 +246,9 @@ export async function openBrowser(opts: { timeoutMs?: number } = {}): Promise<Cd
 /** Open a connection to a page target. Returns the connection and the target. */
 export async function openPage(
   selector: TargetSelector,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; lease?: string } = {},
 ): Promise<{ conn: CdpConnection; target: Target }> {
-  const target = await resolveTarget(selector);
+  const target = await resolveTarget(selector, { lease: opts.lease });
   const conn = await new CdpConnection(target.webSocketDebuggerUrl, opts).connect();
   return { conn, target };
 }
@@ -244,7 +260,7 @@ export async function openPage(
 export async function withPage<T>(
   selector: TargetSelector,
   fn: (conn: CdpConnection, target: Target) => Promise<T>,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; lease?: string } = {},
 ): Promise<T> {
   const { conn, target } = await openPage(selector, opts);
   try {
