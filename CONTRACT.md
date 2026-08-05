@@ -7,7 +7,7 @@ writing a module.
 
 ## Hard rules
 
-1. **Zero runtime dependencies.** Use Node's global `WebSocket` (Node ≥ 22; we run 25.9) and `fetch`. The only allowed devDeps are `typescript` + `@types/node` (already installed). `lighthouse.ts` is the sole exception and shells out to a subprocess — see its section.
+1. **Zero runtime dependencies.** Use Node's global `WebSocket` (Node ≥ 22; we run 25.9) and `fetch`. The only allowed devDeps are `typescript` + `@types/node` (already installed). `lighthouse.ts` is the sole exception and shells out to a subprocess — see its section. `tsconfig.json` deliberately does NOT pull in `bun-types`, so any test or script that touches `Bun.serve` or another `Bun` global fails `tsc --noEmit` with `Cannot find name 'Bun'`. The convention is to hand-write a minimal ambient declaration in that file, scoped to just the API it uses (e.g. `declare const Bun: { serve(opts: { port: number; fetch(req: Request): Response | Promise<Response> }): { port: number; stop(): void } };`), never to add the devDependency.
 2. **Build only on `src/client.ts` and `src/types.ts`.** Do not open raw `new WebSocket` yourself. Use `openPage`, `withPage`, `openBrowser`, `resolveTarget`, `CdpConnection`. This is what gives us the per-command timeout that prevents the wedged-tab hang.
 3. **TypeScript strict.** `tsc --noEmit` must pass with `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`. Import types with `import type`. Use `.ts` extensions in imports (e.g. `import { withPage } from "../client.ts"`).
 4. **One module per assigned bundle.** Write only the files you are assigned. Never edit `client.ts`, `types.ts`, or another agent's file.
