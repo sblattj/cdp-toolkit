@@ -30,6 +30,7 @@ import {
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
+import { assertLeaseOk } from "../leases.ts";
 import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
@@ -256,10 +257,33 @@ async function pageInfoOf(conn: BidiConnection, ctx: BrowsingContextInfo): Promi
   return { id: ctx.context, url: ctx.url, title: await safeTitle(conn, ctx.context) };
 }
 /** Same TargetSelector grammar as client.ts's resolveTarget, but resolved entirely over BiDi
- *  (browsingContext.getTree): there is no HTTP discovery endpoint here, per client.ts's own footer. */
-async function resolveContext(conn: BidiConnection, selector: TargetSelector): Promise<BrowsingContextInfo> {
+ *  (browsingContext.getTree): there is no HTTP discovery endpoint here, per client.ts's own footer.
+ *
+ *  THE Firefox choke point for tab leases. Keyed "firefox", never a bare id: a CDP targetId and a
+ *  BiDi context id are not disjoint by construction, so one bare key space could produce a false
+ *  collision between an unrelated Chrome tab and a Firefox context. Note this backend needs the
+ *  lease far less than Chrome does (backend.ts: every MCP server process launches its OWN Firefox,
+ *  so two sessions cannot race over one instance the way they do over Chrome on port 9222). It is
+ *  here for consistency and for a future shared-instance setup, not to close an observed gap. */
+async function resolveContext(
+  conn: BidiConnection,
+  selector: TargetSelector,
+  opts: { lease?: string } = {},
+): Promise<BrowsingContextInfo> {
   const { contexts } = await conn.send("browsingContext.getTree", {}).catch((e) => { throw mapBidiError(e); });
   if (!contexts.length) throw driverError("no-such-target", "no browsing contexts available");
+  const hit = await pickContext(conn, contexts, selector);
+  // liveIds deliberately not passed: hit is by construction a member of contexts, so target-gone
+  // could never fire for the context just resolved (see leases.ts's assertLeaseOk callers).
+  await assertLeaseOk("firefox", hit.context, { lease: opts.lease, url: hit.url });
+  return hit;
+}
+
+async function pickContext(
+  conn: BidiConnection,
+  contexts: BrowsingContextInfo[],
+  selector: TargetSelector,
+): Promise<BrowsingContextInfo> {
   if (selector === undefined || selector === "active") return contexts[0]!;
   if (selector.startsWith("index:")) {
     const t = contexts[Number(selector.slice(6))];

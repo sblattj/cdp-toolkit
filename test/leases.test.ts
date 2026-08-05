@@ -364,3 +364,23 @@ describe("withLeaseScope concurrency", () => {
     await expect(assertLeaseOk("chrome", "NOLEAK", {})).rejects.toThrow(/is leased by 'agent-one'/);
   });
 });
+
+describe("backend keying (spec section 8)", () => {
+  test("a Firefox context id and a Chrome target id that match do not share a lease", async () => {
+    const chrome = await claimLease("chrome", "COLLIDE", { label: "chrome-agent" });
+    const firefox = await claimLease("firefox", "COLLIDE", { label: "firefox-agent" });
+    // Each token works only against its own backend.
+    await expect(assertLeaseOk("chrome", "COLLIDE", { lease: chrome.token })).resolves.toBeUndefined();
+    await expect(assertLeaseOk("firefox", "COLLIDE", { lease: firefox.token })).resolves.toBeUndefined();
+    await expect(assertLeaseOk("firefox", "COLLIDE", { lease: chrome.token })).rejects.toThrow(/is for chrome target 'COLLIDE'/);
+    await expect(assertLeaseOk("chrome", "COLLIDE", { lease: firefox.token })).rejects.toThrow(/is for firefox target 'COLLIDE'/);
+  });
+
+  test("releasing the Chrome lease leaves the Firefox lease held", async () => {
+    const chrome = await claimLease("chrome", "PAIRED", { label: "chrome-agent" });
+    await claimLease("firefox", "PAIRED", { label: "firefox-agent" });
+    await releaseLease(chrome.token);
+    expect(await readLease("chrome", "PAIRED")).toBeUndefined();
+    expect((await readLease("firefox", "PAIRED"))?.label).toBe("firefox-agent");
+  });
+});
