@@ -45,13 +45,18 @@ Both are opt in. Pick Firefox explicitly or you get Chrome as before; omit
 
 ### Changed
 
-- **The one behavior change.** If tab index 0 is leased and a call arrives with
-  `target: active` (or no target at all) and no `lease`, it is now refused,
-  naming the tab, its url, and the label of the holder. Before 1.2 that call
-  silently succeeded against whatever tab happened to be first. Nothing else
-  newly fails: an unleased tab is always allowed, a stale lease (dead owner or
-  elapsed TTL) never blocks, and no default, return shape, or previously legal
-  call changed. A lease whose tab is no longer open is reported by `list_leases`
+- **The one behavior change.** Any call that resolves to a leased tab without
+  presenting that tab's token is now refused, naming the tab, its url, and the
+  label of the holder. That is every selector form, not just one: `active` or no
+  target at all, `index:N`, `url:<substring>`, `title:<substring>`, and a bare
+  targetId all reach the same check. The case worth singling out is `active` (or
+  no target) against a leased tab index 0, because there you did not name the
+  tab and before 1.2 the call silently succeeded against whatever tab happened
+  to be first, but it is not the only exposure. What still holds: an unleased
+  tab is always allowed, a stale lease (dead owner or elapsed TTL) never blocks,
+  and no default, return shape, or previously legal call changed. For a user who
+  never claims a tab there are no lease files at all, so nothing changes.
+  A lease whose tab is no longer open is reported by `list_leases`
   as `target-gone`, but that report is not what frees it: it is freed by the
   same two rules, whichever lands first.
 - `close_page` releases that tab's lease when the close actually succeeds, and
