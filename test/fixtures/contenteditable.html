@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>contenteditable fixture</title>
+<style>
+  body{font-family:sans-serif;margin:2rem}
+  [contenteditable]{border:1px solid #888;padding:.5rem;margin:.5rem 0;min-height:1.5rem}
+</style>
+</head>
+<body>
+<!--
+  This fixture exists because typing into contenteditable is where Chrome and
+  Firefox diverge most: Chrome commits typed text with an atomic insert,
+  while Firefox synthesizes real keystrokes one at a time. The live element
+  below mirrors actual DOM text content so a test asserts what landed rather
+  than reading back the same node it just wrote.
+-->
+<div id="prefilled-editable" data-testid="prefilled-editable" contenteditable="true">initial text</div>
+<div id="empty-editable" data-testid="empty-editable" contenteditable="true"></div>
+<div id="live-mirror" data-testid="live-mirror">initial text</div>
+<script>
+  function mirror() {
+    var a = document.getElementById("prefilled-editable").textContent;
+    var b = document.getElementById("empty-editable").textContent;
+    document.getElementById("live-mirror").textContent = a + "|" + b;
+  }
+  document.getElementById("prefilled-editable").addEventListener("input", mirror);
+  document.getElementById("empty-editable").addEventListener("input", mirror);
+  mirror();
+</script>
+</body>
+</html>
