@@ -6,7 +6,7 @@
  * headless Firefox via src/bidi/launch.ts, serves the local fixtures over
  * Bun.serve on an ephemeral port (never file://, never a shared debug port),
  * and tears the process down again. It NEVER connects to port 9333 or any
- * other fixed port — that convention is reserved for a real Chrome the
+ * other fixed port: that convention is reserved for a real Chrome the
  * developer may have running locally, and this script must not touch it.
  *
  * Exits non-zero on any failed assertion. The launched Firefox is killed in
@@ -42,12 +42,12 @@ type Check = { name: string; ok: boolean; detail: string };
 const checks: Check[] = [];
 function record(name: string, ok: boolean, detail: string): void {
   checks.push({ name, ok, detail });
-  console.log(`${ok ? "PASS" : "FAIL"} ${name} — ${detail}`);
+  console.log(`${ok ? "PASS" : "FAIL"} ${name}: ${detail}`);
 }
 
 let launchedPid: number | undefined;
 const hardTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
-  console.error(`FAIL wall-clock cap — did not finish within ${WALL_CLOCK_MS}ms, killing Firefox and exiting`);
+  console.error(`FAIL wall-clock cap: did not finish within ${WALL_CLOCK_MS}ms, killing Firefox and exiting`);
   if (launchedPid !== undefined) {
     try {
       process.kill(launchedPid, "SIGKILL");

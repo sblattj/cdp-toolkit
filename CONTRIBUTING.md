@@ -22,7 +22,7 @@ The three smokes REQUIRE Chrome/Chromium running with `--remote-debugging-port=9
 1. **Zero runtime dependencies.** `WebSocket` (global) + `fetch` (global). If you
    need a helper, write it. `@modelcontextprotocol/sdk` is the only allowed runtime
    dep (used by `src/mcp.ts`).
-2. **Build on `src/client.ts` primitives — never open a WebSocket yourself.**
+2. **Build on `src/client.ts` primitives: never open a WebSocket yourself.**
    Use `openPage`, `withPage`, `openBrowser`, `resolveTarget`, `CdpConnection`.
 3. **TypeScript strict.** `tsc --noEmit` must stay clean with `strict`,
    `noUncheckedIndexedAccess`, `verbatimModuleSyntax`.

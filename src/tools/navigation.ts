@@ -48,7 +48,7 @@ export interface NavigatePageResult {
  * finish loading.
  *
  * `Page.navigate`/`Page.reload` resolve once the action is *committed*. We
- * separately race the load milestone event — subscribed BEFORE issuing the
+ * separately race the load milestone event, subscribed BEFORE issuing the
  * command so a fast load can't fire before we're listening. Pass
  * `reload:true, ignoreCache:true` for a hard reload that refetches every
  * subresource (the only way to pick up a freshly-deployed bundle the HTTP

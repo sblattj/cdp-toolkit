@@ -1,5 +1,5 @@
 /**
- * MCP tool manifest — the JSON Schemas the cdp-toolkit MCP server advertises via
+ * MCP tool manifest: the JSON Schemas the cdp-toolkit MCP server advertises via
  * `tools/list`. Each entry's `name` matches a key in the TOOLS registry
  * (src/index.ts) and its `inputSchema` mirrors that tool's TypeScript Args.
  *
@@ -155,7 +155,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "wait_for",
-    "description": "Poll a target page until the given substring appears in document.body.innerText (Runtime.evaluate on a fixed interval), or throw on timeout. Text-substring waiting only — no aria/role/selector or event variants; throws rather than returning {found:false}.",
+    "description": "Poll a target page until the given substring appears in document.body.innerText (Runtime.evaluate on a fixed interval), or throw on timeout. Text-substring waiting only: no aria/role/selector or event variants; throws rather than returning {found:false}.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -221,7 +221,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "take_snapshot",
-    "description": "Capture the page's accessibility tree (Accessibility.getFullAXTree) as a compact indented text tree where each line is prefixed with [uid] — the node's CDP backendDOMNodeId. These uids are the stateless element references that every interaction tool (click/hover/fill/etc.) feeds back to resolve a live DOM node (via DOM.resolveNode({ backendNodeId: uid })), so run this first to discover uids.",
+    "description": "Capture the page's accessibility tree (Accessibility.getFullAXTree) as a compact indented text tree where each line is prefixed with [uid], the node's CDP backendDOMNodeId. These uids are the stateless element references that every interaction tool (click/hover/fill/etc.) feeds back to resolve a live DOM node (via DOM.resolveNode({ backendNodeId: uid })), so run this first to discover uids.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -546,7 +546,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "take_screenshot",
-    "description": "Capture the viewport (default), the full scrollable page (fullPage), or a single element (uid or selector — exactly one, mutually exclusive) via raw CDP Page.captureScreenshot. Writes a PNG/JPEG under /tmp/cdp-toolkit (override with savePath) and returns {path,bytes,format,target}; raw base64 is only included when returnBase64 is set. quality applies to jpeg only.",
+    "description": "Capture the viewport (default), the full scrollable page (fullPage), or a single element (uid or selector, exactly one and mutually exclusive) via raw CDP Page.captureScreenshot. Writes a PNG/JPEG under /tmp/cdp-toolkit (override with savePath) and returns {path,bytes,format,target}; raw base64 is only included when returnBase64 is set. quality applies to jpeg only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -576,7 +576,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "uid": {
           "type": "number",
-          "description": "Element to clip to — a CDP backendDOMNodeId obtained from take_snapshot. Mutually exclusive with selector."
+          "description": "Element to clip to: a CDP backendDOMNodeId obtained from take_snapshot. Mutually exclusive with selector."
         },
         "selector": {
           "type": "string",
@@ -799,7 +799,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "get_console_message",
-    "description": "Return a single console entry by zero-based index from the target's existing console buffer. Throws if the index is out of range — run list_console_messages (optionally with reload:true) first to populate the buffer.",
+    "description": "Return a single console entry by zero-based index from the target's existing console buffer. Throws if the index is out of range; run list_console_messages (optionally with reload:true) first to populate the buffer.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -853,7 +853,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "get_network_request",
-    "description": "Return one network request (matched by exact requestId, else by url substring) including status/headers. Requires at least one of requestId or url (throws otherwise). With includeBody:true the body fetch drives a fresh reload capture and is matched by url ONLY (reload re-mints requestIds, so a carried-over requestId cannot fetch a body — it returns metadata plus bodyUnavailableReason).",
+    "description": "Return one network request (matched by exact requestId, else by url substring) including status/headers. Requires at least one of requestId or url (throws otherwise). With includeBody:true the body fetch drives a fresh reload capture and is matched by url ONLY (reload re-mints requestIds, so a carried-over requestId cannot fetch a body, so it returns metadata plus bodyUnavailableReason).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -867,7 +867,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "requestId": {
           "type": "string",
-          "description": "Match by exact requestId (metadata only — cannot fetch a body, since reload re-mints requestIds)."
+          "description": "Match by exact requestId (metadata only, cannot fetch a body, since reload re-mints requestIds)."
         },
         "url": {
           "type": "string",
@@ -914,7 +914,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_stop_trace",
-    "description": "Stop the in-process trace started by performance_start_trace, drain buffered Tracing.dataCollected events, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics}. Throws if no live trace exists in this process (e.g. start ran in a different process) — use performance_trace instead. The 'target' arg is accepted only for API symmetry; at most one trace is ever live per process.",
+    "description": "Stop the in-process trace started by performance_start_trace, drain buffered Tracing.dataCollected events, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics}. Throws if no live trace exists in this process (e.g. start ran in a different process); use performance_trace instead. The 'target' arg is accepted only for API symmetry; at most one trace is ever live per process.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -933,7 +933,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_analyze_insight",
-    "description": "CDP-native approximation of the DevTools insight analyzer: read a trace JSON file (bare array or {traceEvents:[...]}) at the given tracePath and return headline metrics (FCP/LCP/CLS/TBT, long tasks, layout shifts). Requires an explicit tracePath returned by performance_trace/performance_stop_trace — there is no implicit 'latest trace'. Numbers approximate DevTools (no main-thread attribution or frame-scoped LCP).",
+    "description": "CDP-native approximation of the DevTools insight analyzer: read a trace JSON file (bare array or {traceEvents:[...]}) at the given tracePath and return headline metrics (FCP/LCP/CLS/TBT, long tasks, layout shifts). Requires an explicit tracePath returned by performance_trace/performance_stop_trace; there is no implicit 'latest trace'. Numbers approximate DevTools (no main-thread attribution or frame-scoped LCP).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -952,7 +952,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_trace",
-    "description": "PRIMARY one-shot trace: start tracing, optionally reload or navigate the page, wait durationMs (default 3000), end the trace, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics,target}. Holds one connection open for the whole window, so it is immune to the cross-process limitation of start/stop — the recommended entry point.",
+    "description": "PRIMARY one-shot trace: start tracing, optionally reload or navigate the page, wait durationMs (default 3000), end the trace, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics,target}. Holds one connection open for the whole window, so it is immune to the cross-process limitation of start/stop, and it is the recommended entry point.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1023,7 +1023,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "url": {
           "type": "string",
-          "description": "The URL to audit. Required — never points at a user tab implicitly."
+          "description": "The URL to audit. Required, and never points at a user tab implicitly."
         },
         "categories": {
           "type": "array",
@@ -1057,7 +1057,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "mock_request",
-    "description": "Register a mock rule on a target's persistent fake-backend session (CDP Fetch domain): intercept requests whose URL matches urlPattern and fulfill them with a canned response, fail (abort) them, or continue them — optionally with fault injection (delayMs/failRate). The session survives reloads and navigations and lives until clear_mocks. Call repeatedly to mock several endpoints on the same target. Pass reload:true to apply immediately. Persistent across calls only via the MCP server (not the one-shot CLI).",
+    "description": "Register a mock rule on a target's persistent fake-backend session (CDP Fetch domain): intercept requests whose URL matches urlPattern and fulfill them with a canned response, fail (abort) them, or continue them, optionally with fault injection (delayMs/failRate). The session survives reloads and navigations and lives until clear_mocks. Call repeatedly to mock several endpoints on the same target. Pass reload:true to apply immediately. Persistent across calls only via the MCP server (not the one-shot CLI).",
     "inputSchema": {
       "type": "object",
       "properties": {

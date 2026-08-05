@@ -1,5 +1,5 @@
 /**
- * network.ts — read network activity captured by the recorder.
+ * network.ts: read network activity captured by the recorder.
  *
  *   list_network_requests -> listNetworkRequests
  *   get_network_request   -> getNetworkRequest
@@ -8,14 +8,14 @@
  *   - default ({ reload: false }): read the target's shared "latest" buffer
  *     (rec-<targetId>.jsonl), correlate the four Network.* events by requestId,
  *     and return one row per request.
- *   - { reload: true }: run a captureWindow (both domains) — Page.reload, capture
+ *   - { reload: true }: run a captureWindow (both domains): Page.reload, capture
  *     for `durationMs` (default 2500ms), stop, then read+return the requests.
  *
  * Response bodies: CDP only serves a body from the LIVE renderer session, so
  * get_network_request with { includeBody: true } drives a fresh reload capture
  * and calls Network.getResponseBody before closing. Because a reload re-mints
  * requestIds, body fetch is matched by `url` (stable), not by a carried-over
- * requestId — see getNetworkRequest for the exact contract.
+ * requestId; see getNetworkRequest for the exact contract.
  */
 import { readFile } from "node:fs/promises";
 import { CdpError, resolveTarget } from "../client.ts";
@@ -59,7 +59,7 @@ export interface ListNetworkRequestsArgs {
 
 export interface GetNetworkRequestArgs {
   target?: TargetSelector;
-  /** Match by exact requestId (metadata only — see includeBody). */
+  /** Match by exact requestId (metadata only, see includeBody). */
   requestId?: string;
   /** Match by URL substring (first match). Required for body fetch (includeBody). */
   url?: string;
@@ -153,7 +153,7 @@ async function readNetworkRequests(file: string): Promise<NetworkRequest[]> {
 }
 
 /**
- * list_network_requests — correlated request rows for the target. With
+ * list_network_requests: correlated request rows for the target. With
  * `reload:true`, records a fresh capture window (both domains) by reloading.
  */
 export async function listNetworkRequests(args: ListNetworkRequestsArgs = {}): Promise<{
@@ -187,13 +187,13 @@ export async function listNetworkRequests(args: ListNetworkRequestsArgs = {}): P
 }
 
 /**
- * get_network_request — return one request (matched by requestId, else by URL
+ * get_network_request: return one request (matched by requestId, else by URL
  * substring) including response status/headers.
  *
  * Body retrieval: CDP only serves a response body from the LIVE renderer
  * session, so `includeBody:true` must drive a fresh reload capture and fetch the
  * body before the connection closes. A reload re-mints requestIds, so a body
- * fetch can only be matched by `url` (stable across reload) — NOT by a
+ * fetch can only be matched by `url` (stable across reload), NOT by a
  * `requestId` carried over from a prior `list_network_requests`. When a
  * requestId is supplied with includeBody we therefore return metadata from the
  * existing buffer and explain why the body is unavailable, rather than reloading

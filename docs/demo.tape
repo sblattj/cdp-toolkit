@@ -1,4 +1,4 @@
-# cdp-toolkit demo — a 30-second terminal cast of driving one Chrome tab over raw CDP.
+# cdp-toolkit demo: a 30-second terminal cast of driving one Chrome tab over raw CDP.
 #
 # Render:  vhs docs/demo.tape          → writes docs/demo.gif (referenced by the README)
 # Install: brew install vhs            (https://github.com/charmbracelet/vhs)
@@ -8,7 +8,7 @@
 #
 # Tip for the strongest demo: instead of the CLI below, screen-record a real
 # Claude Code session calling mcp__cdp-toolkit__take_snapshot and
-# mcp__cdp-toolkit__mock_request — that shows the value in the exact context
+# mcp__cdp-toolkit__mock_request, since that shows the value in the exact context
 # the target audience uses it.
 
 Output docs/demo.gif
@@ -21,7 +21,7 @@ Set Padding 24
 Set Theme "Dracula"
 Set TypingSpeed 45ms
 
-Type "# cdp-toolkit: drive ONE known Chrome tab over raw CDP — no fan-out, no hang"
+Type "# cdp-toolkit: drive ONE known Chrome tab over raw CDP, no fan-out, no hang"
 Enter
 Sleep 1200ms
 
@@ -36,7 +36,7 @@ Type "bun run src/cli.ts take_snapshot --target url:example --interactiveOnly tr
 Enter
 Sleep 2800ms
 
-Type "# build a UI before its backend exists — mock the API and reload"
+Type "# build a UI before its backend exists, mock the API and reload"
 Enter
 Sleep 800ms
 Type `bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{"results":[]}' --reload true`

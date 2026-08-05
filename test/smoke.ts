@@ -11,7 +11,7 @@ type Check = { name: string; ok: boolean; detail: string };
 const checks: Check[] = [];
 function record(name: string, ok: boolean, detail: string): void {
   checks.push({ name, ok, detail });
-  console.log(`${ok ? "✅" : "❌"} ${name} — ${detail}`);
+  console.log(`${ok ? "✅" : "❌"} ${name}: ${detail}`);
 }
 
 const DATA_URL =

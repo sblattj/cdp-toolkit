@@ -3,7 +3,7 @@
  *
  * The reference scheme (CONTRACT.md "The element-reference scheme"):
  *   A `Uid` IS a CDP `backendDOMNodeId` (a number). Refs are therefore
- *   stateless — `take_snapshot` emits them straight from the a11y tree, and
+ *   stateless: `take_snapshot` emits them straight from the a11y tree, and
  *   every interaction tool resolves them back to a live DOM node via
  *   `DOM.resolveNode({ backendNodeId: uid })`. There is no server-side ref
  *   table to drift or expire.
@@ -124,7 +124,7 @@ export interface TakeSnapshotResult {
 }
 
 /**
- * take_snapshot — Accessibility.getFullAXTree walked into a compact indented
+ * take_snapshot: Accessibility.getFullAXTree walked into a compact indented
  * text tree. Each emitted line carries the node's backendDOMNodeId as [uid],
  * which interaction tools feed straight back to resolveUid.
  */

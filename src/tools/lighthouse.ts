@@ -1,5 +1,5 @@
 /**
- * lighthouse_audit — THE ONLY non-CDP tool in this toolkit.
+ * lighthouse_audit: THE ONLY non-CDP tool in this toolkit.
  *
  * Unlike every other module, this one does NOT speak the Chrome DevTools
  * Protocol over a WebSocket. Instead it shells out to the external Lighthouse
@@ -105,7 +105,7 @@ interface LighthouseReport {
 }
 
 export interface LighthouseAuditArgs {
-  /** The URL to audit. Required — never points at a user tab implicitly. */
+  /** The URL to audit. Required, and never points at a user tab implicitly. */
   url: string;
   /**
    * Lighthouse categories to run. Defaults to the full set.
@@ -206,7 +206,7 @@ export async function lighthouseAudit(
     const hint = /not found|could not determine executable|npm ERR|E404|ERR_MODULE/i.test(
       res.stderr,
     )
-      ? " The Lighthouse CLI could not be fetched/installed via npx — ensure network access and that 'lighthouse' is installable."
+      ? " The Lighthouse CLI could not be fetched/installed via npx; ensure network access and that 'lighthouse' is installable."
       : "";
     throw new CdpError(
       `lighthouse_audit produced no report (exit code ${res.code}).${hint} stderr: ${truncate(res.stderr)}`,
@@ -264,7 +264,7 @@ function truncate(s: string, max = 600): string {
  * ---------------------------------------------------------------------------
  * NON-CDP MODULE. This is the toolkit's sole tool that does not speak raw CDP.
  *
- * External dependency (subprocess, fetched on demand by npx — not an npm dep):
+ * External dependency (subprocess, fetched on demand by npx, not an npm dep):
  *   - `npx --yes lighthouse <url> --port=<cdpPort> --output=json
  *      --output-path=<artifact> --quiet --preset=desktop
  *      [--only-categories=...] --chrome-flags=--headless=new`

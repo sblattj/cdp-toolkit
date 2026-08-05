@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-We pledge to make participation in our community a welcoming and inclusive experience for everyone — regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
+We pledge to make participation in our community a welcoming and inclusive experience for everyone, regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
 
 ## Our standards
 
@@ -28,7 +28,7 @@ Project maintainers are responsible for clarifying and enforcing our standards o
 
 ## Scope
 
-This Code of Conduct applies within all community spaces — GitHub issues, pull requests, comments, Discussions — and also applies when an individual is officially representing the community in public spaces.
+This Code of Conduct applies within all community spaces (GitHub issues, pull requests, comments, Discussions) and also applies when an individual is officially representing the community in public spaces.
 
 ## Enforcement
 

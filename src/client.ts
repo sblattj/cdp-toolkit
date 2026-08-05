@@ -1,5 +1,5 @@
 /**
- * Core raw-CDP client. Zero runtime dependencies — uses Node's global
+ * Core raw-CDP client. Zero runtime dependencies: uses Node's global
  * WebSocket (Node >= 22; verified on Node 25.9). Every tool module is built on
  * the primitives exported here. See CONTRACT.md.
  */
@@ -186,7 +186,7 @@ export function listTargets(): Promise<Target[]> {
   return httpJson<Target[]>("/json/list");
 }
 
-/** Browser-level WebSocket URL (GET /json/version) — for Target.* / Browser.*. */
+/** Browser-level WebSocket URL (GET /json/version), for Target.* / Browser.*. */
 export async function browserWsUrl(): Promise<string> {
   const v = await httpJson<{ webSocketDebuggerUrl: string }>("/json/version");
   return v.webSocketDebuggerUrl;
