@@ -10,7 +10,20 @@ name: publish
 #      For a brand-new package name you typically do the FIRST `npm publish`
 #      manually (npm login + npm publish), then wire trusted publishing for
 #      subsequent releases.
-#   3. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
+#   3. npm OIDC trusted publishing requires npm 11.5.1 or newer. The Node 22
+#      setup below ships npm 10.x, so the job upgrades npm explicitly before
+#      publishing. On an older npm the CLI never performs the OIDC token
+#      exchange, and the publish fails with a confusing E404 instead of a
+#      permission error, because provenance signing to Sigstore still
+#      succeeds (it is a separate OIDC path) right up until the actual
+#      registry PUT.
+#   4. The `actions/setup-node` step below must NOT be given a `registry-url`
+#      input. Passing one makes setup-node write an .npmrc with a placeholder
+#      NODE_AUTH_TOKEN, which makes npm think auth is already configured and
+#      skip the OIDC trusted-publish exchange entirely, producing the same
+#      confusing E404 from a different direction. The registry defaults to
+#      npmjs.org anyway, so nothing is lost by leaving it out.
+#   5. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
 #      push a matching tag:  git tag v1.0.1 && git push origin v1.0.1
 #
 # After that, every `git push origin v*` cuts a published, provenance-signed release.
@@ -32,16 +45,23 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # No registry-url here on purpose: setting it makes setup-node write an
+      # .npmrc with a placeholder NODE_AUTH_TOKEN, which makes npm think auth
+      # is already configured and skip the OIDC trusted-publish exchange, so
+      # the publish PUT goes out with a garbage token and the registry answers
+      # a confusing E404 instead of a permission error. The registry defaults
+      # to npmjs.org anyway, so leaving this out costs nothing.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
       - run: bun run build # also runs via prepublishOnly; explicit here as a gate
-      # npm >= 11.5.1 is required for OIDC trusted publishing; refresh it.
+      # npm >= 11.5.1 is required for OIDC trusted publishing; refresh it and
+      # print the version so the log proves it rather than leaving it inferred.
       - run: npm install -g npm@latest
+      - run: npm --version
       # Idempotency guard: skip if this version is already on npm (e.g. a v1.0.0
       # tag cut after the first manual publish) so the run stays green.
       - name: Check if version already published
