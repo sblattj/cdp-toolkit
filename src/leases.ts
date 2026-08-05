@@ -16,6 +16,7 @@
  * so the superseded token stops matching by construction rather than by a check
  * someone could forget to write. See assertLeaseOk.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -206,4 +207,116 @@ export async function releaseLeaseFor(backend: LeaseBackend, targetId: string): 
   if (!(await readLease(backend, targetId))) return { released: false };
   await unlink(leaseFile(backend, targetId)).catch(() => undefined);
   return { released: true };
+}
+
+/* -------------------------------- the gate -------------------------------- */
+
+/**
+ * The lease token for the tool call currently being dispatched.
+ *
+ * This exists so enforcement can stay at ONE point per resolution path while
+ * the token still reaches it. The token arrives as a key on a tool's args
+ * object, many frames above resolveTarget, and threading a parameter through
+ * all 33 tools would put the burden on every future contributor to remember
+ * the check exists: one missed tool would silently defeat the feature for that
+ * tool. mcp.ts and cli.ts open this scope once per dispatch instead, so a tool
+ * added tomorrow is covered with no action from whoever writes it.
+ */
+const leaseScope = new AsyncLocalStorage<LeaseToken | undefined>();
+
+export function withLeaseScope<T>(lease: LeaseToken | undefined, fn: () => Promise<T>): Promise<T> {
+  return leaseScope.run(lease, fn);
+}
+
+export function currentLease(): LeaseToken | undefined {
+  return leaseScope.getStore();
+}
+
+/** Refresh lastUsedAt. Every checked call already touches this file, so keeping
+ *  an active lease alive needs no separate heartbeat. */
+export async function touchLease(rec: LeaseRecord, now: number = Date.now()): Promise<void> {
+  await writeFile(leaseFile(rec.backend, rec.targetId), JSON.stringify({ ...rec, lastUsedAt: now }), "utf8").catch(() => undefined);
+}
+
+export interface LeaseCheckContext {
+  /** Explicit token. Falls back to the ambient dispatch scope when absent. */
+  lease?: LeaseToken;
+  url?: string;
+  title?: string;
+  /** Live ids from the resolution the caller just did, for "target-gone". */
+  liveIds?: readonly string[];
+  now?: number;
+}
+
+function describeTarget(targetId: string, ctx: LeaseCheckContext): string {
+  const url = ctx.url ? ` (url ${ctx.url})` : ctx.title ? ` (title ${JSON.stringify(ctx.title)})` : "";
+  return `target '${targetId}'${url}`;
+}
+
+/**
+ * The single enforcement point, called from every target-resolution path.
+ *
+ * NOT an ADR-001 capability gap. ADR-001 says a capability a backend can never
+ * do is ABSENT from tools/list rather than present and throwing, because that
+ * gap is static and known before the first call. A lease conflict is the
+ * opposite: the same tool against the same tab succeeds or fails depending on
+ * who holds it at that instant. There is nothing to remove from tools/list,
+ * because the tool is not unsupported, it is supported and currently spoken
+ * for. So this throws, loudly, naming the holder. Do not "fix" the
+ * inconsistency with ADR-001 by hiding leased tools from tools/list: the two
+ * situations differ in kind, not degree.
+ */
+export async function assertLeaseOk(
+  backend: LeaseBackend,
+  targetId: string,
+  ctx: LeaseCheckContext = {},
+): Promise<void> {
+  const token = ctx.lease ?? currentLease();
+  const now = ctx.now ?? Date.now();
+  const rec = await readLease(backend, targetId);
+  const held = rec && !staleReason(rec, { now, liveIds: ctx.liveIds }) ? rec : undefined;
+  const where = describeTarget(targetId, ctx);
+
+  if (token === undefined) {
+    if (!held) return; // unleased, or leased-but-reclaimable: today's behavior
+    throw new LeaseConflictError(
+      `${where} is leased by '${held.label}' (pid ${held.pid}). Pass that lease's token as the 'lease' argument, or call release_page to free it. list_leases shows every active lease.`,
+      targetId,
+      held.label,
+    );
+  }
+
+  const parts = tokenParts(token);
+  if (!parts) {
+    throw new LeaseConflictError(
+      `malformed lease token for ${where}. Pass back the token claim_page returned, never a constructed one.`,
+      targetId,
+    );
+  }
+  if (!held) {
+    throw new LeaseConflictError(
+      `${where} is not leased any more: the token you passed belongs to a lease that was released or reclaimed. Call claim_page again to take the tab.`,
+      targetId,
+    );
+  }
+  if (parts.backend !== backend || parts.targetId !== targetId) {
+    throw new LeaseConflictError(
+      `the lease token you passed is for ${parts.backend} target '${parts.targetId}', not ${where}, which is leased by '${held.label}'. Resolve the tab you actually hold, or claim this one.`,
+      targetId,
+      held.label,
+    );
+  }
+  // The nonce match is what makes reclamation safe. Without it a stalled agent
+  // that comes back after its lease was reclaimed would sail through with a
+  // token whose backend and targetId still line up, and two owners would be
+  // driving one tab. claimLease mints a fresh nonce on every create, so the
+  // superseded token can never match here.
+  if (parts.nonce !== held.nonce) {
+    throw new LeaseConflictError(
+      `${where} was reclaimed and is now leased by '${held.label}' (pid ${held.pid}). Your token was invalidated by that reclamation. Call claim_page again if you still need this tab.`,
+      targetId,
+      held.label,
+    );
+  }
+  await touchLease(held, now);
 }

@@ -10,13 +10,16 @@ import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertLeaseOk,
   claimLease,
+  currentLease,
   isPidAlive,
   leaseFile,
   readLease,
   releaseLease,
   staleReason,
   tokenParts,
+  withLeaseScope,
   type LeaseRecord,
 } from "../src/leases.ts";
 
@@ -157,5 +160,74 @@ describe("claimLease reclamation", () => {
     await claimLease("chrome", "SUPERSEDED", { label: "fresh", now: 1_000_000 });
     expect(await releaseLease(first.token)).toEqual({ released: false });
     expect((await readLease("chrome", "SUPERSEDED"))?.label).toBe("fresh");
+  });
+});
+
+describe("assertLeaseOk (spec section 9 negative cases)", () => {
+  test("NEGATIVE 1: a call with NO token against a leased tab is refused", async () => {
+    await claimLease("chrome", "LEASED", { label: "agent-one" });
+    await expect(
+      assertLeaseOk("chrome", "LEASED", { url: "https://example.com/checkout", title: "Checkout" }),
+    ).rejects.toThrow(/target 'LEASED'.*https:\/\/example\.com\/checkout.*agent-one/s);
+  });
+
+  test("an unleased tab with no token is untouched (today's behavior exactly)", async () => {
+    await expect(assertLeaseOk("chrome", "FREE", {})).resolves.toBeUndefined();
+  });
+
+  test("the matching token passes and refreshes lastUsedAt", async () => {
+    const { token, record } = await claimLease("chrome", "MINE", { label: "agent-one", now: 1_000 });
+    await assertLeaseOk("chrome", "MINE", { lease: token, now: 2_000 });
+    const after = await readLease("chrome", "MINE");
+    expect(after?.nonce).toBe(record.nonce);
+    expect(after?.lastUsedAt).toBe(2_000);
+    expect(after?.createdAt).toBe(1_000);
+  });
+
+  test("NEGATIVE 2: a token from a released lease is refused, not silently accepted", async () => {
+    const { token } = await claimLease("chrome", "GONE", { label: "agent-one" });
+    await releaseLease(token);
+    await expect(assertLeaseOk("chrome", "GONE", { lease: token })).rejects.toThrow(/released or reclaimed/);
+  });
+
+  test("NEGATIVE 3: reclamation invalidates the superseded token", async () => {
+    const stalled = await claimLease("chrome", "TAKEN", { label: "stalled", ttlMs: 1, now: 1_000 });
+    const fresh = await claimLease("chrome", "TAKEN", { label: "fresh", now: 1_000_000 });
+    // `now` is pinned to the fresh claim's own clock: these records use synthetic
+    // timestamps, so letting the assert calls fall back to Date.now() would age
+    // the fresh lease past its TTL and it would be judged reclaimable, not held.
+    // Pinning it keeps `held` live, which is what makes the second assertion a
+    // test of the NONCE comparison specifically rather than of staleness.
+    // The new owner drives the tab.
+    await expect(assertLeaseOk("chrome", "TAKEN", { lease: fresh.token, now: 1_000_000 })).resolves.toBeUndefined();
+    // The resurrected old owner must NOT, even though its token is well formed.
+    await expect(assertLeaseOk("chrome", "TAKEN", { lease: stalled.token, now: 1_000_000 })).rejects.toThrow(/reclaimed and is now leased by 'fresh'/);
+  });
+
+  test("a token minted for another tab is refused", async () => {
+    const a = await claimLease("chrome", "TAB-A", { label: "agent-one" });
+    await claimLease("chrome", "TAB-B", { label: "agent-two" });
+    await expect(assertLeaseOk("chrome", "TAB-B", { lease: a.token })).rejects.toThrow(/is for chrome target 'TAB-A'/);
+  });
+
+  test("a malformed token is refused rather than treated as absent", async () => {
+    await claimLease("chrome", "MALFORMED", { label: "agent-one" });
+    await expect(assertLeaseOk("chrome", "MALFORMED", { lease: "chrome:MALFORMED:zzz" })).rejects.toThrow(/malformed lease token/);
+  });
+
+  test("a stale lease does not brick the tab: no token still passes", async () => {
+    await claimLease("chrome", "ABANDONED", { label: "dead", ttlMs: 1, now: 1_000 });
+    await expect(assertLeaseOk("chrome", "ABANDONED", { now: 1_000_000 })).resolves.toBeUndefined();
+  });
+});
+
+describe("withLeaseScope", () => {
+  test("supplies the token to assertLeaseOk when no explicit lease is passed", async () => {
+    const { token } = await claimLease("chrome", "AMBIENT", { label: "agent-one" });
+    await expect(assertLeaseOk("chrome", "AMBIENT", {})).rejects.toThrow(/is leased by 'agent-one'/);
+    await withLeaseScope(token, async () => {
+      expect(currentLease()).toBe(token);
+      await assertLeaseOk("chrome", "AMBIENT", {});
+    });
   });
 });
