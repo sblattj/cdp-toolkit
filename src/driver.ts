@@ -293,9 +293,12 @@ export interface InterceptRule {
  *  - "session": the transport carries a session that CANNOT be re-dialed, so
  *    release() only decrements a refcount and the transport lives until
  *    dispose(). This is BiDi. A "session" driver MUST be memoized at module
- *    scope (see recorder.ts / network_mock.ts for the existing pattern), MUST
- *    tolerate concurrent holders, and MUST re-establish itself transparently
- *    if the transport dies.
+ *    scope (see recorder.ts / network_mock.ts for the existing pattern) and
+ *    MUST tolerate concurrent holders. It does NOT transparently re-establish
+ *    itself if the transport dies: a BiDi session cannot be resumed on a
+ *    second socket (re-dialing gets `invalid session id`), so a dead
+ *    transport surfaces as an error on every subsequent call instead, and a
+ *    caller that hits one must dispose() and acquire a fresh driver.
  * Tools MUST NOT branch on this value. It exists so that withDriver's contract
  * is unambiguous and so a reader knows why release() is not a close().
  */

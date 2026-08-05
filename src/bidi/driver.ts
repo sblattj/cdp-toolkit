@@ -148,11 +148,10 @@ const INTERACTIVE_ROLES = new Set<string>([
   "listbox", "option", "slider", "spinbutton", "progressbar", "meter",
 ]);
 // Stamps ONE already-located element (locate()'s mint path), reusing an existing stamp per the
-// same rule ../bidi/snapshot.ts applies during a full-tree walk. Payload is 8+4 lowercase hex
-// chars, which happens to satisfy THE UID CODEC's documented 12-hex-char bidi payload grammar
-// exactly; the full-tree walker's own stamps (counter-based) do not, since that file is
-// committed and out of scope to change. See the report for this inherited mismatch.
-const STAMP_ONE_SOURCE = `function(){var a=${JSON.stringify(UID_STAMP_ATTR)};var e=this.getAttribute(a);if(e)return e;var s=Math.random().toString(16).slice(2,10)+Math.random().toString(16).slice(2,6);this.setAttribute(a,s);return s;}`;
+// same rule ../bidi/snapshot.ts's nextStamp()/stampOf() apply during a full-tree walk. Payload is
+// two padded random hex blocks (8+4), matching THE UID CODEC's documented exactly-12-lowercase-
+// hex-char bidi payload grammar exactly and the same padding technique nextStamp() now uses.
+const STAMP_ONE_SOURCE = `function(){var a=${JSON.stringify(UID_STAMP_ATTR)};var e=this.getAttribute(a);if(e)return e;var s=Math.floor(Math.random()*0x100000000).toString(16).padStart(8,"0")+Math.floor(Math.random()*0x10000).toString(16).padStart(4,"0");this.setAttribute(a,s);return s;}`;
 
 /* ------------------------------- element locator resolution ------------------------------- */
 async function locateNodes(conn: BidiConnection, contextId: BrowsingContextId, locator: BrowsingContextLocator): Promise<ScriptNodeRemoteValue[]> {
