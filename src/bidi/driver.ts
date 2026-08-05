@@ -427,6 +427,32 @@ class BidiPageDriver implements PageDriver {
   // assignment plus input+change events, the same effective outcome a real option click has.
   // Every other element still goes through focus+clear+sendKeys, honestly synthesized keystrokes.
   private static readonly SELECT_SOURCE = "function(v){var found=false;for(var i=0;i<this.options.length;i++){if(this.options[i].value===v){this.selectedIndex=i;found=true;break;}}if(!found)this.value=v;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}";
+  // Contenteditable is the one element class where synthesized keystrokes do nothing at all.
+  // Measured against Firefox 153.0.3, not inferred:
+  //   - The raw key route (sendKeys -> input.performActions) fires keydown and keyup on a
+  //     contenteditable target and NOTHING else: no beforeinput, no input, no DOM mutation.
+  //     That is why fill/type_text silently no-opped there before this branch existed.
+  //   - document.execCommand('insertText', ...) performs a real native edit, but ONLY with an
+  //     explicit Range/Selection set first. focus() alone is the discriminator: with focus and
+  //     no selection anchor execCommand returns false and nothing happens; with the Range
+  //     installed it returns true, the DOM mutates, and a real 'input' event fires. Both cases
+  //     were probed separately, so this is a proven precondition and not defensive belt-and-braces.
+  //   - This route does NOT fire 'beforeinput'. Checked at element level AND at document level in
+  //     the capture phase, isTrusted included, so it is not a listener-placement artifact;
+  //     queryCommandSupported('insertText') stays true throughout. Chrome's path (CDP
+  //     Input.insertText) DOES fire a trusted beforeinput with correct inputType/data before
+  //     'input'. That asymmetry matters for rich editors (Lexical, ProseMirror, Slate) that build
+  //     their model from beforeinput: on Firefox they will not observe this edit and can desync.
+  //     Plain, unmanaged contenteditable, which is what fill/type_text's contract promises, is fine.
+  //   - Embedded '\n' is silently dropped by this route. It is dropped on Chrome's Input.insertText
+  //     path too, so multi-line contenteditable insertion is a shared gap, not a Firefox one.
+  // Deliberately NOT capability-gated: see the footer comment for why no token was added.
+  private static readonly INSERT_TEXT_SOURCE =
+    "function(v,collapseAtEnd){this.focus();var r=document.createRange();" +
+    "r.selectNodeContents(this);if(collapseAtEnd)r.collapse(false);" +
+    "var s=window.getSelection();s.removeAllRanges();s.addRange(r);" +
+    "return document.execCommand('insertText', false, v);}";
+  private static readonly IS_CONTENT_EDITABLE = "function(){return this.isContentEditable===true;}";
   async setValue(loc: ElementLocator, value: string): Promise<void> {
     const ref = await resolveElementLocator(this.conn, this.contextId, loc);
     const isSelect = await this.callFunctionValue("function(){return this.tagName==='SELECT';}", [], ref);
@@ -434,12 +460,26 @@ class BidiPageDriver implements PageDriver {
       await this.callFunctionValue(BidiPageDriver.SELECT_SOURCE, [value], ref);
       return;
     }
-    const clear = "function(){this.focus&&this.focus();if('value' in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}else if(this.isContentEditable){this.textContent='';}}";
+    const isContentEditable = await this.callFunctionValue(BidiPageDriver.IS_CONTENT_EDITABLE, [], ref);
+    if (isContentEditable === true) {
+      // collapseAtEnd=false: the Range spans the whole node, so the native insert REPLACES the
+      // existing contents in one edit. Do not pre-clear via textContent: that mutation is not a
+      // native edit, and it also destroys the selection the execCommand call depends on.
+      await this.callFunctionValue(BidiPageDriver.INSERT_TEXT_SOURCE, [value, false], ref);
+      return;
+    }
+    const clear = "function(){this.focus&&this.focus();if('value' in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}}";
     await this.callFunctionValue(clear, [], ref);
     await this.sendKeys(value);
   }
   async typeText(loc: ElementLocator, text: string): Promise<void> {
     const ref = await resolveElementLocator(this.conn, this.contextId, loc);
+    const isContentEditable = await this.callFunctionValue(BidiPageDriver.IS_CONTENT_EDITABLE, [], ref);
+    if (isContentEditable === true) {
+      // collapseAtEnd=true: caret at the end of the existing contents, so typeText appends.
+      await this.callFunctionValue(BidiPageDriver.INSERT_TEXT_SOURCE, [text, true], ref);
+      return;
+    }
     await this.callFunctionValue("function(){this.focus&&this.focus();}", [], ref);
     await this.sendKeys(text);
   }
@@ -748,8 +788,24 @@ export { BidiBrowserDriver, BidiPageDriver };
  *     ElementLocator `text` branch still resolves and correctly surfaces "unsupported" if called.
  *   - snapshot.accessibilityTree: not declared. snapshotFidelity is "dom-heuristic" (a DOM walk in
  *     ../bidi/snapshot.ts), not a native a11y-tree dump; Firefox 153 BiDi has no such domain.
- *   - input.insertTextAtomic: not declared. There is no atomic value-commit primitive over BiDi;
- *     setValue/typeText always synthesize keystrokes via input.performActions (see sendKeys).
+ *   - input.insertTextAtomic: not declared. There is no atomic value-commit primitive over BiDi.
+ *     WebDriver BiDi has no input.insertText command at all (input.performActions and
+ *     input.setFiles are the whole input module), so there is nothing to fall back on. For
+ *     <input>/<textarea> setValue/typeText synthesize keystrokes via input.performActions (see
+ *     sendKeys); for contenteditable that route fires keydown/keyup and nothing else, so those
+ *     take the execCommand('insertText')-with-explicit-Range branch instead (see setValue).
+ *   - beforeinput on contenteditable: NOT fired under Firefox 153.0.3, while Chrome's
+ *     Input.insertText path fires a trusted one with correct inputType/data. Verified on both
+ *     backends at document/capture level. Stated here as a known limit rather than declared as a
+ *     capability token on purpose: the Capability union exists solely so tools/list can hide a
+ *     tool an agent must not call (REQUIRED_CAPABILITIES, src/driver.ts), and no tool should
+ *     REQUIRE this. Gating fill/type_text on it would delete two working tools from Firefox, where
+ *     they are correct for inputs, textareas, selects and plain contenteditables. A token that
+ *     gates nothing is dead code shaped like a safety mechanism, and MCP tool descriptions are a
+ *     static MANIFEST (src/manifest.ts) that tools/list forwards verbatim, filtered by name only
+ *     (src/mcp.ts), so there is no per-backend description channel to carry the caveat either.
+ *   - Multi-line contenteditable: an embedded '\n' is silently dropped on BOTH backends, not just
+ *     this one. Neither insertText route synthesizes a <br> or a block break.
  *   - trace.performance / heap.snapshot / audit.lighthouse: not declared, Chrome-only domains with
  *     no BiDi equivalent at all.
  *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
