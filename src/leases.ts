@@ -122,8 +122,9 @@ export class LeaseConflictError extends Error {
  * A record that reads fine but does not PARSE is treated as absent instead,
  * deliberately: a corrupt record can never become readable, so throwing would
  * brick that tab permanently with no in-product recovery, whereas an errno is
- * transient. Only this module writes these files, so a parse failure means the
- * file was tampered with, not that the writer is buggy. listLeases reports such
+ * transient. A parse failure need not mean tampering; touchLease rewrites the
+ * file by truncating it first, so a crash or ENOSPC mid-heartbeat can leave a
+ * genuinely partial file with no tampering involved. listLeases reports such
  * a file so an operator can see it and delete it.
  */
 export async function readLease(backend: LeaseBackend, targetId: string): Promise<LeaseRecord | undefined> {
