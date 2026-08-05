@@ -403,6 +403,37 @@ describe("listLeases", () => {
   test("returns an empty list when nothing is leased", async () => {
     expect(await listLeases({ now: 1_000 })).toEqual([]);
   });
+
+  test("a healthy, unexpired, live-pid lease reports stale:false and hides the nonce", async () => {
+    const { record } = await claimLease("chrome", "HEALTHY", { label: "agent-one", now: 1_000 });
+    const rows = await listLeases({ now: 1_000 + 60_000 });
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({ backend: "chrome", targetId: "HEALTHY", label: "agent-one", pidAlive: true, stale: false });
+    expect(rows[0]?.createdAt).toBe(record.createdAt);
+    expect(Object.keys(rows[0]!)).not.toContain("nonce");
+  });
+
+  test("liveBackend scopes the target-gone test to the matching backend only", async () => {
+    await claimLease("chrome", "GONE", { label: "a" });
+    await claimLease("firefox", "FFX", { label: "b" });
+    const rows = (await listLeases({ liveIds: ["OTHER"], liveBackend: "chrome" })).sort((a, b) =>
+      a.targetId.localeCompare(b.targetId),
+    );
+    expect(rows.length).toBe(2);
+    // the chrome record's target is not in liveIds, so it is still reported target-gone
+    expect(rows.find((r) => r.targetId === "GONE")?.stale).toBe("target-gone");
+    // the firefox record is a different backend, so the same liveIds do not apply to it
+    expect(rows.find((r) => r.targetId === "FFX")?.stale).toBe(false);
+  });
+
+  test("with no liveBackend, liveIds applies to every record regardless of backend", async () => {
+    await claimLease("chrome", "GONE2", { label: "a" });
+    await claimLease("firefox", "FFX2", { label: "b" });
+    const rows = (await listLeases({ liveIds: ["OTHER"] })).sort((a, b) => a.targetId.localeCompare(b.targetId));
+    expect(rows.length).toBe(2);
+    expect(rows.find((r) => r.targetId === "GONE2")?.stale).toBe("target-gone");
+    expect(rows.find((r) => r.targetId === "FFX2")?.stale).toBe("target-gone");
+  });
 });
 
 describe("registry and manifest wiring", () => {

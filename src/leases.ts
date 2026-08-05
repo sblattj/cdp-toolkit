@@ -405,6 +405,12 @@ const LEASE_FILE_RE = /^lease-(chrome|firefox)-.+\.json$/;
  * caller listing from Chrome would see every Firefox lease reported as
  * target-gone (its context ids are simply not in Chrome's target list), which
  * reads as "free to take" for a lease that is very much held.
+ *
+ * Residual: for records of the OTHER backend, the target-gone test is never
+ * evaluated, so a cross-backend lease whose tab really did close reports
+ * stale:false until its owning pid dies or its ttlMs elapses. That errs
+ * toward "held", which is the safe direction, and a Firefox lease fails the
+ * dead-pid test as soon as its per-invocation process exits.
  */
 export async function listLeases(
   opts: { now?: number; liveIds?: readonly string[]; liveBackend?: LeaseBackend } = {},
