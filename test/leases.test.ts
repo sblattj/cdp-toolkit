@@ -6,7 +6,7 @@
  * why leaseDir() reads the env var per call instead of at module load.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, readdir } from "node:fs/promises";
+import { chmod, mkdtemp, rm, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TOOL_NAMES } from "../src/index.ts";
@@ -437,6 +437,110 @@ describe("listLeases", () => {
     expect(rows.length).toBe(2);
     expect(rows.find((r) => r.targetId === "GONE2")?.stale).toBe("target-gone");
     expect(rows.find((r) => r.targetId === "FFX2")?.stale).toBe("target-gone");
+  });
+});
+
+/**
+ * An unreadable lease file must not read as an unleased tab. Reproduced the way
+ * the review reproduced it: chmod 000 a live, healthy, in-TTL lease held by an
+ * alive pid, then check both directions at once. Before the fix this admitted a
+ * stranger, refused the true owner with "not leased any more", and reported
+ * zero leases from the diagnostic tool.
+ *
+ * root ignores the permission bits, so these skip rather than pass vacuously
+ * there. Every mode is restored in a finally so beforeEach's cleanup works.
+ */
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+async function withUnreadable<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  await chmod(file, 0o000);
+  try {
+    return await fn();
+  } finally {
+    await chmod(file, 0o600);
+  }
+}
+
+describe("an unreadable lease file is not an unleased tab (fix round 2, Important 1)", () => {
+  test.skipIf(asRoot)("readLease throws instead of reporting the tab free", async () => {
+    await claimLease("chrome", "TAB-P", { label: "agent-one" });
+    await withUnreadable(leaseFile("chrome", "TAB-P"), async () => {
+      await expect(readLease("chrome", "TAB-P")).rejects.toThrow(/EACCES|permission denied/i);
+    });
+    // And it is readable again afterwards, so nothing was destroyed.
+    expect((await readLease("chrome", "TAB-P"))?.label).toBe("agent-one");
+  });
+
+  test.skipIf(asRoot)("a stranger with no token is REFUSED, not admitted", async () => {
+    await claimLease("chrome", "TAB-P", { label: "agent-one" });
+    await withUnreadable(leaseFile("chrome", "TAB-P"), async () => {
+      await expect(assertLeaseOk("chrome", "TAB-P", {})).rejects.toThrow(/EACCES|permission denied/i);
+    });
+  });
+
+  test.skipIf(asRoot)("the true owner is not told its lease was released or reclaimed", async () => {
+    const { token } = await claimLease("chrome", "TAB-P", { label: "agent-one" });
+    await withUnreadable(leaseFile("chrome", "TAB-P"), async () => {
+      // The owner still fails, which is correct: we cannot verify the nonce.
+      // What must NOT happen is the false explanation, which tells a healthy
+      // owner to re-claim a tab it already holds.
+      const err = await assertLeaseOk("chrome", "TAB-P", { lease: token }).then(
+        () => undefined,
+        (e: unknown) => e as Error,
+      );
+      expect(err).toBeDefined();
+      expect(err?.message ?? "").not.toMatch(/not leased any more/);
+      expect(err).not.toBeInstanceOf(LeaseConflictError);
+    });
+    // Once readable again the owner sails through: no state was lost.
+    await expect(assertLeaseOk("chrome", "TAB-P", { lease: token })).resolves.toBeUndefined();
+  });
+
+  test.skipIf(asRoot)("list_leases surfaces the entry instead of reporting zero leases", async () => {
+    await claimLease("chrome", "TAB-P", { label: "agent-one" });
+    await withUnreadable(leaseFile("chrome", "TAB-P"), async () => {
+      const rows = await listLeases({ now: 1_000 });
+      expect(rows.length).toBe(1);
+      expect(rows[0]?.unreadable).toBe("EACCES");
+      expect(rows[0]?.backend).toBe("chrome");
+      expect(rows[0]?.targetId).toBe("TAB-P");
+      // Never reported as reclaimable, and never leaking a nonce.
+      expect(rows[0]?.stale).toBe(false);
+      expect(Object.keys(rows[0]!)).not.toContain("nonce");
+    });
+  });
+
+  test("a file that reads fine but does not parse is reported, not skipped", async () => {
+    await writeFile(leaseFile("chrome", "GARBAGE"), "{ not json", "utf8");
+    const rows = await listLeases({ now: 1_000 });
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({ backend: "chrome", targetId: "GARBAGE", unreadable: "unparseable", stale: false });
+    // A corrupt record stays "absent" at the gate on purpose: unlike an errno it
+    // can never heal, so failing closed would brick the tab with no recovery.
+    await expect(readLease("chrome", "GARBAGE")).resolves.toBeUndefined();
+    await expect(assertLeaseOk("chrome", "GARBAGE", {})).resolves.toBeUndefined();
+  });
+
+  test.skipIf(asRoot)("a heartbeat does not fail the call it rides on", async () => {
+    // touchLease is the one reader that must still swallow the error: a tool
+    // call that did real work must not fail because lastUsedAt could not be
+    // refreshed. It leaves the record alone rather than throwing.
+    const { record } = await claimLease("chrome", "TAB-T", { label: "agent-one", now: 1_000 });
+    await withUnreadable(leaseFile("chrome", "TAB-T"), async () => {
+      await expect(touchLease(record, 9_000)).resolves.toBeUndefined();
+    });
+    expect((await readLease("chrome", "TAB-T"))?.lastUsedAt).toBe(1_000);
+  });
+
+  test("an absent lease directory is still an empty list, not an error", async () => {
+    const missing = join(dir, "does-not-exist");
+    process.env.CDP_ARTIFACT_DIR = missing;
+    try {
+      expect(await listLeases({ now: 1_000 })).toEqual([]);
+      await expect(readLease("chrome", "ANY")).resolves.toBeUndefined();
+      await expect(assertLeaseOk("chrome", "ANY", {})).resolves.toBeUndefined();
+    } finally {
+      process.env.CDP_ARTIFACT_DIR = dir;
+    }
   });
 });
 
