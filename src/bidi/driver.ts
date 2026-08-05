@@ -795,7 +795,11 @@ class BidiBrowserDriver implements BrowserDriver {
 export function createFirefoxDriver(port: number, opts?: { timeoutMs?: number }): BrowserDriver {
   return new BidiBrowserDriver(port, opts?.timeoutMs);
 }
-export { BidiBrowserDriver, BidiPageDriver };
+// resolveContext is exported for ONE reason: it is the Firefox lease choke
+// point, and a choke point nothing can call directly is a choke point nothing
+// can test. Its gate was deletable with a green suite until test/leases.test.ts
+// could drive it against a stub connection. Not part of the public surface.
+export { BidiBrowserDriver, BidiPageDriver, resolveContext };
 
 /* ------------------------------------------------------------------------------
  * BiDi modules/commands used: session (new, subscribe/unsubscribe, via client.ts); browsingContext

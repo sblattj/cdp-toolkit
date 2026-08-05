@@ -12,6 +12,10 @@ import { join } from "node:path";
 import { TOOL_NAMES } from "../src/index.ts";
 import { MANIFEST } from "../src/manifest.ts";
 import type { BrowserDriver, PageInfo } from "../src/driver.ts";
+import type { Target } from "../src/types.ts";
+import type { BrowsingContextInfo } from "../src/bidi/protocol.ts";
+import { resolveTarget } from "../src/client.ts";
+import { resolveContext } from "../src/bidi/driver.ts";
 import { closePage, newPage, selectPage } from "../src/shared-tools.ts";
 import {
   assertLeaseOk,
@@ -541,6 +545,123 @@ describe("an unreadable lease file is not an unleased tab (fix round 2, Importan
     } finally {
       process.env.CDP_ARTIFACT_DIR = dir;
     }
+  });
+});
+
+/**
+ * The two gates that cover 33 of the 36 tools. Both were deletable with a green
+ * suite: removing the assertLeaseOk call from resolveTarget or from
+ * resolveContext left 102 pass / 0 fail, so a later refactor could drop lease
+ * enforcement from Chrome or Firefox entirely and CI would approve it. These
+ * two tests exist so that deletion fails, in the shape of the resolvePage tests
+ * above: a stub target list plus a held lease, asserting the resolver refuses.
+ *
+ * Each drives its resolver through the cheapest seam that reaches the gate:
+ * resolveTarget over a stubbed GET /json/list, resolveContext over a stub
+ * connection answering browsingContext.getTree. Neither needs a browser.
+ */
+describe("resolveTarget is the Chrome choke point (fix round 2, Important 3)", () => {
+  const realFetch = globalThis.fetch;
+  const targets: Target[] = [
+    { id: "CT-A", type: "page", title: "A", url: "https://example.test/a", webSocketDebuggerUrl: "ws://x/a" },
+    { id: "CT-B", type: "page", title: "B", url: "https://example.test/b", webSocketDebuggerUrl: "ws://x/b" },
+  ];
+  beforeEach(() => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(typeof input === "object" && "url" in input ? input.url : input);
+      if (url.endsWith("/json/list")) return new Response(JSON.stringify(targets), { headers: { "content-type": "application/json" } });
+      throw new Error(`unexpected fetch in test: ${url}`);
+    }) as typeof fetch;
+  });
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("an unleased target resolves exactly as before", async () => {
+    expect((await resolveTarget("CT-A")).id).toBe("CT-A");
+  });
+
+  test("a target another agent holds is REFUSED, by every selector form", async () => {
+    await claimLease("chrome", "CT-A", { label: "agent-one" });
+    for (const selector of ["CT-A", undefined, "active", "index:0", "url:/a", "title:A"] as const) {
+      await expect(resolveTarget(selector)).rejects.toThrow(LeaseConflictError);
+    }
+    // The other tab is untouched: this is a lease check, not a lockout.
+    expect((await resolveTarget("CT-B")).id).toBe("CT-B");
+  });
+
+  test("the holder's own token resolves it and refreshes the lease", async () => {
+    const { token, record } = await claimLease("chrome", "CT-A", { label: "agent-one" });
+    // Age the record by a minute, in place and nonce intact, so the refresh is
+    // observable without pinning `now` (the gate uses the real clock here).
+    const aged = record.lastUsedAt - 60_000;
+    await writeFile(leaseFile("chrome", "CT-A"), JSON.stringify({ ...record, lastUsedAt: aged }), "utf8");
+    expect((await resolveTarget("CT-A", { lease: token })).id).toBe("CT-A");
+    expect((await readLease("chrome", "CT-A"))?.lastUsedAt).toBeGreaterThan(aged);
+  });
+
+  test("the ambient dispatch scope supplies the token too", async () => {
+    const { token } = await claimLease("chrome", "CT-A", { label: "agent-one" });
+    await withLeaseScope(token, async () => {
+      expect((await resolveTarget("active")).id).toBe("CT-A");
+    });
+  });
+
+  test("a stale lease does not brick the target", async () => {
+    // claimLease always records the live process, so age the record instead:
+    // an elapsed TTL is the staleness rule a real abandonment hits.
+    await claimLease("chrome", "CT-A", { label: "ghost", ttlMs: 1, now: 1_000 });
+    expect((await resolveTarget("CT-A")).id).toBe("CT-A");
+  });
+});
+
+describe("resolveContext is the Firefox choke point (fix round 2, Important 3)", () => {
+  // Only browsingContext.getTree is ever sent: a bare-id selector needs no
+  // title lookup, so the stub can answer one method and nothing else.
+  const context = (id: string, url: string) =>
+    ({ children: null, clientWindow: "w", context: id, originalOpener: null, url, userContext: "default" }) as unknown as BrowsingContextInfo;
+  function stubConn(contexts: BrowsingContextInfo[]) {
+    const sent: string[] = [];
+    const conn = {
+      async send(method: string) {
+        sent.push(method);
+        if (method === "browsingContext.getTree") return { contexts };
+        throw new Error(`unexpected BiDi command in test: ${method}`);
+      },
+    };
+    return { conn: conn as unknown as Parameters<typeof resolveContext>[0], sent };
+  }
+  const contexts = [context("FF-A", "https://example.test/a"), context("FF-B", "https://example.test/b")];
+
+  test("an unleased context resolves exactly as before", async () => {
+    const { conn } = stubConn(contexts);
+    expect((await resolveContext(conn, "FF-A")).context).toBe("FF-A");
+  });
+
+  test("a context another agent holds is REFUSED", async () => {
+    await claimLease("firefox", "FF-A", { label: "agent-one" });
+    const { conn } = stubConn(contexts);
+    for (const selector of ["FF-A", undefined, "active", "index:0", "url:/a"] as const) {
+      await expect(resolveContext(conn, selector)).rejects.toThrow(LeaseConflictError);
+    }
+    expect((await resolveContext(conn, "FF-B")).context).toBe("FF-B");
+  });
+
+  test("a Chrome lease on the same id does not refuse the Firefox context", async () => {
+    // The gate is keyed "firefox", so a colliding CDP targetId must not bleed
+    // across. Deleting the backend argument would show up here.
+    await claimLease("chrome", "FF-A", { label: "chrome-agent" });
+    const { conn } = stubConn(contexts);
+    expect((await resolveContext(conn, "FF-A")).context).toBe("FF-A");
+  });
+
+  test("the holder's own token resolves it", async () => {
+    const { token } = await claimLease("firefox", "FF-A", { label: "agent-one" });
+    const { conn } = stubConn(contexts);
+    expect((await resolveContext(conn, "FF-A", { lease: token })).context).toBe("FF-A");
+    await withLeaseScope(token, async () => {
+      expect((await resolveContext(conn, "FF-A")).context).toBe("FF-A");
+    });
   });
 });
 
