@@ -62,12 +62,14 @@ export function buildSnapshotFunctionSource(): string {
     var MAX_NAME_LENGTH = ${MAX_NAME_LENGTH};
     var lines = [];
     var nodeCount = 0;
-    var stampCounter = 0;
 
+    // THE UID CODEC (driver.ts) documents a bidi payload as exactly 12 lowercase hex chars,
+    // /^[0-9a-f]{12}$/. Build it from two padded random blocks so the length is exact regardless
+    // of the random value drawn, never from string concatenation that could come up short.
     function nextStamp() {
-      stampCounter += 1;
-      var rand = Math.random().toString(16).slice(2, 10);
-      return "f" + stampCounter.toString(16) + rand;
+      var hi = Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, "0");
+      var lo = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+      return hi + lo;
     }
 
     function stampOf(el) {
