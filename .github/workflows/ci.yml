@@ -37,3 +37,29 @@ jobs:
       # (tools/call) from gating the badge; the full mock/tool smokes are run
       # locally against a real Chrome on --remote-debugging-port=9222.
       - run: bun run mcp:smoke || true
+
+  firefox:
+    name: Firefox BiDi smoke (gates the badge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # Pinned to a full commit SHA, not the floating `v1` tag: a third-party
+      # action on a floating ref is a supply-chain hole in a public repo.
+      # SHA resolved from `gh api repos/browser-actions/setup-firefox/commits/v1`
+      # on 2026-08-04, which was v1.7.2 at the time.
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1.7.2
+        id: setup-firefox
+      - run: "${{ steps.setup-firefox.outputs.firefox-path }} --version"
+      # Unlike the `smoke` job above, this one is NOT `|| true` and DOES gate
+      # the badge. `smoke`'s tools/call round-trip is skipped there because it
+      # depends on a flaky CI Chrome nobody controls; this job instead installs
+      # its own pinned Firefox and serves its own fixtures over a local
+      # ephemeral port, so a failure here is a real regression, not CI flake.
+      # Do not "fix" this inconsistency by adding `|| true` here too.
+      - run: bun run firefox:smoke
+        env:
+          FIREFOX_BIN: ${{ steps.setup-firefox.outputs.firefox-path }}
