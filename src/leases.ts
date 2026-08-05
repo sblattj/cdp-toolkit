@@ -103,14 +103,44 @@ export class LeaseConflictError extends Error {
   }
 }
 
+/**
+ * Read a lease record, or undefined if the tab is genuinely unleased.
+ *
+ * "UNREADABLE" IS NOT "ABSENT", AND CONFLATING THEM IS WRONG IN BOTH DIRECTIONS
+ * AT ONCE. Enforcement reads `undefined` as "free to take". If an EACCES, EIO or
+ * EMFILE on a live, healthy lease file also produced `undefined`, a stranger
+ * would be ADMITTED to a tab someone owns, while the true owner would be
+ * REFUSED with "not leased any more" (its token names a tab that now reads as
+ * unleased). Fd exhaustion on a long-lived MCP server is the most plausible
+ * trigger. So every errno other than ENOENT is rethrown and the call fails.
+ *
+ * FAILING CLOSED HERE CANNOT REGRESS THE UPGRADE PATH, and that is what makes
+ * it safe: a user who never calls claim_page and never passes claim:true has NO
+ * lease files at all, so every read here is a plain ENOENT and this throw is
+ * unreachable for them. Only a tab that already has a lease file can reach it.
+ *
+ * A record that reads fine but does not PARSE is treated as absent instead,
+ * deliberately: a corrupt record can never become readable, so throwing would
+ * brick that tab permanently with no in-product recovery, whereas an errno is
+ * transient. Only this module writes these files, so a parse failure means the
+ * file was tampered with, not that the writer is buggy. listLeases reports such
+ * a file so an operator can see it and delete it.
+ */
 export async function readLease(backend: LeaseBackend, targetId: string): Promise<LeaseRecord | undefined> {
+  let raw: string;
   try {
-    const rec = JSON.parse(await readFile(leaseFile(backend, targetId), "utf8")) as LeaseRecord;
-    if (typeof rec?.nonce === "string" && typeof rec?.pid === "number") return rec;
-    return undefined;
-  } catch {
-    return undefined;
+    raw = await readFile(leaseFile(backend, targetId), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined; // genuinely unleased
+    throw err; // unreadable is not absent: refuse rather than hand out a held tab
   }
+  try {
+    const rec = JSON.parse(raw) as LeaseRecord;
+    if (typeof rec?.nonce === "string" && typeof rec?.pid === "number") return rec;
+  } catch {
+    /* unparseable: fall through to undefined, see the doc comment above */
+  }
+  return undefined;
 }
 
 export interface ClaimOptions {
@@ -276,7 +306,11 @@ export function leaseFromArgs(args: unknown): LeaseToken | undefined {
  * expiry-under-load ever gets reported, this silence is the first place to look.
  */
 export async function touchLease(rec: LeaseRecord, now: number = Date.now()): Promise<void> {
-  const current = await readLease(rec.backend, rec.targetId);
+  // readLease now THROWS on an unreadable file rather than reporting absence.
+  // That throw is load-bearing at the gate and must not leak out of a
+  // heartbeat, so it is caught here and treated as "leave the record alone",
+  // which is the same thing this function does for any record it does not own.
+  const current = await readLease(rec.backend, rec.targetId).catch(() => undefined);
   if (!current || current.nonce !== rec.nonce) return; // reclaimed or released: not ours to write
   await writeFile(leaseFile(current.backend, current.targetId), JSON.stringify({ ...current, lastUsedAt: now }), "utf8").catch(
     () => undefined,
@@ -318,6 +352,10 @@ export async function assertLeaseOk(
 ): Promise<void> {
   const token = ctx.lease ?? currentLease();
   const now = ctx.now ?? Date.now();
+  // NOT wrapped in a catch. If the lease file exists but cannot be read,
+  // readLease throws and that error propagates out of the gate, failing the
+  // call. Swallowing it here would put us back where "unreadable" means
+  // "unleased", which admits a stranger to a held tab. See readLease.
   const rec = await readLease(backend, targetId);
   const held = rec && !staleReason(rec, { now, liveIds: ctx.liveIds }) ? rec : undefined;
   const where = describeTarget(targetId, ctx);
@@ -392,9 +430,20 @@ export interface LeaseSummary {
   ttlMs: number;
   pidAlive: boolean;
   stale: LeaseStaleReason | false;
+  /**
+   * Present ONLY on a row this function could not read: the errno of the failed
+   * read, or "unparseable" for a file whose contents are not a lease record.
+   * The row still appears, because the whole point of this tool is to show an
+   * operator what is on disk, and a silently skipped file is the one thing that
+   * makes an unreadable lease impossible to diagnose. Every other field on such
+   * a row is a placeholder derived from the FILENAME and nothing else: backend
+   * and targetId are real (the filename carries both), the rest are zeroed. It
+   * reports stale:false so the row never reads as "free to take".
+   */
+  unreadable?: string;
 }
 
-const LEASE_FILE_RE = /^lease-(chrome|firefox)-.+\.json$/;
+const LEASE_FILE_RE = /^lease-(chrome|firefox)-(.+)\.json$/;
 
 /**
  * Enumerate every lease on disk. Diagnosis only, so it needs no token.
@@ -419,19 +468,49 @@ export async function listLeases(
   let names: string[] = [];
   try {
     names = await readdir(leaseDir());
-  } catch {
-    return [];
+  } catch (err) {
+    // An absent directory means nobody has ever claimed anything, which is the
+    // normal state for a user who never opts in and is genuinely "no leases".
+    // Any OTHER errno means leases may exist and we cannot see them, and
+    // answering "none" to that question is exactly the hidden failure this
+    // function is supposed to expose. Fail loudly instead.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
   }
   const out: LeaseSummary[] = [];
   for (const name of names) {
-    if (!LEASE_FILE_RE.test(name)) continue;
+    const parts = LEASE_FILE_RE.exec(name);
+    if (!parts) continue;
+    // Everything the filename alone can tell us, used only to describe a row
+    // whose contents we could not read. safeId() may have substituted
+    // characters in the id, so this is an identifying label, not a key.
+    const fromName = {
+      backend: parts[1] as LeaseBackend,
+      targetId: parts[2] as string,
+      label: "",
+      pid: 0,
+      createdAt: 0,
+      lastUsedAt: 0,
+      ttlMs: 0,
+      pidAlive: false,
+      // Never "reclaimable": we do not know, and this errs toward held.
+      stale: false as const,
+    };
     let rec: LeaseRecord;
     try {
       rec = JSON.parse(await readFile(join(leaseDir(), name), "utf8")) as LeaseRecord;
-    } catch {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // A file that vanished between readdir and readFile is not a problem; it
+      // was released. Anything else is reported rather than skipped.
+      if (code === "ENOENT") continue;
+      out.push({ ...fromName, unreadable: code ?? "unparseable" });
       continue;
     }
-    if (typeof rec?.nonce !== "string" || typeof rec?.pid !== "number") continue;
+    if (typeof rec?.nonce !== "string" || typeof rec?.pid !== "number") {
+      out.push({ ...fromName, unreadable: "unparseable" });
+      continue;
+    }
     out.push({
       backend: rec.backend,
       targetId: rec.targetId,
