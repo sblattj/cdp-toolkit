@@ -4,8 +4,10 @@
  * Firefox, exactly as the other 20 unified tools do.
  */
 import type { BrowserDriver } from "./driver.ts";
+import { newTrackedPage } from "./origins.ts";
 import {
   claimLease,
+  defaultLabel,
   leaseTtlMs,
   listLeases,
   releaseLease,
@@ -41,12 +43,16 @@ export async function claimPage(
   args: { targetId?: string; url?: string; label?: string; ttlMs?: number } = {},
 ): Promise<ClaimPageResult> {
   const backend = backendOf(driver);
-  const label = typeof args.label === "string" && args.label.length ? args.label : `pid-${process.pid}`;
+  const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
   const pages = await driver.listPages();
   let targetId = args.targetId;
   let url = args.url ?? "about:blank";
   if (targetId === undefined || targetId === "") {
-    const page = await driver.newPage(args.url);
+    // Creation ledger, not the lease: this record survives release_page and
+    // expiry, so the tab stays attributable to `label` after the lease is gone.
+    // Claiming an EXISTING tab (the else branch) records nothing, because this
+    // toolkit did not create it and provenance is not ownership.
+    const page = await newTrackedPage(driver, backend, { url: args.url, label });
     targetId = page.id;
     url = page.url;
   } else {

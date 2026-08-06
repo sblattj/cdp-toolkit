@@ -224,7 +224,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`p
 
 | MCP name | CDP method(s) | Parity notes / gaps |
 |---|---|---|
-| `list_pages` | `GET /json/list` | `all` flag also exposes worker/background targets; MCP lists only page tabs. |
+| `list_pages` | `GET /json/list` | `all` flag also exposes worker/background targets; MCP lists only page tabs. Each row additionally carries `origin` (`agent` or `unknown`, never `human`) plus `label`/`createdAt` for tabs this toolkit created. |
 | `new_page` | `Target.createTarget` (+ lease file) | Returns `{targetId,url}`; does not await navigation (use `navigate_page`). `claim:true` also claims the new tab and returns a `lease` token (`label`/`ttlMs` optional). |
 | `close_page` | `Target.closeTarget` (+ lease file) | Reports `success:true` on the empty result newer Chromium returns. A successful close also releases that tab's lease; a failed close leaves it in place. |
 | `select_page` | `Target.activateTarget` + selected-state file | Writes a flat-file selected target; `resolveTarget` does not read it, so `active` still means `index:0` unless a tool opts in. |
@@ -285,6 +285,28 @@ Pass that token as `lease` on every later call against the tab. `new_page` with 
 
 **Unreadable lease files.** A row in `list_leases` can carry `unreadable`, holding the errno (for example `EACCES`) or `"unparseable"`, when the lease file exists but could not be read or parsed. On such a row `label`, `pid`, `createdAt`, `lastUsedAt`, and `ttlMs` are zero placeholders, not real values, since they live inside the file that could not be read. `stale` is always `false` on that row, deliberately: `stale` is what a reader treats as free to take, and an unreadable lease must never read that way.
 
+### Which tab did an agent open? (`origin`)
+
+A lease answers "who is *driving* this tab right now". It cannot answer "who *opened* it", and that second question outlives the first: the moment an agent releases, expires, or dies, its abandoned tab is indistinguishable from one you opened yourself. Diffing two `list_pages` snapshots does not settle it either, since a tab you opened a minute ago looks exactly like a stray agent tab.
+
+So every tab this toolkit creates is written to a creation ledger, and `list_pages` reports it:
+
+```json
+{"id": "1A2B...", "url": "https://example.com", "title": "Example", "type": "page",
+ "origin": "agent", "label": "checkout-agent", "createdAt": 1754400000000}
+```
+
+- `origin: "agent"` means cdp-toolkit created the tab, via `new_page` or via `claim_page` with no `targetId`. The row then also carries the creating `label` (the same value a lease would show, defaulting to `pid-<pid>`) and `createdAt`.
+- `origin: "unknown"` means there is no creation record. **It never says `"human"`.** The toolkit cannot prove a person opened a tab: no record is equally consistent with a tab opened before the server started, a tab restored from a previous session, another tool driving the same Chrome, or a record that could not be written. `unknown` is the honest word, and reading it as "safe, a human opened this" is the one mistake this field exists to prevent.
+
+**It outlives the lease, deliberately.** `release_page`, expiry, and reclamation all leave the record alone. Only the tab going away removes it: the ledger is reaped when it is read, dropping records for targets the browser no longer has, so it stays self-cleaning with nothing scheduled.
+
+**Claiming a tab you did not open records nothing.** `claim_page` with an explicit `targetId` takes ownership of an existing tab; that tab keeps reporting `origin: "unknown"`, because provenance is not ownership.
+
+**Unreadable records.** If a target has a creation record that could not be read or parsed, its row reports `origin: "unknown"` plus `originUnreadable` (the errno, for example `EACCES`, or `"unparseable"`). Same principle as `list_leases`' `unreadable` rows: a broken record must never be indistinguishable from no record at all. A missing or unreadable ledger never fails `list_pages`; every page simply reports `unknown`.
+
+**Backward compatible.** `id`, `url`, `title`, and `type` are unchanged. The provenance fields are purely additive.
+
 **What this does not do.**
 
 - No fan-out. The shape is many agents with one tab each. One agent driving several tabs at once is a different feature and is not addressed.
@@ -304,6 +326,7 @@ src/
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)
   leases.ts          # lease records, staleness, reclamation, assertLeaseOk
   leases-tools.ts    # claim_page / release_page / list_leases
+  origins.ts         # tab creation ledger: who OPENED a tab, outliving its lease
   tools/
     pages.ts navigation.ts evaluate.ts snapshot.ts input.ts
     screenshot.ts emulation.ts dialogs.ts recorder.ts console.ts
