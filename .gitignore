@@ -4,6 +4,8 @@ node_modules/
 dist/
 # runtime artifacts (screenshots, traces, heap snapshots, recorder buffers)
 /tmp/cdp-toolkit/
+# ad hoc probe scripts, written inside the repo root so bun can resolve ./src
+*.scratch.ts
 # internal launch / planning docs, kept locally, NOT part of the public repo
 ANALYSIS.md
 LAUNCH-PLAN.md
