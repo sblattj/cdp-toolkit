@@ -5,7 +5,13 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-08-06
+
+`v1.2.1` was tagged and pushed to GitHub but never published to npm: the
+release runs through GitHub Actions with OIDC trusted publishing, and Actions
+was down for a full day. Rather than publish that fix on its own, it ships
+here alongside tab origin, so 1.3.0 is the first npm release carrying both
+the lease feature (`claim_page`/`release_page`/`list_leases`) and tab origin.
 
 ### Added
 

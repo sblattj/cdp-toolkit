@@ -45,7 +45,8 @@ If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp
 **Yes, if you:**
 - drive one known tab from Claude Code / Cursor / any MCP host and want it to never wedge;
 - need to **mock a backend** to build or test a UI before the real API exists;
-- have been bitten by the eager-`Network.enable` hang on a busy renderer.
+- have been bitten by the eager-`Network.enable` hang on a busy renderer;
+- run **multiple agents against one Chrome** and need them to stop stealing each other's tabs.
 
 **Probably not, if you:**
 - need cross-browser (Firefox / WebKit), use [`playwright-mcp`](https://github.com/microsoft/playwright-mcp);
@@ -118,6 +119,8 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 - **Single-target reliability.** One WebSocket to one resolved target, a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. There is no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
 - **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 36 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Many agents, one browser, no stolen tabs.** `claim_page` hands out an opaque lease token for one tab; every other tool checks it at target resolution, so an unqualified call against a leased tab is refused by name rather than silently retargeted to whatever tab a different agent is driving.
+- **Provenance that outlives the lease.** `list_pages` reports `origin: "agent"` (with the creating `label`) for every tab this toolkit opened, and `"unknown"` otherwise. It never claims `"human"`: the absence of a creation record cannot prove a person opened the tab, so `"unknown"` is the honest word once an agent releases, expires, or dies and its tab is left behind.
 
 ## Why raw CDP beats the MCP for known targets
 
