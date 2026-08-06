@@ -5,6 +5,21 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-05
+
+### Fixed
+
+- **On Chrome, a refusal caused by another agent's lease is now reported as a
+  lease conflict.** It was reported with the code meaning the target did not
+  exist, and the holder details were dropped, so a caller could not tell "this
+  tab is spoken for, go get the token or retry" apart from "that tab is not
+  there, stop looking". The refusal message itself always read correctly, so
+  anyone reading the text saw the real reason; only the machine readable code
+  and the holder fields were wrong. A genuinely missing target is still
+  reported as `no-such-target`. Enforcement was never affected: a leased tab
+  was refused before this fix and is refused after it. Firefox was never
+  affected, and now reports an identical conflict to Chrome's.
+
 ## [1.2.0] - 2026-08-05
 
 Two things landed since 1.0: a second backend, Firefox over WebDriver BiDi,
