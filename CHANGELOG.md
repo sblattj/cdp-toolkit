@@ -5,6 +5,28 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`list_pages` now reports where each tab came from.** Every tab cdp-toolkit
+  creates (`new_page`, and `claim_page` with no `targetId`) is written to a
+  creation ledger stored alongside the lease files, and each `list_pages` row
+  gains `origin`: `"agent"` when the toolkit created the tab, carrying the
+  creating `label` and `createdAt`, otherwise `"unknown"`. The record outlives
+  the lease on purpose. Once an agent releases, expires, or dies, its abandoned
+  tab was previously indistinguishable from one the human opened, which is
+  exactly when provenance is worth having. `origin` is never `"human"`: the
+  toolkit cannot prove a person opened a tab, so `"unknown"` is the honest word
+  for anything it did not create itself. A tab whose record exists but could
+  not be read reports `"unknown"` plus `originUnreadable`, so a broken record is
+  never mistaken for no record, matching how `list_leases` reports an unreadable
+  lease. The ledger is reaped when it is read, dropping records for targets the
+  browser no longer has, so nothing has to be scheduled to clean it up. Purely
+  additive: `id`, `url`, `title`, and `type` are unchanged, and a missing or
+  unreadable ledger degrades to every page reporting `"unknown"` rather than
+  failing the call.
+
 ## [1.2.1] - 2026-08-05
 
 ### Fixed

@@ -38,7 +38,8 @@ import type {
   BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
-import { assertLeaseOk, claimLease, leaseTtlMs, releaseLeaseFor, type LeaseBackend, type LeaseToken } from "./leases.ts";
+import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, type LeaseBackend, type LeaseToken } from "./leases.ts";
+import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
@@ -133,21 +134,75 @@ function locatorOf(args: { uid?: DriverUid; selector?: string }): ElementLocator
 
 /* -------------------------------- pages (4) -------------------------------- */
 
-export async function listPages(driver: BrowserDriver, args: { all?: boolean } = {}): Promise<{ pages: PageInfo[]; count: number }> {
+/**
+ * A page listing entry, PageInfo plus provenance. STRICTLY ADDITIVE: {id, url,
+ * title, type} are unchanged in name, type and value, because consumers read
+ * them today.
+ */
+export interface ListedPage extends PageInfo {
+  /** "agent" when the creation ledger has a record for this target. Otherwise
+   *  "unknown", NEVER "human": the absence of a record is not proof that a
+   *  person opened the tab. See src/origins.ts. */
+  origin: PageOrigin;
+  /** The creating agent's label. Present only when origin is "agent". */
+  label?: string;
+  /** When this toolkit created the tab (epoch ms). Only when origin is "agent". */
+  createdAt?: number;
+  /** Present only when this target HAS a ledger record that could not be read:
+   *  the errno, or "unparseable". origin stays "unknown" because provenance is
+   *  genuinely unknown, but this field is what keeps an unreadable record from
+   *  being reported as a clean "nothing was ever recorded". */
+  originUnreadable?: string;
+}
+
+/**
+ * The reap set for the origin ledger: every target the browser currently has,
+ * INCLUDING non-page targets, regardless of what this call is listing.
+ *
+ * Using the filtered page list would be a bug with a plausible disguise: a
+ * default list_pages call drops workers and iframes, so reaping against it
+ * would delete the ledger record of any target that is alive but filtered out.
+ * Returning undefined (which listOrigins reads as "reap nothing") when the
+ * unfiltered listing fails is the same principle one step further: a failed
+ * enumeration must never be able to empty the ledger.
+ */
+async function reapSet(driver: BrowserDriver, pages: PageInfo[], all?: boolean): Promise<readonly string[] | undefined> {
+  if (all === true) return pages.map((p) => p.id);
+  try {
+    return (await driver.listPages({ all: true })).map((p) => p.id);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function listPages(driver: BrowserDriver, args: { all?: boolean } = {}): Promise<{ pages: ListedPage[]; count: number }> {
   const pages = await driver.listPages({ all: args.all });
-  return { pages, count: pages.length };
+  // Never let provenance break the listing: originIndex does not throw, and a
+  // missing or unreadable ledger yields an empty map, so every page falls back
+  // to origin "unknown" exactly as a pre-ledger consumer always saw.
+  const ledger = await originIndex(backendOf(driver), await reapSet(driver, pages, args.all));
+  const annotated: ListedPage[] = pages.map((p) => {
+    const rec = ledger.get(p.id);
+    if (!rec) return { ...p, origin: "unknown" };
+    if (rec.unreadable !== undefined) return { ...p, origin: "unknown", originUnreadable: rec.unreadable };
+    return { ...p, origin: "agent", label: rec.label, createdAt: rec.createdAt };
+  });
+  return { pages: annotated, count: annotated.length };
 }
 
 export async function newPage(
   driver: BrowserDriver,
   args: { url?: string; claim?: boolean; label?: string; ttlMs?: number } = {},
 ): Promise<{ targetId: string; url: string; lease?: LeaseToken; label?: string; expiresAt?: number }> {
-  const p = await driver.newPage(args.url);
+  const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
+  // Creates the tab AND writes its creation record. The record outlives any
+  // lease taken below, which is the point: a released tab is still an agent's.
+  const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label });
   if (args.claim !== true) return { targetId: p.id, url: p.url };
   // Atomic in the sense that matters: the tab is claimed before this call
   // returns, so no other agent can see it unclaimed and take it first.
   const { record, token } = await claimLease(backendOf(driver), p.id, {
-    label: typeof args.label === "string" && args.label.length ? args.label : `pid-${process.pid}`,
+    label,
     ttlMs: typeof args.ttlMs === "number" && args.ttlMs > 0 ? args.ttlMs : leaseTtlMs(),
   });
   return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
