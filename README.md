@@ -285,6 +285,8 @@ Pass that token as `lease` on every later call against the tab. `new_page` with 
 
 **Unreadable lease files.** A row in `list_leases` can carry `unreadable`, holding the errno (for example `EACCES`) or `"unparseable"`, when the lease file exists but could not be read or parsed. On such a row `label`, `pid`, `createdAt`, `lastUsedAt`, and `ttlMs` are zero placeholders, not real values, since they live inside the file that could not be read. `stale` is always `false` on that row, deliberately: `stale` is what a reader treats as free to take, and an unreadable lease must never read that way.
 
+**Verifying it against a real browser.** `bun run lease:smoke` (`test/lease-smoke.ts`) is the end-to-end harness for this feature. It drives a REAL browser on `CDP_BASE` (default `http://127.0.0.1:9333`) and spawns a genuine second OS process for the stranger role, because a lease records the claiming pid and a sequence of CLI calls can never collide: the first process is dead before the second starts. It asserts that the owner can act, that a tokenless stranger is refused with the `LeaseConflictError` type, `targetId` and `holder` intact and NOT coded `no-such-target`, that the refusal actually prevented the side effect (proved by reading the marker back, not by the throw), that a genuinely missing target still reports `no-such-target`, that the stranger is admitted after `release_page`, and that a lease orphaned by a real child process which exited is reclaimable with a fresh nonce. It is safe to point at a browser with real tabs open: it opens exactly one throwaway `about:blank` tab, addresses it only by its own target id, closes exactly that tab, and never closes the browser. It captures its own baseline tab listing at runtime and fails only if a tab that existed before the run went missing; tabs you open mid-run are ignored. Lease files go to a private temp dir that is removed on exit.
+
 **What this does not do.**
 
 - No fan-out. The shape is many agents with one tab each. One agent driving several tabs at once is a different feature and is not addressed.
@@ -313,6 +315,7 @@ test/
   mock-smoke.ts        # network-mocking end-to-end smoke (bun run mock:smoke)
   network_mock.test.ts # pure-logic unit tests (bun test)
   mcp-smoke.ts         # MCP handshake + live tools/call round-trip (bun run mcp:smoke)
+  lease-smoke.ts       # two-process live lease harness (bun run lease:smoke)
 ```
 
 Each module ends with a footer comment listing the exact CDP methods it uses and its parity gaps. The full design contract lives in [`CONTRACT.md`](./CONTRACT.md).
