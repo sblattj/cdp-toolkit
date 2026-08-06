@@ -16,6 +16,7 @@ import type { Target } from "../src/types.ts";
 import type { BrowsingContextInfo } from "../src/bidi/protocol.ts";
 import { resolveTarget } from "../src/client.ts";
 import { resolveContext } from "../src/bidi/driver.ts";
+import { createCdpDriver } from "../src/cdp/driver.ts";
 import { closePage, newPage, selectPage } from "../src/shared-tools.ts";
 import {
   assertLeaseOk,
@@ -661,6 +662,111 @@ describe("resolveContext is the Firefox choke point (fix round 2, Important 3)",
     expect((await resolveContext(conn, "FF-A", { lease: token })).context).toBe("FF-A");
     await withLeaseScope(token, async () => {
       expect((await resolveContext(conn, "FF-A")).context).toBe("FF-A");
+    });
+  });
+});
+
+/**
+ * The Chrome driver's acquisition path must not launder the gate's error.
+ *
+ * cdp/driver.ts caught everything out of resolveTarget / openPage and rethrew
+ * it as `no-such-target`. The 118 tests that shipped alongside that catch all
+ * passed, because they assert on message text and on the MCP text surface, and
+ * the message text is the one thing the rewrap preserved. So these assert on
+ * IDENTITY instead: the class, the targetId, the holder, and the absence of a
+ * code that tells a caller to give up. `no-such-target` means the selector
+ * matched nothing, which is the one instruction a lease conflict must never
+ * carry: a conflict is exactly the case where retrying, or going to fetch the
+ * token, is right. Revert the pass-through in noSuchTarget and these fail.
+ */
+describe("the Chrome driver does not launder a lease conflict into no-such-target", () => {
+  const realFetch = globalThis.fetch;
+  const targets: Target[] = [
+    { id: "DT-A", type: "page", title: "A", url: "https://example.test/a", webSocketDebuggerUrl: "ws://x/a" },
+    { id: "DT-B", type: "page", title: "B", url: "https://example.test/b", webSocketDebuggerUrl: "ws://x/b" },
+  ];
+  beforeEach(() => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(typeof input === "object" && "url" in input ? input.url : input);
+      if (url.endsWith("/json/list")) return new Response(JSON.stringify(targets), { headers: { "content-type": "application/json" } });
+      throw new Error(`unexpected fetch in test: ${url}`);
+    }) as typeof fetch;
+  });
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+  // Both paths reject before any websocket is opened, so no browser is needed.
+  const failure = (p: Promise<unknown>) => p.then(() => undefined, (e: unknown) => e as Error & { code?: unknown; targetId?: string; holder?: string });
+
+  test("page() keeps the conflict's type, targetId and holder", async () => {
+    await claimLease("chrome", "DT-A", { label: "agent-one" });
+    const driver = createCdpDriver();
+    for (const selector of ["DT-A", undefined, "active", "index:0", "url:/a", "title:A"] as const) {
+      const err = await failure(driver.page(selector));
+      expect(err).toBeInstanceOf(LeaseConflictError);
+      expect(err?.targetId).toBe("DT-A");
+      expect(err?.holder).toBe("agent-one");
+      expect(err?.code).not.toBe("no-such-target");
+    }
+  });
+
+  test("activatePage() keeps the conflict's type, targetId and holder", async () => {
+    await claimLease("chrome", "DT-A", { label: "agent-one" });
+    const err = await failure(createCdpDriver().activatePage("DT-A"));
+    expect(err).toBeInstanceOf(LeaseConflictError);
+    expect(err?.targetId).toBe("DT-A");
+    expect(err?.holder).toBe("agent-one");
+    expect(err?.code).not.toBe("no-such-target");
+  });
+
+  test("a genuinely missing target is still no-such-target (the fix does not over-correct)", async () => {
+    const driver = createCdpDriver();
+    for (const selector of ["DT-NOPE", "index:9", "url:/nowhere", "title:nothing"] as const) {
+      expect((await failure(driver.page(selector)))?.code).toBe("no-such-target");
+      expect((await failure(driver.activatePage(selector)))?.code).toBe("no-such-target");
+    }
+    // And an unleased tab still resolves through the gate untouched.
+    expect((await resolveTarget("DT-A")).id).toBe("DT-A");
+  });
+
+  test("Chrome and Firefox report the same conflict identically", async () => {
+    await claimLease("chrome", "SAME-ID", { label: "agent-one" });
+    await claimLease("firefox", "SAME-ID", { label: "agent-one" });
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(typeof input === "object" && "url" in input ? input.url : input);
+      if (url.endsWith("/json/list"))
+        return new Response(JSON.stringify([{ id: "SAME-ID", type: "page", title: "S", url: "https://example.test/s", webSocketDebuggerUrl: "ws://x/s" }]), {
+          headers: { "content-type": "application/json" },
+        });
+      throw new Error(`unexpected fetch in test: ${url}`);
+    }) as typeof fetch;
+    const chrome = await failure(createCdpDriver().page("SAME-ID"));
+    const conn = {
+      async send(method: string) {
+        if (method === "browsingContext.getTree")
+          return {
+            contexts: [
+              { children: null, clientWindow: "w", context: "SAME-ID", originalOpener: null, url: "https://example.test/s", userContext: "default" },
+            ] as unknown as BrowsingContextInfo[],
+          };
+        throw new Error(`unexpected BiDi command in test: ${method}`);
+      },
+    } as unknown as Parameters<typeof resolveContext>[0];
+    const firefox = await failure(resolveContext(conn, "SAME-ID"));
+    for (const err of [chrome, firefox]) {
+      expect(err).toBeInstanceOf(LeaseConflictError);
+      expect(err?.targetId).toBe("SAME-ID");
+      expect(err?.holder).toBe("agent-one");
+      expect(err?.code).toBeUndefined();
+    }
+  });
+
+  test.skipIf(asRoot)("an unreadable lease file is not reported as a missing target either", async () => {
+    await claimLease("chrome", "DT-A", { label: "agent-one" });
+    await withUnreadable(leaseFile("chrome", "DT-A"), async () => {
+      const err = await failure(createCdpDriver().page("DT-A"));
+      expect(err?.message ?? "").toMatch(/EACCES|permission denied/i);
+      expect(err?.code).not.toBe("no-such-target");
     });
   });
 });

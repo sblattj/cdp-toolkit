@@ -7,6 +7,7 @@
  */
 import { type CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
+import { LeaseConflictError } from "../leases.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
@@ -587,7 +588,33 @@ async function withBrowserConn<T>(fn: (conn: CdpConnection) => Promise<T>): Prom
     conn.close();
   }
 }
+/**
+ * Relabel a target-resolution failure as `no-such-target`, but ONLY when the
+ * failure carries no type of its own.
+ *
+ * This used to relabel everything, and that was wrong in a way no unit test
+ * caught, because the message text survived and the MCP surface reads message
+ * text. resolveTarget is where the Chrome lease gate lives, so a
+ * LeaseConflictError raised by assertLeaseOk came through here and lost its
+ * class, its targetId and its holder, and came out coded `no-such-target`,
+ * which tells a caller the selector matched nothing and it should stop. A lease
+ * conflict is the one case where retrying, or going to fetch the token, is the
+ * right move. readLease's deliberate rethrow on an UNREADABLE lease file was
+ * mislabeled the same way, which is precisely the confusion that throw exists
+ * to prevent. BiDi never had a blanket catch, so the two backends disagreed.
+ *
+ * The pass-through is by TYPE, not by an enumerated list of errors, so a typed
+ * error added anywhere below this frame is protected without anyone having to
+ * remember to come back here:
+ *   - LeaseConflictError, named because it is the one the caller acts on;
+ *   - anything carrying a STRING `code`, which covers every DriverError and
+ *     every fs errno (an EACCES out of readLease reaches this frame).
+ * CdpError's `code` is a NUMBER (a CDP protocol error code), so a genuine
+ * "that target does not exist" from pickTarget still relabels, as it must.
+ */
 function noSuchTarget(e: unknown): never {
+  if (e instanceof LeaseConflictError) throw e;
+  if (typeof (e as { code?: unknown } | null | undefined)?.code === "string") throw e;
   throw driverError("no-such-target", e instanceof CdpError ? e.message : String(e));
 }
 class CdpBrowserDriver implements BrowserDriver {
