@@ -5,7 +5,7 @@
  * this script owns the whole lifecycle itself: it launches a throwaway
  * headless Firefox via src/bidi/launch.ts, serves the local fixtures over
  * Bun.serve on an ephemeral port (never file://, never a shared debug port),
- * and tears the process down again. It NEVER connects to port 9333 or any
+ * and tears the process down again. It NEVER connects to port 9222 or any
  * other fixed port: that convention is reserved for a real Chrome the
  * developer may have running locally, and this script must not touch it.
  *
