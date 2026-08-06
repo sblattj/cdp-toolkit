@@ -31,10 +31,10 @@
  *     nothing lands in the repo or in a shared artifact dir.
  * ======================================================================
  *
- * Run with `bun run lease:smoke`. `CDP_BASE` selects the browser (default
- * http://127.0.0.1:9333); the harness fails fast with a clear message if nothing
- * is listening there rather than hanging. Prints one PASS/FAIL line per assertion
- * and exits non-zero naming every failure.
+ * Run with `bun run lease:smoke`. `CDP_BASE` selects the browser, defaulting to
+ * the same port as the rest of the toolkit; the harness fails fast with a clear
+ * message if nothing is listening there rather than hanging. Prints one PASS/FAIL
+ * line per assertion and exits non-zero naming every failure.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -56,7 +56,7 @@ const ROLE = argValue("--role") ?? "owner";
 // CDP_BASE is read into a module-level const inside src/client.ts, so the default
 // has to be in the environment BEFORE the toolkit is imported. Hence the dynamic
 // imports below. Children inherit this env, so all three roles agree on the port.
-process.env.CDP_BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9333";
+process.env.CDP_BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
 
 const { BASE, TOOLS } = await import("../src/index.ts");
 const { LeaseConflictError, isPidAlive, leaseFile, tokenParts, withLeaseScope } = await import("../src/leases.ts");
