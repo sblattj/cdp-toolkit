@@ -25,7 +25,7 @@ export interface ToolSpec {
 export const MANIFEST: ToolSpec[] = [
   {
     "name": "list_pages",
-    "description": "Enumerate browser page targets via the CDP browser endpoint (GET /json/list). By default returns only page-type tabs; set 'all' to also include workers and background pages. Each entry carries the targetId used as a target selector elsewhere.",
+    "description": "Enumerate browser page targets via the CDP browser endpoint (GET /json/list). By default returns only page-type tabs; set 'all' to also include workers and background pages. Each entry carries the targetId used as a target selector elsewhere, plus an 'origin' field recording where the tab came from: 'agent' means this toolkit created it (the entry then also carries the creating 'label' and 'createdAt'), and this stays true after the creating agent releases its lease or dies, which is what makes a stray agent tab findable later. 'unknown' means there is no creation record. It never says 'human': the toolkit cannot prove a person opened a tab, so 'unknown' is the honest word for a tab it did not create, one opened before the toolkit ran, or one whose record could not be written. A tab whose record exists but could not be read reports origin 'unknown' plus 'originUnreadable', so a broken record is never mistaken for no record.",
     "inputSchema": {
       "type": "object",
       "properties": {
