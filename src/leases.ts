@@ -65,6 +65,14 @@ export function leaseTtlMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LEASE_TTL_MS;
 }
 
+/** The label recorded when a caller supplies none. ONE definition, because it
+ *  is now written by three call sites (claim_page, new_page, and the origin
+ *  ledger) and a second rule would make the same tab describe itself two
+ *  different ways depending on which of them wrote first. */
+export function defaultLabel(): string {
+  return `pid-${process.pid}`;
+}
+
 function safeId(id: string): string {
   return id.replace(/[^A-Za-z0-9._-]/g, "_");
 }
