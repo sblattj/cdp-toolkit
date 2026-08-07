@@ -41,7 +41,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # create the GitHub Release for the tag (final step)
   id-token: write # OIDC token for npm trusted publishing + provenance
 
 jobs:
@@ -84,3 +84,27 @@ jobs:
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
         run: npm publish --provenance --access public --loglevel verbose
+      # Every tag also gets a GitHub Release, so the Releases page never falls
+      # behind npm again (it sat frozen at v1.0.0 through v1.3.0 because this
+      # step did not exist). Uses the runner's built-in `gh` rather than a
+      # third-party action, so there is no floating-ref supply-chain surface to
+      # pin. Notes come from the matching CHANGELOG.md section; a version with
+      # no section falls back to auto-generated notes. Idempotent: a re-run or a
+      # re-dispatch that finds the release already there is a no-op.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::Release $GITHUB_REF_NAME already exists, skipping."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          awk -v v="$VERSION" 'BEGIN{pat="^## \\["v"\\]"} $0 ~ pat {p=1;next} /^## \[/{if(p)exit} p' CHANGELOG.md > "$NOTES"
+          if [ -s "$NOTES" ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$NOTES" --latest
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --latest
+          fi
