@@ -1,4 +1,4 @@
-# cdp-toolkit demo: a 30-second terminal cast of driving one Chrome tab over raw CDP.
+# cdp-toolkit demo: a 30-second terminal cast of driving named Chrome tabs over raw CDP.
 #
 # Render:  vhs docs/demo.tape          → writes docs/demo.gif (referenced by the README)
 # Install: brew install vhs            (https://github.com/charmbracelet/vhs)
@@ -21,7 +21,7 @@ Set Padding 24
 Set Theme "Dracula"
 Set TypingSpeed 45ms
 
-Type "# cdp-toolkit: drive ONE known Chrome tab over raw CDP, no fan-out, no hang"
+Type "# cdp-toolkit: drive the Chrome tabs you name over raw CDP, no fan-out, no hang"
 Enter
 Sleep 1200ms
 
@@ -43,6 +43,6 @@ Type `bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{"results":
 Enter
 Sleep 3000ms
 
-Type "# 39 tools, one direct WebSocket, a bounded timeout on every call."
+Type "# 39 tools, one direct WebSocket per call, a bounded timeout on every call."
 Enter
 Sleep 2200ms
