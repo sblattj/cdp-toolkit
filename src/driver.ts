@@ -313,6 +313,48 @@ export interface BrowserCookie {
   session: boolean;
 }
 
+/**
+ * One cookie to WRITE, neutral over CDP's `Network.setCookie` and BiDi's
+ * `storage.setCookie`.
+ *
+ * `url` and `domain` are both optional here but not both omittable: the cookie
+ * has to be attributed to a site somehow, and every backend refuses without
+ * one. The tool layer enforces that before either driver is reached, so the
+ * refusal is one message rather than two different protocol errors.
+ *
+ * `expires` follows the read shape: Unix seconds. Omit it for a session cookie,
+ * which is what both backends do when no expiry is supplied.
+ */
+export interface SetCookieParams {
+  name: string;
+  value: string;
+  /** The URL the cookie is being set for. CDP derives domain, path and secure
+   *  from it; BiDi has no url parameter, so its driver derives the domain. */
+  url?: string;
+  domain?: string;
+  path?: string;
+  /** Unix seconds. Omitted means a session cookie. */
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "strict" | "lax" | "none" | "default";
+}
+
+/**
+ * Which cookies to DELETE, neutral over CDP's `Network.deleteCookies` and
+ * BiDi's `storage.deleteCookies` filter.
+ *
+ * `name` is required and there is no wildcard: this deletes a named cookie, not
+ * a swathe of them. As with SetCookieParams, one of `url` or `domain` must be
+ * present, and the tool layer enforces it.
+ */
+export interface DeleteCookiesFilter {
+  name: string;
+  url?: string;
+  domain?: string;
+  path?: string;
+}
+
 export interface InterceptRule {
   /** Glob: `*` any run, `?` one char. Both drivers normalize to this. */
   urlPattern: string;
@@ -447,6 +489,25 @@ export interface PageDriver {
    * wants another site's cookies points at a page on that site.
    */
   getCookies(): Promise<BrowserCookie[]>;
+
+  /**
+   * Write one cookie into the store this page reads from.
+   *
+   * Resolves only when the backend confirms the write. A backend that reports
+   * a refusal (CDP's `Network.setCookie` answers `{success:false}` for a cookie
+   * it will not accept) must throw rather than resolve, because a resolved
+   * promise here reads as "the cookie is set" and a caller will believe it.
+   */
+  setCookie(params: SetCookieParams): Promise<void>;
+
+  /**
+   * Remove the cookies matching the filter from the store this page reads from.
+   *
+   * Neither backend reports how many cookies it removed, so this returns
+   * nothing rather than an invented count. Deleting a cookie that was never
+   * there is not an error on either backend.
+   */
+  deleteCookies(filter: DeleteCookiesFilter): Promise<void>;
 
   /* network */
   /** Begin retaining response bodies. REQUIRED before getResponseBody unless

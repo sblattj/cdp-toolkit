@@ -259,6 +259,97 @@ export const MANIFEST: ToolSpec[] = [
     }
   },
   {
+    "name": "set_cookie",
+    "description": "Write one cookie into the target page's cookie store, INCLUDING an httpOnly or secure cookie, which document.cookie cannot create and an evaluate_script call therefore cannot either. Chrome uses Network.setCookie, Firefox uses storage.setCookie partitioned by the resolved browsing context. Either 'url' or 'domain' is REQUIRED: a cookie has to be attributed to a site and the call is refused with an error when neither is given, rather than guessing the current page's origin. The response is {set:true,target} and never echoes the value back, so a credential you just supplied does not land in the transcript twice. A 'set:true' is earned, not assumed: Chrome answers Network.setCookie with success:false when it declines a cookie (a domain the url does not belong to, a secure cookie on an insecure origin, an oversized value) and that refusal is raised as an error. On Firefox, 'domain' is derived from 'url' when only the url was given, because BiDi has no url parameter; a url with no host, such as about:blank or a data URL, is an error rather than a silent no-op. Read the result back with list_cookies when you need proof.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+        },
+        "name": {
+          "type": "string",
+          "description": "Cookie name. Required and non-empty."
+        },
+        "value": {
+          "type": "string",
+          "description": "Cookie value. Required. It is not echoed back in the response."
+        },
+        "url": {
+          "type": "string",
+          "description": "The URL the cookie is set for, for example 'https://example.com/'. Chrome derives domain, path and secure from it. Firefox derives only the domain from its host. Give this or 'domain'."
+        },
+        "domain": {
+          "type": "string",
+          "description": "Cookie domain, for example 'example.com' or '.example.com' for subdomains. Give this or 'url'. When both are given, this wins on Firefox and Chrome applies its own url plus domain consistency rule."
+        },
+        "path": {
+          "type": "string",
+          "description": "Cookie path. Passed through exactly as given and NOT defaulted to '/': with a 'url' Chrome derives the path from it, so an invented default here would widen a cookie you meant to scope narrowly."
+        },
+        "expires": {
+          "type": "number",
+          "description": "Expiry as Unix time in SECONDS, matching what list_cookies reports. Omit it for a session cookie, which is what both backends do when no expiry is supplied."
+        },
+        "httpOnly": {
+          "type": "boolean",
+          "description": "Set the httpOnly flag, making the cookie invisible to document.cookie. Only a protocol write like this one can create such a cookie."
+        },
+        "secure": {
+          "type": "boolean",
+          "description": "Set the secure flag. Chrome declines a secure cookie on an insecure origin, and that refusal surfaces as an error."
+        },
+        "sameSite": {
+          "type": "string",
+          "enum": ["strict", "lax", "none", "default"],
+          "description": "SameSite attribute, lowercase, matching what list_cookies reports. 'default' means the attribute is not set at all."
+        }
+      },
+      "required": ["name", "value"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "delete_cookies",
+    "description": "Delete the named cookie from the target page's cookie store, httpOnly cookies included. Chrome uses Network.deleteCookies, Firefox uses storage.deleteCookies with a filter, partitioned by the resolved browsing context. Both 'name' and one of 'url' or 'domain' are REQUIRED: without a site constraint the call would delete by name across the whole partition, so it is refused with an error instead. Narrow further with 'path'. The response is {deleted:true,target} and carries NO count, because neither protocol reports how many cookies it removed and a number here would be invented; call list_cookies before and after when you need a real count. 'deleted:true' means the backend accepted and performed the deletion, not that a matching cookie existed, since deleting an absent cookie is a success on both backends.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+        },
+        "name": {
+          "type": "string",
+          "description": "Exact cookie name to delete. Required and non-empty. No wildcards: this removes a named cookie, not a swathe of them."
+        },
+        "url": {
+          "type": "string",
+          "description": "Delete cookies matching this URL, for example 'https://example.com/'. Give this or 'domain'. On Firefox only the host is used, because BiDi's filter has no url field."
+        },
+        "domain": {
+          "type": "string",
+          "description": "Delete cookies with this exact domain. Give this or 'url'."
+        },
+        "path": {
+          "type": "string",
+          "description": "Narrow the deletion to cookies with this exact path. Omit to match any path allowed by the other constraints."
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "take_snapshot",
     "description": "Capture the page's accessibility tree (Accessibility.getFullAXTree) as a compact indented text tree where each line is prefixed with [uid], the node's CDP backendDOMNodeId. These uids are the stateless element references that every interaction tool (click/hover/fill/etc.) feeds back to resolve a live DOM node (via DOM.resolveNode({ backendNodeId: uid })), so run this first to discover uids.",
     "inputSchema": {

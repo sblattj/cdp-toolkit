@@ -11,7 +11,8 @@ import { LeaseConflictError } from "../leases.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
   type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
@@ -55,6 +56,22 @@ export function normalizeCdpCookie(c: CdpCookie): BrowserCookie {
     size: typeof c.size === "number" ? c.size : Buffer.byteLength(`${c.name}${c.value}`, "utf8"),
     httpOnly: c.httpOnly === true, secure: c.secure === true, sameSite, session: c.session === true,
   };
+}
+
+/**
+ * The neutral lowercase `sameSite` back to CDP's own vocabulary.
+ *
+ * The inverse of normalizeCdpCookie's mapping, and it has to be the inverse:
+ * CDP capitalizes the three real values and has NO word for "default", which
+ * is BiDi's name for a cookie that never set the attribute. So "default"
+ * returns undefined and the caller omits the field, which is exactly the state
+ * it describes.
+ */
+export function cdpSameSite(sameSite?: "strict" | "lax" | "none" | "default"): "Strict" | "Lax" | "None" | undefined {
+  if (sameSite === "strict") return "Strict";
+  if (sameSite === "lax") return "Lax";
+  if (sameSite === "none") return "None";
+  return undefined;
 }
 
 /* ---------------------- copied helpers, see attributions below ---------------------- */
@@ -583,6 +600,58 @@ class CdpPageDriver implements PageDriver {
     await this.ensureDomain("Network");
     const { cookies } = await this.conn.send<{ cookies: CdpCookie[] }>("Network.getCookies");
     return (cookies ?? []).map(normalizeCdpCookie);
+  }
+  /**
+   * `Network.setCookie`, which answers `{success: boolean}` rather than an
+   * error when it declines a cookie.
+   *
+   * That return is the whole reason this method is more than one line. Chrome
+   * refuses a cookie for plenty of ordinary reasons (a domain the url does not
+   * belong to, `secure` on an insecure origin, an oversized value) and reports
+   * the refusal as `success:false` with a perfectly successful protocol reply.
+   * Resolving on that would hand the caller a "cookie set" that is not set, so
+   * a false is turned into a thrown error naming the cookie.
+   *
+   * `path` is passed through as given, not defaulted: with a `url` CDP derives
+   * the path from it, and inventing "/" here would silently widen the scope of
+   * a cookie the caller asked to scope narrowly.
+   */
+  async setCookie(params: SetCookieParams): Promise<void> {
+    await this.ensureDomain("Network");
+    const sameSite = cdpSameSite(params.sameSite);
+    const { success } = await this.conn.send<{ success: boolean }>("Network.setCookie", {
+      name: params.name,
+      value: params.value,
+      ...(params.url !== undefined ? { url: params.url } : {}),
+      ...(params.domain !== undefined ? { domain: params.domain } : {}),
+      ...(params.path !== undefined ? { path: params.path } : {}),
+      ...(params.expires !== undefined ? { expires: params.expires } : {}),
+      ...(params.httpOnly !== undefined ? { httpOnly: params.httpOnly } : {}),
+      ...(params.secure !== undefined ? { secure: params.secure } : {}),
+      ...(sameSite !== undefined ? { sameSite } : {}),
+    });
+    if (success !== true) {
+      // "page-error" is this file's code for a browser-side refusal of an
+      // operation that reached the browser intact, which is precisely this.
+      throw driverError(
+        "page-error",
+        `Network.setCookie declined the cookie '${params.name}'. Chrome rejects a cookie whose domain does not match the url, a secure cookie on an insecure origin, and an oversized name or value.`,
+      );
+    }
+  }
+  /**
+   * `Network.deleteCookies`. Unlike setCookie it reports nothing at all, not
+   * even a count, so this resolves on the protocol acknowledgement and the tool
+   * above it returns a boolean ack instead of a fabricated number.
+   */
+  async deleteCookies(filter: DeleteCookiesFilter): Promise<void> {
+    await this.ensureDomain("Network");
+    await this.conn.send("Network.deleteCookies", {
+      name: filter.name,
+      ...(filter.url !== undefined ? { url: filter.url } : {}),
+      ...(filter.domain !== undefined ? { domain: filter.domain } : {}),
+      ...(filter.path !== undefined ? { path: filter.path } : {}),
+    });
   }
   async startBodyCapture(): Promise<() => Promise<void>> {
     await this.ensureDomain("Network");
