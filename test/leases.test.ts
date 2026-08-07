@@ -550,7 +550,7 @@ describe("an unreadable lease file is not an unleased tab (fix round 2, Importan
 });
 
 /**
- * The two gates that cover 33 of the 36 tools. Both were deletable with a green
+ * The two gates that cover 36 of the 39 tools (everything but the lease group itself). Both were deletable with a green
  * suite: removing the assertLeaseOk call from resolveTarget or from
  * resolveContext left 102 pass / 0 fail, so a later refactor could drop lease
  * enforcement from Chrome or Firefox entirely and CI would approve it. These
