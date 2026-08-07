@@ -33,7 +33,7 @@
  * behavior outranks the abstraction, these 7 stay two implementations; see the migration report.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
@@ -287,14 +287,60 @@ export const waitFor = waitForText;
 
 /* ------------------------------- evaluate (1) ------------------------------- */
 
+/**
+ * The `savePath` result shape. Deliberately carries NO form of the evaluated
+ * value: not the value, not a preview, not a truncation, not a byte prefix.
+ * The whole reason `savePath` exists is that the value may be a credential
+ * (a JWT or session token read out of localStorage), and anything this object
+ * carried would land in the caller's transcript, which is the exact leak the
+ * file sink is here to prevent. `type` is the JS typeof of the value ("null"
+ * for null), which describes the value without disclosing any of it.
+ */
+export interface EvaluateScriptSaveResult {
+  path: string;
+  bytes: number;
+  type: string;
+  target: { id: string; url: string; title: string };
+}
+
+/**
+ * Serialize an evaluated value for the file sink. `undefined` (an expression
+ * with no result) is written as JSON null rather than left unwritten, so the
+ * file always exists and always parses.
+ */
+function serializeForSink(value: unknown): string {
+  const json = JSON.stringify(value === undefined ? null : value, null, 2);
+  return json ?? "null";
+}
+
 export async function evaluateScript(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[] },
+  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string },
 ): Promise<unknown> {
   if (typeof args.expression !== "string" || args.expression.length === 0) {
     throw new SharedToolError("evaluateScript: 'expression' must be a non-empty string");
   }
-  return withPage(driver, args.target, (page) => page.evaluate(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true }));
+  return withPage(driver, args.target, async (page) => {
+    const value = await page.evaluate(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true });
+    // No savePath: byte-identical to the pre-sink behavior, the value itself.
+    // A thrown page-side exception never reaches here, so it still surfaces as
+    // an error rather than being written into the file.
+    if (args.savePath === undefined || args.savePath === "") return value;
+
+    // savePath resolution matches take_heapsnapshot: an absolute path is used
+    // as-is, a relative one is resolved under ARTIFACT_DIR.
+    const path = args.savePath.startsWith("/") ? args.savePath : join(ARTIFACT_DIR, args.savePath);
+    await mkdir(dirname(path), { recursive: true });
+    const json = serializeForSink(value);
+    await writeFile(path, json, "utf8");
+    const result: EvaluateScriptSaveResult = {
+      path,
+      bytes: Buffer.byteLength(json, "utf8"),
+      type: value === null ? "null" : typeof value,
+      target: target3(page.info),
+    };
+    return result;
+  });
 }
 
 /* -------------------------------- snapshot (1) -------------------------------- */

@@ -162,6 +162,9 @@ cdp navigate_page --target index:0 --url https://example.com
 cdp take_snapshot --target url:example --interactiveOnly true
 cdp click --target index:0 --uid 42
 cdp evaluate_script --json '{"expression":"document.title"}'
+# Read a value WITHOUT it landing in the response (or an agent transcript):
+# savePath writes the value to a JSON file and returns {path,bytes,type,target} only.
+cdp evaluate_script --json '{"expression":"localStorage.getItem(\"auth\")","savePath":"auth.json"}'
 cdp take_screenshot --target url:example --fullPage true
 cdp lighthouse_audit --url https://example.com --json '{"categories":["performance"]}'
 ```
@@ -233,7 +236,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`p
 | `select_page` | `Target.activateTarget` + selected-state file | Writes a flat-file selected target; `resolveTarget` does not read it, so `active` still means `index:0` unless a tool opts in. |
 | `navigate_page` | `Page.navigate` / `Page.reload` + load events | Returns `{url,frameId,waitedFor}` (no auto-snapshot). `waitUntil` supports `load`/`domcontentloaded`. `reload:true` (+ `ignoreCache:true` for a hard reload). |
 | `wait_for` | `Runtime.evaluate` (poll `innerText`) | Text-substring waiting only; throws on timeout rather than returning `{found:false}`. |
-| `evaluate_script` | `Runtime.evaluate` / `callFunctionOn` | No live `page`/element handle; `args` are plain JSON. Main-world context only. |
+| `evaluate_script` | `Runtime.evaluate` / `callFunctionOn` | No live `page`/element handle; `args` are plain JSON. Main-world context only. Toolkit addition: optional `savePath` writes the value to a JSON file and keeps it out of the response entirely. |
 | `take_snapshot` | `Accessibility.getFullAXTree` | uid is the raw `backendDOMNodeId` (stateless, non-sequential). Full tree in one shot; frames flattened. `interactiveOnly` is a toolkit addition. |
 | `click` | `Input.dispatchMouseEvent` | No implicit auto-wait/retry; resolves and acts once; re-snapshot between steps. |
 | `hover` | `Input.dispatchMouseEvent` (`mouseMoved`) | Same single-shot model as `click`. |

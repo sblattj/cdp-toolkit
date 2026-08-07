@@ -5,6 +5,26 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`evaluate_script` can write its value to a file instead of returning it,
+  via a new optional `savePath`.** Reading a JWT, a session token, or any other
+  credential out of the page previously forced the secret through the tool
+  result, which is to say straight into the calling agent's transcript, with no
+  way to opt out. With `savePath` set, the evaluated value is serialized as
+  JSON to that file and the response carries only `{path, bytes, type, target}`:
+  no copy of the value, no preview, no truncated form, no leading characters.
+  `type` is the JS `typeof` of the value (`"null"` for null), which describes
+  the value without disclosing any of it. Path handling matches
+  `take_heapsnapshot`: an absolute path is used as-is, a relative one resolves
+  under the artifact dir (`/tmp/cdp-toolkit`, or `CDP_ARTIFACT_DIR`), and
+  missing parent directories are created. Omitting `savePath` leaves
+  `evaluate_script` behaving exactly as it did before, value returned inline,
+  so this is purely additive for every existing caller. Thrown page-side
+  exceptions still surface as errors and are never written into the file.
+
 ## [1.3.0] - 2026-08-06
 
 `v1.2.1` was tagged and pushed to GitHub but never published to npm: the
