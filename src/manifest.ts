@@ -228,6 +228,37 @@ export const MANIFEST: ToolSpec[] = [
     }
   },
   {
+    "name": "list_cookies",
+    "description": "Read the cookie store for the target page, INCLUDING httpOnly cookies, which document.cookie cannot see and an evaluate_script call therefore cannot reach. Each cookie carries name, value, domain, path, expires (Unix seconds, -1 for a session cookie), size, httpOnly, secure, sameSite ('strict'|'lax'|'none'|'default') and session. The read is page-scoped, not browser-wide: it returns the cookies of the resolved tab (Chrome: Network.getCookies; Firefox: storage.getCookies partitioned by that browsing context), so point at a page on the site whose cookies you want. Filter with 'domain' and/or 'name'. Pass 'savePath' to write the cookie array to a JSON file instead: the response is then {path,bytes,count,target} only, with no cookie value in it in any form, which is how to capture a session cookie without putting the credential in the caller's transcript.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+        },
+        "domain": {
+          "type": "string",
+          "description": "Keep only cookies for this domain. A leading dot is ignored on both sides and subdomains of the given domain match too, so 'example.test' matches '.example.test' and 'app.example.test'. No wildcards."
+        },
+        "name": {
+          "type": "string",
+          "description": "Keep only the cookie with exactly this name. Exact match, not a substring."
+        },
+        "savePath": {
+          "type": "string",
+          "description": "Write the cookie array to this file as JSON and KEEP THE VALUES OUT OF THE RESPONSE: with savePath set the result is {path,bytes,count,target} only, with no copy, preview or truncation of any cookie value. An absolute path (starting with /) is used as-is; a relative path is resolved under the artifact dir (/tmp/cdp-toolkit). Missing parent directories are created. Omit it to get the cookies back inline."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "take_snapshot",
     "description": "Capture the page's accessibility tree (Accessibility.getFullAXTree) as a compact indented text tree where each line is prefixed with [uid], the node's CDP backendDOMNodeId. These uids are the stateless element references that every interaction tool (click/hover/fill/etc.) feeds back to resolve a live DOM node (via DOM.resolveNode({ backendNodeId: uid })), so run this first to discover uids.",
     "inputSchema": {

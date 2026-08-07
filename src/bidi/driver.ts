@@ -25,7 +25,7 @@
 import type { TargetSelector } from "../types.ts";
 import {
   UID_STAMP_ATTR, isDriverError,
-  type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type BrowserCookie, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type SnapshotNode, type UidStability,
@@ -38,7 +38,31 @@ import type {
   BrowsingContextId, BrowsingContextInfo, BrowsingContextLocator, BrowsingContextReadinessState,
   BrowsingContextCaptureScreenshotParameters, ScriptSharedReference, ScriptRemoteValue, ScriptLocalValue,
   ScriptNodeRemoteValue, ScriptExceptionDetails, InputSourceActions, InputPointerSourceAction, InputKeySourceAction,
+  NetworkCookie,
 } from "./protocol.ts";
+
+/* ---------------------------------- cookies ---------------------------------- */
+/**
+ * BiDi's cookie shape to the neutral one. Three differences to absorb:
+ *  - the value is a network.BytesValue, either a plain string or base64, so a
+ *    base64 one is decoded rather than handed back as opaque base64;
+ *  - `expiry` is optional and simply absent for a session cookie, which becomes
+ *    the neutral -1 that CDP reports directly;
+ *  - `session` has no BiDi field at all, so it is derived from that same
+ *    absence, which is exactly what a session cookie means.
+ * `sameSite` already uses the lowercase vocabulary the neutral shape adopted.
+ */
+export function normalizeBidiCookie(c: NetworkCookie): BrowserCookie {
+  const value = c.value.type === "base64" ? Buffer.from(c.value.value, "base64").toString("utf8") : c.value.value;
+  const hasExpiry = typeof c.expiry === "number";
+  return {
+    name: c.name, value, domain: c.domain, path: c.path,
+    expires: hasExpiry ? (c.expiry as number) : -1,
+    size: typeof c.size === "number" ? c.size : Buffer.byteLength(`${c.name}${value}`, "utf8"),
+    httpOnly: c.httpOnly === true, secure: c.secure === true,
+    sameSite: c.sameSite ?? "default", session: !hasExpiry,
+  };
+}
 
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -641,6 +665,24 @@ class BidiPageDriver implements PageDriver {
       return { handled, count: handled.length };
     }
     return this.handleOneDialog(accept, promptText, opts?.timeoutMs ?? 15_000);
+  }
+
+  /**
+   * storage.getCookies, partitioned by THIS browsing context.
+   *
+   * The context partition is the BiDi counterpart of the CDP driver's choice of
+   * the page-scoped Network.getCookies over the browser-wide jar: it asks for
+   * the cookies of the tab that was resolved, not for every cookie the profile
+   * holds. httpOnly cookies are included, since this reads the cookie store
+   * over the protocol rather than evaluating document.cookie in the page.
+   */
+  async getCookies(): Promise<BrowserCookie[]> {
+    try {
+      const { cookies } = await this.conn.send("storage.getCookies", { partition: { type: "context", context: this.contextId } });
+      return (cookies ?? []).map(normalizeBidiCookie);
+    } catch (e) {
+      throw mapBidiError(e);
+    }
   }
 
   // Response bodies need network.addDataCollector armed BEFORE the request, per the established

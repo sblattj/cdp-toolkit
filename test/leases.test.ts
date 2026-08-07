@@ -776,7 +776,8 @@ describe("registry and manifest wiring", () => {
     expect(TOOL_NAMES).toContain("claim_page");
     expect(TOOL_NAMES).toContain("release_page");
     expect(TOOL_NAMES).toContain("list_leases");
-    expect(TOOL_NAMES.length).toBe(36);
+    // 36 before list_cookies was added.
+    expect(TOOL_NAMES.length).toBe(37);
   });
 
   test("every tool has a manifest schema and vice versa", () => {
