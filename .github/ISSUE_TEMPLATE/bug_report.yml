@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug, crash, hang, or wrong behavior in one of the 36 tools.
+description: Report a bug, crash, hang, or wrong behavior in one of the 39 tools.
 labels: ["bug"]
 body:
   - type: markdown
@@ -13,7 +13,7 @@ body:
     id: tool
     attributes:
       label: Tool name
-      description: One of the 33 MCP tool names (e.g. `take_snapshot`, `mock_request`).
+      description: One of the 39 MCP tool names (e.g. `take_snapshot`, `mock_request`).
       placeholder: take_snapshot
     validations:
       required: true

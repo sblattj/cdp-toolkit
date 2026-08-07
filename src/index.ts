@@ -3,7 +3,8 @@
  *
  * Two exports:
  *   1. `TOOLS` : the registry mapping every chrome-devtools-mcp tool name
- *      (snake_case string, all 29) to its raw-CDP implementation function. The
+ *      (snake_case string, all 29 of them) plus the toolkit's own superset
+ *      tools, 39 entries in all, to its raw-CDP implementation function. The
  *      CLI and any embedder dispatch through this single table.
  *   2. The client primitives, re-exported so consumers can build their own
  *      flows on the same connection/timeout machinery the tools use.
@@ -12,8 +13,9 @@
  * value (or throws). See CONTRACT.md for the design rules each module follows.
  */
 
-// --- the 20 tools unified with Firefox onto one Driver-based implementation ---
+// --- the 23 tools unified with Firefox onto one Driver-based implementation ---
 // (list_pages/new_page/close_page/select_page, navigate_page/wait_for, evaluate_script,
+// list_cookies/set_cookie/delete_cookies,
 // take_snapshot, click/hover/drag/fill/fill_form/type_text/press_key/upload_file,
 // take_screenshot/emulate/resize_page, handle_dialog). See shared-tools.ts's file header for
 // the byte-identical-Chrome-behavior contract this bind honors, and for the 7 tools that stay
@@ -59,8 +61,9 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * (mock_request/list_mocks/clear_mocks : a persistent per-target fake backend),
  * plus a 3-tool cookie group (list_cookies/set_cookie/delete_cookies : the
  * cookie store including httpOnly cookies, which no page script can read or
- * write).
- * 39 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * write), plus a 3-tool lease group (claim_page/release_page/list_leases :
+ * opt-in tab ownership so many agents can share one browser).
+ * 29 + 1 + 3 + 3 + 3 = 39 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/

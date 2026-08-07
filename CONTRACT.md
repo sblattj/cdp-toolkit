@@ -115,4 +115,4 @@ End every module with a brief block comment listing the exact CDP methods/domain
 
 ## Integration (built after all modules exist)
 
-`src/index.ts` exports a `TOOLS` registry: `Record<mcpToolName, (args) => Promise<unknown>>` importing every fn. `src/cli.ts`: `bun run src/cli.ts <tool> [--target <sel>] [--json '<obj>'] [--<k> <v> ...]` → parse args, call `TOOLS[tool]`, print JSON result or `{ error }`, exit non-zero on throw. `README.md`: the full 29-tool mapping table + usage + the "why direct CDP beats MCP for known targets" rationale.
+`src/index.ts` exports a `TOOLS` registry: `Record<mcpToolName, (args) => Promise<unknown>>` importing every fn. `src/cli.ts`: `bun run src/cli.ts <tool> [--target <sel>] [--json '<obj>'] [--<k> <v> ...]` → parse args, call `TOOLS[tool]`, print JSON result or `{ error }`, exit non-zero on throw. `README.md`: the full tool mapping table + usage + the "why direct CDP beats MCP for known targets" rationale.

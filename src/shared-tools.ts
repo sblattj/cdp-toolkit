@@ -3,7 +3,8 @@
  * (ADR-001), used by BOTH Chrome (via cdp/driver.ts's createCdpDriver()) and Firefox (via
  * bidi/driver.ts's createFirefoxDriver()). This file replaces the split that used to exist
  * between src/tools/*.ts (raw CDP, Chrome only) and src/neutral.ts (Driver-based, Firefox only)
- * for the 20 tools below.
+ * for 20 of the 23 tools below. The other three, the list_cookies/set_cookie/delete_cookies
+ * cookie group, landed here directly and never had a Chrome-only copy.
  *
  * THE HARD REQUIREMENT this file exists to satisfy: Chrome's return shape, timing, and quirks
  * stay byte-identical to what src/tools/*.ts produced before this migration: that already

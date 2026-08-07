@@ -1,7 +1,7 @@
 /**
  * The three lease tools, shaped like src/shared-tools.ts entries
  * ((driver, args) => Promise<result>) so ONE implementation serves Chrome and
- * Firefox, exactly as the other 20 unified tools do.
+ * Firefox, exactly as the 23 unified tools in that file do.
  */
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage } from "./origins.ts";
