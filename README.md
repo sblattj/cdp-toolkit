@@ -1,8 +1,8 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **39 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser, plus a built-in network-mocking fake backend. **39 tools.**
 
-> For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably**, not a Puppeteer-managed browser.
+> For AI-agent developers and Claude Code / Cursor users who need **the tabs they name driven reliably**, not a Puppeteer-managed browser.
 
 [![CI](https://github.com/sblattj/cdp-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/sblattj/cdp-toolkit/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/cdp-toolkit?color=cb3837&logo=npm)](https://www.npmjs.com/package/cdp-toolkit)
@@ -16,7 +16,7 @@
 
 You let an AI agent (Claude Code, Cursor, any MCP host) control a Chrome tab: click, type, read the page, take screenshots, even fake API responses to test a UI before its backend exists. [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) does this too, but it runs a whole Puppeteer browser and talks to *all* your open tabs at once, which is why a single busy tab can freeze it and leave you typing `/mcp` to restart the server mid-task.
 
-`cdp-toolkit` keeps it simple: **one connection to the one tab you point it at, and a time limit on every action.** When something stalls, you get an error back, not a frozen agent. Same things you could do before, minus the wedging and the restarts.
+`cdp-toolkit` keeps it simple: **one connection to the one tab each call names, and a time limit on every action.** Drive as many tabs as you like, one named target at a time, and point several agents at the same Chrome without them stealing each other's tabs. When something stalls, you get an error back, not a frozen agent. Same things you could do before, minus the wedging and the restarts.
 
 That's the whole pitch. The technical *why* (fan-out, lazy domain enabling, the `Network.enable` hang) is below.
 
@@ -24,13 +24,13 @@ That's the whole pitch. The technical *why* (fan-out, lazy domain enabling, the 
 
 If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) ever **wedged your agent on a busy tab**, you've met its design: it manages a Puppeteer browser, fans every operation out across *all* attached targets, and enables the `Network` domain on connect so it can passively buffer everything. That generality is exactly what makes it fragile once you already know which tab you want to drive.
 
-`cdp-toolkit` makes the opposite bet. Every tool attaches **one** direct WebSocket to **one** resolved target, enables only the CDP domains it needs, and enforces a **per-command timeout** so a stuck renderer can never hang the caller. For driving a tab you already have in hand, the common automation and evidence-gathering case, it's materially more robust.
+`cdp-toolkit` makes the opposite bet. Every call attaches **one** direct WebSocket to the **one** target it resolved, enables only the CDP domains it needs, and enforces a **per-command timeout** so a stuck renderer can never hang the caller. The connection lives for that call and closes after it, so nothing bleeds between tabs. For driving tabs you already have in hand, the common automation and evidence-gathering case, it's materially more robust.
 
 ## cdp-toolkit vs chrome-devtools-mcp
 
 | | **cdp-toolkit** | **chrome-devtools-mcp** |
 |---|---|---|
-| **Target scope** | one resolved tab (`active` / `index:N` / `url:` / `title:`) | all attached targets; fan-out can stall on an unrelated tab |
+| **Target scope** | one resolved tab per call (`active` / `index:N` / `url:` / `title:`), any number of tabs across calls | all attached targets; fan-out can stall on an unrelated tab |
 | **`Network.enable`** | lazy, only when a tool needs it | eager on connect, a known hang on busy renderers |
 | **Per-command timeout** | ✅ bounded (`CDP_TIMEOUT_MS`, 15s default), rejects, never hangs | ❌ none; a stuck renderer blocks indefinitely |
 | **Element refs** | stateless `backendDOMNodeId` (resolved on demand) | server-side handle table (can drift / expire) |
@@ -38,12 +38,12 @@ If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp
 | **Runtime deps** | CDP/CLI layer: native `WebSocket` + `fetch` (the MCP server adds only the MCP SDK) | Puppeteer stack |
 | **Auto-wait / retry** | ❌ single-shot; re-snapshot between steps | ✅ Puppeteer's auto-wait envelope |
 
-**Use `chrome-devtools-mcp`** if you need multi-target autonomy or Puppeteer's auto-wait/retry on an *unknown* page. **Use `cdp-toolkit`** when you have one tab in hand and need it not to hang. They coexist: `cdp-toolkit`'s tools are namespaced `mcp__cdp-toolkit__*`, distinct from `mcp__chrome-devtools__*`.
+**Use `chrome-devtools-mcp`** if you need multi-target autonomy or Puppeteer's auto-wait/retry on an *unknown* page. **Use `cdp-toolkit`** when you know which tabs you want driven, however many that is, and need them not to hang. They coexist: `cdp-toolkit`'s tools are namespaced `mcp__cdp-toolkit__*`, distinct from `mcp__chrome-devtools__*`.
 
 ## Is this for you?
 
 **Yes, if you:**
-- drive one known tab from Claude Code / Cursor / any MCP host and want it to never wedge;
+- drive tabs you name from Claude Code / Cursor / any MCP host and want them to never wedge;
 - need to **mock a backend** to build or test a UI before the real API exists;
 - have been bitten by the eager-`Network.enable` hang on a busy renderer;
 - run **multiple agents against one Chrome** and need them to stop stealing each other's tabs.
@@ -116,7 +116,7 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 ## Key capabilities
 
-- **Single-target reliability.** One WebSocket to one resolved target, a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. There is no broadcast step that can stall on a wedged tab.
+- **One target per call, never a broadcast.** Each call opens one WebSocket to the one target it named, with a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. Drive as many tabs as you like across calls; there is still no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
 - **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, and a cookie group that reads, writes, and deletes httpOnly cookies. 39 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
 - **Many agents, one browser, no stolen tabs.** `claim_page` hands out an opaque lease token for one tab; every other tool checks it at target resolution, so an unqualified call against a leased tab is refused by name rather than silently retargeted to whatever tab a different agent is driving.
@@ -126,12 +126,12 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 Each point below leads with the symptom you've probably hit, then the cause, then the fix.
 
-- **Your agent stalls on a call when a busy background tab is open** → that's the **all-target fan-out**: every operation broadcasts to all attached targets. cdp-toolkit resolves *one* target (`active | index:N | url:<substr> | title:<substr> | <targetId>`) and attaches a single WebSocket to just that page.
+- **Your agent stalls on a call when a busy background tab is open** → that's the **all-target fan-out**: every operation broadcasts to all attached targets. every cdp-toolkit call resolves *one* target (`active | index:N | url:<substr> | title:<substr> | <targetId>`) and attaches a single WebSocket to just that page, so a busy tab you did not name is never touched.
 - **A tool hangs forever and never returns** → the MCP's eager `Network.enable` on a busy or hung renderer is a known wedge. cdp-toolkit enables domains **lazily**, only where a tool needs them (the recorder enables `Network`/`Runtime`/`Log`; most tools touch only `Page`/`Runtime`/`DOM`).
 - **No way to bound a slow call** → `CdpConnection.send()` enforces `CDP_TIMEOUT_MS` (15s default) on *every* command and **rejects rather than hangs**, so a stuck renderer can never block a caller indefinitely.
 - **Element handles drift across calls** → a `uid` **is** a CDP `backendDOMNodeId`, resolved on demand via `DOM.resolveNode`. There is no server-side handle table to drift or expire.
 
-The trade-off is generality: this toolkit targets one known page at a time and does **not** replicate Puppeteer's auto-wait/retry envelope. Re-`take_snapshot` between steps rather than expecting an implicit wait.
+The trade-off is generality: this toolkit acts on one named page per call and does **not** replicate Puppeteer's auto-wait/retry envelope. Re-`take_snapshot` between steps rather than expecting an implicit wait.
 
 ## Network mocking: a fake backend for building/testing UIs
 
@@ -328,7 +328,7 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 
 **What this does not do.**
 
-- No fan-out. The shape is many agents with one tab each. One agent driving several tabs at once is a different feature and is not addressed.
+- No fan-out. Every call still names exactly one tab. An agent that wants several drives them a call at a time and holds a separate lease per tab; a single call acting on many tabs is a different feature and is not addressed.
 - No isolation. Two leased tabs on one Chrome still share cookies, `localStorage`, and every other origin-scoped store. A lease is ownership of a tab, not isolation of the browser under it.
 - No protection from humans. The lease is enforced against cdp-toolkit's own tool calls. It cannot stop someone clicking into the tab.
 - Not for the CLI. A CLI invocation is one process per call, so a lease it claimed would be reclaimable immediately by the dead-pid rule. `claim_page` is refused there. CLI calls can still present a token minted by the MCP server with `--lease`.
