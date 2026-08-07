@@ -11,7 +11,7 @@ import { LeaseConflictError } from "../leases.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
   type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
@@ -30,6 +30,33 @@ function decodeUid(uid: DriverUid): number {
   if (!Number.isSafeInteger(n) || n <= 0) throw driverError("foreign-uid", `malformed cdp uid payload: ${uid}`);
   return n;
 }
+/* ---------------------------------- cookies ---------------------------------- */
+/** The subset of CDP's `Network.Cookie` this driver reads. */
+export interface CdpCookie {
+  name: string; value: string; domain: string; path: string; expires: number; size: number;
+  httpOnly: boolean; secure: boolean; session: boolean; sameSite?: string;
+}
+
+/**
+ * CDP's cookie shape to the neutral one. Two mappings carry the difference:
+ * `sameSite` is capitalized by CDP and absent when the cookie never set the
+ * attribute, so it lowercases and falls back to "default" (BiDi's word for the
+ * same state); `expires` is already CDP's Unix seconds with -1 for a session
+ * cookie, so it passes through, with `session` kept as the browser's own flag
+ * rather than re-derived from the timestamp.
+ */
+export function normalizeCdpCookie(c: CdpCookie): BrowserCookie {
+  const same = (c.sameSite ?? "").toLowerCase();
+  const sameSite: BrowserCookie["sameSite"] =
+    same === "strict" || same === "lax" || same === "none" ? same : "default";
+  return {
+    name: c.name, value: c.value, domain: c.domain, path: c.path,
+    expires: typeof c.expires === "number" ? c.expires : -1,
+    size: typeof c.size === "number" ? c.size : Buffer.byteLength(`${c.name}${c.value}`, "utf8"),
+    httpOnly: c.httpOnly === true, secure: c.secure === true, sameSite, session: c.session === true,
+  };
+}
+
 /* ---------------------- copied helpers, see attributions below ---------------------- */
 // Copied verbatim from src/tools/input.ts `centerOf`: scroll into view, read viewport-space center.
 async function centerOf(conn: CdpConnection, objectId: string): Promise<{ x: number; y: number }> {
@@ -535,6 +562,27 @@ class CdpPageDriver implements PageDriver {
         resolve(d);
       });
     });
+  }
+  /**
+   * `Network.getCookies` over `Storage.getCookies`, deliberately.
+   *
+   * The two differ in SCOPE, not in detail: `Storage.getCookies` returns the
+   * whole browser jar (every cookie for every site the profile has), while
+   * `Network.getCookies`, called with no `urls`, returns the cookies of the
+   * page this connection is attached to and its subframes. This driver is
+   * always attached to one resolved target, so the page-scoped call is the one
+   * that answers the question the caller asked. It also keeps unrelated sites'
+   * session credentials out of a result that only named one tab.
+   *
+   * The Network domain is enabled with the same lazy ensureDomain the rest of
+   * the class uses. httpOnly cookies come back either way: this is a protocol
+   * read of the cookie store, not a `document.cookie` evaluation, which is the
+   * entire reason a tool is better here than a script.
+   */
+  async getCookies(): Promise<BrowserCookie[]> {
+    await this.ensureDomain("Network");
+    const { cookies } = await this.conn.send<{ cookies: CdpCookie[] }>("Network.getCookies");
+    return (cookies ?? []).map(normalizeCdpCookie);
   }
   async startBodyCapture(): Promise<() => Promise<void>> {
     await this.ensureDomain("Network");

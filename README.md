@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **36 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the *one* Chrome tab you point it at over the raw DevTools Protocol, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, one tab, no fan-out, plus a built-in network-mocking fake backend. **37 tools.**
 
 > For AI-agent developers and Claude Code / Cursor users who need **one known tab driven reliably**, not a Puppeteer-managed browser.
 
@@ -118,7 +118,7 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 - **Single-target reliability.** One WebSocket to one resolved target, a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. There is no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
-- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, and heap snapshots. 36 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, and a cookie read that reaches httpOnly cookies. 37 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
 - **Many agents, one browser, no stolen tabs.** `claim_page` hands out an opaque lease token for one tab; every other tool checks it at target resolution, so an unqualified call against a leased tab is refused by name rather than silently retargeted to whatever tab a different agent is driving.
 - **Provenance that outlives the lease.** `list_pages` reports `origin: "agent"` (with the creating `label`) for every tab this toolkit opened, and `"unknown"` otherwise. It never claims `"human"`: the absence of a creation record cannot prove a person opened the tab, so `"unknown"` is the honest word once an agent releases, expires, or dies and its tab is left behind.
 
@@ -165,6 +165,10 @@ cdp evaluate_script --json '{"expression":"document.title"}'
 # Read a value WITHOUT it landing in the response (or an agent transcript):
 # savePath writes the value to a JSON file and returns {path,bytes,type,target} only.
 cdp evaluate_script --json '{"expression":"localStorage.getItem(\"auth\")","savePath":"auth.json"}'
+# Cookies, httpOnly ones included (document.cookie cannot see those):
+cdp list_cookies --target index:0 --json '{"domain":"example.com"}'
+# Same read, with the values kept out of the response: {path,bytes,count,target} only.
+cdp list_cookies --json '{"name":"session","savePath":"cookies.json"}'
 cdp take_screenshot --target url:example --fullPage true
 cdp lighthouse_audit --url https://example.com --json '{"categories":["performance"]}'
 ```
@@ -192,7 +196,7 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 
 ## Firefox (WebDriver BiDi)
 
-cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 36-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
+cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 37-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
 
 ```bash
 cdp --browser firefox take_snapshot                 # CLI: explicit flag
@@ -213,7 +217,7 @@ Backend selection precedence: `--browser chrome|firefox` flag, then `CDP_BROWSER
 - `take_heapsnapshot` (needs `heap.snapshot`)
 - `lighthouse_audit` (needs `audit.lighthouse`)
 
-Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain) and the `claim_page`/`release_page`/`list_leases` lease group, is available under both backends: 30 of the 36 tools.
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain) and the `claim_page`/`release_page`/`list_leases` lease group, is available under both backends: 31 of the 37 tools.
 
 **Honest capability gaps, not oversold parity:**
 
@@ -224,9 +228,9 @@ Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's 
 - **`locate.text` is not available** (Firefox 153's `browsingContext.locateNodes` rejects the `innerText` locator type as unsupported), unlike Chrome, which has it via `DOM.performSearch`.
 - **No `--browser firefox` attach mode.** By design, per the launch model above: every invocation gets its own throwaway Firefox process and profile.
 
-## The tools (29 parity + 7 superset = 36)
+## The tools (29 parity + 8 superset = 37)
 
-The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`performance_trace`, the `mock_request`/`list_mocks`/`clear_mocks` group, and the `claim_page`/`release_page`/`list_leases` lease group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
+The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 8 superset tools (`performance_trace`, `list_cookies`, the `mock_request`/`list_mocks`/`clear_mocks` group, and the `claim_page`/`release_page`/`list_leases` lease group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
 
 | MCP name | CDP method(s) | Parity notes / gaps |
 |---|---|---|
@@ -237,6 +241,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 7 superset tools (`p
 | `navigate_page` | `Page.navigate` / `Page.reload` + load events | Returns `{url,frameId,waitedFor}` (no auto-snapshot). `waitUntil` supports `load`/`domcontentloaded`. `reload:true` (+ `ignoreCache:true` for a hard reload). |
 | `wait_for` | `Runtime.evaluate` (poll `innerText`) | Text-substring waiting only; throws on timeout rather than returning `{found:false}`. |
 | `evaluate_script` | `Runtime.evaluate` / `callFunctionOn` | No live `page`/element handle; `args` are plain JSON. Main-world context only. Toolkit addition: optional `savePath` writes the value to a JSON file and keeps it out of the response entirely. |
+| `list_cookies` *(superset)* | `Network.getCookies` | Reads the target page's cookie store, httpOnly cookies included, which `document.cookie` and therefore `evaluate_script` cannot see. Page-scoped on purpose, not the browser-wide jar (`Storage.getCookies`), so it answers for the tab you named. Optional `domain`/`name` filters; optional `savePath` writes the array to a JSON file and returns `{path,bytes,count,target}` with no cookie value in the response. |
 | `take_snapshot` | `Accessibility.getFullAXTree` | uid is the raw `backendDOMNodeId` (stateless, non-sequential). Full tree in one shot; frames flattened. `interactiveOnly` is a toolkit addition. |
 | `click` | `Input.dispatchMouseEvent` | No implicit auto-wait/retry; resolves and acts once; re-snapshot between steps. |
 | `hover` | `Input.dispatchMouseEvent` (`mouseMoved`) | Same single-shot model as `click`. |
@@ -328,7 +333,7 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 src/
   client.ts          # CdpConnection, openPage/withPage/openBrowser, resolveTarget, timeouts
   types.ts           # Target, TargetSelector, Uid, CDP envelopes
-  index.ts           # TOOLS registry (36) + re-exported client primitives
+  index.ts           # TOOLS registry (37) + re-exported client primitives
   cli.ts             # the Bun CLI
   mcp.ts             # stdio MCP server (exposes TOOLS via @modelcontextprotocol/sdk)
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)

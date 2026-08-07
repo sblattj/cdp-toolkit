@@ -9,6 +9,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`list_cookies`, a new tool that reads the target page's cookie store,
+  httpOnly cookies included.** There was no cookie tool at all before this, so
+  reading an httpOnly session cookie, exactly the set `document.cookie` cannot
+  see and `evaluate_script` therefore cannot reach, meant dropping to raw CDP
+  by hand: a fallback that fights the very contention this toolkit exists to
+  avoid, since a page target accepts a second websocket and then never answers
+  on it while another client is attached. Each cookie carries `name`, `value`,
+  `domain`, `path`, `expires` (Unix seconds, `-1` for a session cookie),
+  `size`, `httpOnly`, `secure`, `sameSite` and `session`. The read is
+  page-scoped, not browser-wide: Chrome uses `Network.getCookies` rather than
+  the whole-profile `Storage.getCookies`, and Firefox uses `storage.getCookies`
+  partitioned by that browsing context, so a call naming one tab never returns
+  every other site's credentials. Both backends are supported, with the same
+  shape: the BiDi differences (a bytes-value that may be base64, an absent
+  `expiry` meaning a session cookie, a lowercase `sameSite`) are normalized in
+  the driver. Optional `domain` and `name` filters narrow the result: `name` is
+  an exact match, `domain` ignores a leading dot on either side and also
+  matches subdomains, and that is the entire matching rule. Optional `savePath`
+  behaves exactly as `evaluate_script`'s does: the cookie array is written to
+  that file as JSON and the response carries only `{path, bytes, count,
+  target}`, with no cookie value in any form, no preview and no truncation,
+  which is how to capture a session cookie without putting the credential in
+  the calling agent's transcript. Tab leases are respected the same way every
+  sibling tool respects them, at target resolution.
+
 - **`evaluate_script` can write its value to a file instead of returning it,
   via a new optional `savePath`.** Reading a JWT, a session token, or any other
   credential out of the page previously forced the secret through the tool

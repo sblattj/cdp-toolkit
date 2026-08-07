@@ -35,7 +35,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
-  BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
+  BrowserCookie, BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
 import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, type LeaseBackend, type LeaseToken } from "./leases.ts";
@@ -313,6 +313,30 @@ function serializeForSink(value: unknown): string {
   return json ?? "null";
 }
 
+/**
+ * THE file sink, shared by every tool that takes a `savePath`: serialize the
+ * value as JSON, write it, and report only where it went and how big it was.
+ * It returns no form of the value on purpose, so a caller of this helper
+ * cannot accidentally leak one back into a response.
+ *
+ * Path resolution matches take_heapsnapshot: an absolute path is used as-is, a
+ * relative one resolves under the artifact dir, and missing parent directories
+ * are created.
+ */
+async function writeJsonSink(savePath: string, value: unknown): Promise<{ path: string; bytes: number }> {
+  const path = savePath.startsWith("/") ? savePath : join(ARTIFACT_DIR, savePath);
+  await mkdir(dirname(path), { recursive: true });
+  const json = serializeForSink(value);
+  await writeFile(path, json, "utf8");
+  return { path, bytes: Buffer.byteLength(json, "utf8") };
+}
+
+/** True when a savePath argument actually asks for the sink. An empty string is
+ *  treated as absent, so the caller gets the value inline. */
+function sinkRequested(savePath?: string): savePath is string {
+  return savePath !== undefined && savePath !== "";
+}
+
 export async function evaluateScript(
   driver: BrowserDriver,
   args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string },
@@ -325,21 +349,92 @@ export async function evaluateScript(
     // No savePath: byte-identical to the pre-sink behavior, the value itself.
     // A thrown page-side exception never reaches here, so it still surfaces as
     // an error rather than being written into the file.
-    if (args.savePath === undefined || args.savePath === "") return value;
+    if (!sinkRequested(args.savePath)) return value;
 
-    // savePath resolution matches take_heapsnapshot: an absolute path is used
-    // as-is, a relative one is resolved under ARTIFACT_DIR.
-    const path = args.savePath.startsWith("/") ? args.savePath : join(ARTIFACT_DIR, args.savePath);
-    await mkdir(dirname(path), { recursive: true });
-    const json = serializeForSink(value);
-    await writeFile(path, json, "utf8");
+    const { path, bytes } = await writeJsonSink(args.savePath, value);
     const result: EvaluateScriptSaveResult = {
       path,
-      bytes: Buffer.byteLength(json, "utf8"),
+      bytes,
       type: value === null ? "null" : typeof value,
       target: target3(page.info),
     };
     return result;
+  });
+}
+
+/* -------------------------------- cookies (1) -------------------------------- */
+
+/**
+ * The `savePath` result shape for list_cookies. Same rule as
+ * EvaluateScriptSaveResult: NO cookie value in any form, not even a prefix. A
+ * session cookie IS the credential, so a preview of one is a leaked one.
+ * `count` is how many cookies were written, which tells a caller the read
+ * worked without disclosing anything about what it read.
+ */
+export interface ListCookiesSaveResult {
+  path: string;
+  bytes: number;
+  count: number;
+  target: { id: string; url: string; title: string };
+}
+
+export interface ListCookiesResult {
+  cookies: BrowserCookie[];
+  count: number;
+  target: { id: string; url: string; title: string };
+}
+
+/**
+ * Cookie domain matching for the `domain` filter, deliberately small.
+ *
+ * A cookie's own domain carries a leading dot when it was set for subdomains
+ * (".example.test") and none when it was host-only ("example.test"), and a
+ * caller who types "example.test" means both. So the comparison strips a
+ * leading dot from each side and then accepts an exact match or a subdomain of
+ * the filter ("app.example.test" matches "example.test"). That is the whole
+ * rule: no wildcards, no patterns, no query language.
+ */
+function cookieDomainMatches(cookieDomain: string, filter: string): boolean {
+  const bare = (d: string) => (d.startsWith(".") ? d.slice(1) : d).toLowerCase();
+  const c = bare(cookieDomain);
+  const f = bare(filter);
+  return c === f || c.endsWith(`.${f}`);
+}
+
+/** Apply the optional name/domain filters. Exported for the unit tests, which
+ *  can then check the matching rule without standing up a browser. */
+export function filterCookies(cookies: readonly BrowserCookie[], filter: { domain?: string; name?: string }): BrowserCookie[] {
+  return cookies.filter((c) => {
+    if (filter.name !== undefined && filter.name !== "" && c.name !== filter.name) return false;
+    if (filter.domain !== undefined && filter.domain !== "" && !cookieDomainMatches(c.domain, filter.domain)) return false;
+    return true;
+  });
+}
+
+/**
+ * Read the cookies of the target page, httpOnly ones included.
+ *
+ * This is the one read that a page script cannot do: document.cookie omits
+ * every httpOnly cookie by design, which is precisely the set a session
+ * credential lives in. Both drivers answer over the protocol's own cookie
+ * store, so the flags come from the browser rather than being inferred.
+ *
+ * With `savePath` set the cookie array is written to that file as JSON and the
+ * response carries only {path, bytes, count, target}: no value, no preview, no
+ * truncation. Without it, the cookies are returned inline.
+ */
+export async function listCookies(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; domain?: string; name?: string; savePath?: string } = {},
+): Promise<ListCookiesResult | ListCookiesSaveResult> {
+  return withPage(driver, args.target, async (page) => {
+    const all = await page.getCookies();
+    const cookies = filterCookies(all, { domain: args.domain, name: args.name });
+    if (!sinkRequested(args.savePath)) {
+      return { cookies, count: cookies.length, target: target3(page.info) };
+    }
+    const { path, bytes } = await writeJsonSink(args.savePath, cookies);
+    return { path, bytes, count: cookies.length, target: target3(page.info) };
   });
 }
 
@@ -541,7 +636,7 @@ export async function handleDialog(
 
 /* ------------------------------------- registry ------------------------------------- */
 
-/** The 20 tools this file unifies, importable by both src/index.ts (Chrome) and
+/** The 21 tools this file unifies, importable by both src/index.ts (Chrome) and
  *  src/firefox-tools.ts (Firefox). Each function is (driver, args) => Promise<result>. */
 export const SHARED_TOOLS = {
   list_pages: listPages,
@@ -551,6 +646,7 @@ export const SHARED_TOOLS = {
   navigate_page: navigatePage,
   wait_for: waitForText,
   evaluate_script: evaluateScript,
+  list_cookies: listCookies,
   take_snapshot: takeSnapshot,
   click,
   hover,

@@ -281,6 +281,38 @@ export interface HandledDialogInfo extends DialogInfo {
   handled: true;
 }
 
+/**
+ * One cookie, neutral over CDP's `Network.Cookie` and BiDi's `network.Cookie`.
+ *
+ * Every flag a caller needs to reason about a session credential is present:
+ * an httpOnly cookie is exactly the one `document.cookie` cannot read, so a
+ * shape that dropped `httpOnly` would make the reason this exists invisible.
+ *
+ * Two normalizations, applied by both drivers so the shape does not change
+ * with the backend:
+ *  - `expires` is a Unix timestamp in SECONDS, or -1 for a session cookie.
+ *    CDP reports exactly that; BiDi reports an optional `expiry` and omits it
+ *    for a session cookie, which the BiDi driver maps to -1.
+ *  - `sameSite` is lowercased to BiDi's vocabulary ("strict" | "lax" | "none"
+ *    | "default"). CDP capitalizes it and omits it entirely when unset, which
+ *    the CDP driver maps to "default".
+ */
+export interface BrowserCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  /** Unix seconds, or -1 for a session cookie. */
+  expires: number;
+  /** Byte length of name plus value, as the browser reports it. */
+  size: number;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "strict" | "lax" | "none" | "default";
+  /** True when the cookie expires with the browsing session (no expiry set). */
+  session: boolean;
+}
+
 export interface InterceptRule {
   /** Glob: `*` any run, `?` one char. Both drivers normalize to this. */
   urlPattern: string;
@@ -402,6 +434,19 @@ export interface PageDriver {
     promptText?: string,
     opts?: { timeoutMs?: number; autoMs?: number },
   ): Promise<HandledDialogInfo | { handled: HandledDialogInfo[]; count: number }>;
+
+  /* cookies */
+  /**
+   * Every cookie visible to THIS page, httpOnly ones included.
+   *
+   * Deliberately page-scoped, not browser-scoped. Both protocols offer a
+   * browser-wide jar (CDP's `Storage.getCookies` with no browserContextId,
+   * BiDi's storageKey partition), and both would hand back every credential
+   * for every site the browser has ever visited on a call that named one tab.
+   * A tool scoped to a target returns that target's cookies; a caller who
+   * wants another site's cookies points at a page on that site.
+   */
+  getCookies(): Promise<BrowserCookie[]>;
 
   /* network */
   /** Begin retaining response bodies. REQUIRED before getResponseBody unless
