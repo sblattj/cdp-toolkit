@@ -25,7 +25,8 @@
 import type { TargetSelector } from "../types.ts";
 import {
   UID_STAMP_ATTR, isDriverError,
-  type BrowserCookie, type BrowserDriver, type Capability, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type SnapshotNode, type UidStability,
@@ -62,6 +63,34 @@ export function normalizeBidiCookie(c: NetworkCookie): BrowserCookie {
     httpOnly: c.httpOnly === true, secure: c.secure === true,
     sameSite: c.sameSite ?? "default", session: !hasExpiry,
   };
+}
+
+/**
+ * The host of a url, for the BiDi cookie calls that require a `domain` and have
+ * no `url` parameter of their own.
+ *
+ * Exported so a test can pin the failure cases without a browser. Every branch
+ * that cannot produce a host THROWS: an absent url, an unparseable one, and a
+ * parseable one with an empty host (about:blank, data:, javascript:) all raise
+ * a message naming the tool and what it needs. The alternative, sending the
+ * call without a domain, is a request Firefox answers cleanly while writing or
+ * deleting nothing recognizable, which is the exact wrong-but-plausible ack
+ * this driver refuses to emit.
+ */
+export function hostFromUrl(url: string | undefined, toolName: string): string {
+  if (url === undefined || url === "") {
+    throw driverError("unsupported", `${toolName} on Firefox needs a 'domain': BiDi's storage cookie calls have no 'url' parameter, and no url was given to derive one from.`);
+  }
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    throw driverError("unsupported", `${toolName} could not parse the url '${url}' to derive the 'domain' BiDi requires. Pass 'domain' explicitly.`);
+  }
+  if (host === "") {
+    throw driverError("unsupported", `${toolName} cannot derive a 'domain' from '${url}': that url has no host. Pass 'domain' explicitly.`);
+  }
+  return host;
 }
 
 /* ------------------------------ error + uid codec ------------------------------ */
@@ -680,6 +709,70 @@ class BidiPageDriver implements PageDriver {
     try {
       const { cookies } = await this.conn.send("storage.getCookies", { partition: { type: "context", context: this.contextId } });
       return (cookies ?? []).map(normalizeBidiCookie);
+    } catch (e) {
+      throw mapBidiError(e);
+    }
+  }
+
+  /**
+   * storage.setCookie, partitioned by THIS browsing context.
+   *
+   * One real difference from CDP to absorb, and it is absorbed EXPLICITLY
+   * rather than papered over: BiDi has no `url` parameter and requires
+   * `domain`, while CDP accepts either and derives the rest from the url. So a
+   * caller who supplied only a url gets its host used as the domain, and a url
+   * with no host (about:blank, a data: URL, a malformed string) throws instead
+   * of being dropped, because a set that silently did nothing is the failure
+   * this tool must never produce.
+   *
+   * Note the derivation is narrower than CDP's: CDP also takes `path` and
+   * `secure` from the url, and this does not, so those stay exactly as the
+   * caller gave them on both backends.
+   */
+  async setCookie(params: SetCookieParams): Promise<void> {
+    const domain = params.domain ?? hostFromUrl(params.url, "set_cookie");
+    try {
+      await this.conn.send("storage.setCookie", {
+        cookie: {
+          name: params.name,
+          value: { type: "string", value: params.value },
+          domain,
+          ...(params.path !== undefined ? { path: params.path } : {}),
+          ...(params.expires !== undefined ? { expiry: params.expires } : {}),
+          ...(params.httpOnly !== undefined ? { httpOnly: params.httpOnly } : {}),
+          ...(params.secure !== undefined ? { secure: params.secure } : {}),
+          ...(params.sameSite !== undefined ? { sameSite: params.sameSite } : {}),
+        },
+        partition: { type: "context", context: this.contextId },
+      });
+    } catch (e) {
+      throw mapBidiError(e);
+    }
+  }
+
+  /**
+   * storage.deleteCookies with a filter, partitioned by THIS browsing context.
+   *
+   * Same url-to-domain derivation as setCookie and for the same reason: the
+   * BiDi filter has `domain` and no `url`, and a filter that quietly dropped
+   * the only site constraint would delete by name across the partition, which
+   * is a bigger deletion than the caller asked for.
+   *
+   * BiDi reports a partitionKey and no count, exactly as CDP reports nothing,
+   * so this returns nothing on both backends rather than one of them inventing
+   * a number the other cannot produce.
+   */
+  async deleteCookies(filter: DeleteCookiesFilter): Promise<void> {
+    const domain = filter.domain ?? hostFromUrl(filter.url, "delete_cookies");
+    try {
+      await this.conn.send("storage.deleteCookies", {
+        filter: {
+          name: filter.name,
+          domain,
+          ...(filter.path !== undefined ? { path: filter.path } : {}),
+        },
+        partition: { type: "context", context: this.contextId },
+      });
     } catch (e) {
       throw mapBidiError(e);
     }

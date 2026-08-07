@@ -9,6 +9,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`set_cookie` and `delete_cookies`, the WRITE half of the cookie group.**
+  `list_cookies` made the store readable; these make it writable, including the
+  httpOnly and secure cookies `document.cookie` can neither create nor remove,
+  so seeding an authenticated session or clearing one is a tool call rather
+  than a hand-rolled raw CDP detour. `set_cookie` takes `{name, value}` plus
+  the usual cookie attributes (`url`, `domain`, `path`, `expires` in Unix
+  seconds, `httpOnly`, `secure`, `sameSite`) and answers `{set:true, target}`;
+  `delete_cookies` takes `{name}` plus `url` or `domain` and an optional
+  `path`, and answers `{deleted:true, target}`. Chrome rides `Network.setCookie`
+  and `Network.deleteCookies`, Firefox rides `storage.setCookie` and
+  `storage.deleteCookies` partitioned by the resolved browsing context.
+  Three deliberate refusals, all of which exist because the alternative is a
+  call that looks like it worked. First, either `url` or `domain` is required
+  on both tools: a cookie has to be attributed to a site, and guessing the
+  current page's origin would write a real cookie somewhere the caller never
+  named, while a name-only delete would sweep the whole partition. Second,
+  Chrome answers `Network.setCookie` with `success:false` rather than an error
+  when it declines a cookie (a domain the url does not cover, a secure cookie
+  on an insecure origin, an oversized value), so that false is raised as an
+  error instead of being reported as `set:true`. Third, BiDi has no `url`
+  parameter and requires a `domain`, so the Firefox driver derives one from the
+  url's host and throws on a url with no host (`about:blank`, a `data:` URL)
+  rather than sending a call Firefox answers cleanly while writing nothing.
+  Two things are deliberately absent: the response never echoes the value back,
+  since the value is usually the credential the caller just supplied, and
+  `delete_cookies` reports no count, because neither protocol says how many
+  cookies it removed and a number here would be invented. Read `list_cookies`
+  before and after when a real count is needed. `path` is passed through
+  exactly as given and never defaulted to `/`, since Chrome derives the path
+  from `url` and an invented default would widen a deliberately narrow cookie.
+
 - **`list_cookies`, a new tool that reads the target page's cookie store,
   httpOnly cookies included.** There was no cookie tool at all before this, so
   reading an httpOnly session cookie, exactly the set `document.cookie` cannot

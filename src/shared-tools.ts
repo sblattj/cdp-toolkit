@@ -438,6 +438,112 @@ export async function listCookies(
   });
 }
 
+export interface SetCookieResult {
+  set: true;
+  target: { id: string; url: string; title: string };
+}
+
+export interface DeleteCookiesResult {
+  deleted: true;
+  target: { id: string; url: string; title: string };
+}
+
+/**
+ * THE site constraint both write tools share: a cookie has to be attributed to
+ * a site, and `url` or `domain` is how a caller says which.
+ *
+ * Checked here, above the drivers, so the refusal is ONE message on both
+ * backends rather than a CDP protocol error on one and a Firefox no-op on the
+ * other. It throws rather than defaulting to the current page's origin: a
+ * guessed domain writes a real cookie somewhere the caller did not name, and a
+ * cookie written to the wrong site is worse than a call that failed loudly.
+ *
+ * Exported for the unit tests, which pin the message without a browser.
+ */
+export function assertCookieSite(
+  args: { url?: string; domain?: string },
+  toolName: string,
+): void {
+  const hasUrl = args.url !== undefined && args.url !== "";
+  const hasDomain = args.domain !== undefined && args.domain !== "";
+  if (!hasUrl && !hasDomain) {
+    throw new Error(`${toolName} requires either 'url' or 'domain': a cookie has to be attributed to a site, and neither was given.`);
+  }
+}
+
+/** The shared 'name' check. A write tool with no name has nothing to write and
+ *  a delete tool with no name would match every cookie, so an empty one is
+ *  refused rather than treated as absent. */
+function assertCookieName(name: string | undefined, toolName: string): asserts name is string {
+  if (name === undefined || name === "") {
+    throw new Error(`${toolName} requires a non-empty 'name'.`);
+  }
+}
+
+/**
+ * Write one cookie into the target page's cookie store.
+ *
+ * The response is deliberately tiny: `{set: true, target}`. It does NOT echo
+ * the value back, because the value is frequently the credential and a caller
+ * who just supplied it does not need it repeated into their transcript. The
+ * `set: true` is earned rather than assumed: the CDP driver throws on Chrome's
+ * `{success:false}` refusal and the BiDi driver throws when it cannot derive
+ * the domain BiDi requires, so reaching this line means a backend confirmed
+ * the write.
+ */
+export async function setCookie(
+  driver: BrowserDriver,
+  args: {
+    target?: TargetSelector; name: string; value: string; url?: string; domain?: string;
+    path?: string; expires?: number; httpOnly?: boolean; secure?: boolean;
+    sameSite?: "strict" | "lax" | "none" | "default";
+  },
+): Promise<SetCookieResult> {
+  assertCookieName(args.name, "set_cookie");
+  if (typeof args.value !== "string") throw new Error("set_cookie requires a string 'value'.");
+  assertCookieSite(args, "set_cookie");
+  return withPage(driver, args.target, async (page) => {
+    await page.setCookie({
+      name: args.name,
+      value: args.value,
+      ...(args.url !== undefined ? { url: args.url } : {}),
+      ...(args.domain !== undefined ? { domain: args.domain } : {}),
+      ...(args.path !== undefined ? { path: args.path } : {}),
+      ...(args.expires !== undefined ? { expires: args.expires } : {}),
+      ...(args.httpOnly !== undefined ? { httpOnly: args.httpOnly } : {}),
+      ...(args.secure !== undefined ? { secure: args.secure } : {}),
+      ...(args.sameSite !== undefined ? { sameSite: args.sameSite } : {}),
+    });
+    return { set: true as const, target: target3(page.info) };
+  });
+}
+
+/**
+ * Remove the named cookie from the target page's cookie store.
+ *
+ * `{deleted: true, target}` and NO count, on purpose. Neither protocol reports
+ * how many cookies it removed, so any number here would be invented; a caller
+ * who needs one reads list_cookies before and after. `deleted: true` means the
+ * backend accepted and performed the deletion, not that a matching cookie
+ * existed: deleting an absent cookie is a success on both backends.
+ */
+export async function deleteCookies(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; name: string; url?: string; domain?: string; path?: string },
+): Promise<DeleteCookiesResult> {
+  assertCookieName(args.name, "delete_cookies");
+  assertCookieSite(args, "delete_cookies");
+  return withPage(driver, args.target, async (page) => {
+    await page.deleteCookies({
+      name: args.name,
+      ...(args.url !== undefined ? { url: args.url } : {}),
+      ...(args.domain !== undefined ? { domain: args.domain } : {}),
+      ...(args.path !== undefined ? { path: args.path } : {}),
+    });
+    return { deleted: true as const, target: target3(page.info) };
+  });
+}
+
 /* -------------------------------- snapshot (1) -------------------------------- */
 
 /**
@@ -636,7 +742,7 @@ export async function handleDialog(
 
 /* ------------------------------------- registry ------------------------------------- */
 
-/** The 21 tools this file unifies, importable by both src/index.ts (Chrome) and
+/** The 23 tools this file unifies, importable by both src/index.ts (Chrome) and
  *  src/firefox-tools.ts (Firefox). Each function is (driver, args) => Promise<result>. */
 export const SHARED_TOOLS = {
   list_pages: listPages,
@@ -647,6 +753,8 @@ export const SHARED_TOOLS = {
   wait_for: waitForText,
   evaluate_script: evaluateScript,
   list_cookies: listCookies,
+  set_cookie: setCookie,
+  delete_cookies: deleteCookies,
   take_snapshot: takeSnapshot,
   click,
   hover,

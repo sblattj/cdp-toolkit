@@ -57,9 +57,10 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * (`performance_trace`, a robust single-call trace : the start/stop pair cannot
  * span two stateless CLI processes), plus a 3-tool network-mocking group
  * (mock_request/list_mocks/clear_mocks : a persistent per-target fake backend),
- * plus `list_cookies` (the cookie store including httpOnly cookies, which no
- * page script can read).
- * 37 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * plus a 3-tool cookie group (list_cookies/set_cookie/delete_cookies : the
+ * cookie store including httpOnly cookies, which no page script can read or
+ * write).
+ * 39 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -78,8 +79,10 @@ export const TOOLS = {
   wait_for: onCdp(SHARED_TOOLS.wait_for),
   // evaluate (1)
   evaluate_script: onCdp(SHARED_TOOLS.evaluate_script),
-  // cookies (1) : toolkit addition, reads httpOnly cookies that document.cookie cannot see
+  // cookies (3) : toolkit addition, reads and writes httpOnly cookies that document.cookie cannot touch
   list_cookies: onCdp(SHARED_TOOLS.list_cookies),
+  set_cookie: onCdp(SHARED_TOOLS.set_cookie),
+  delete_cookies: onCdp(SHARED_TOOLS.delete_cookies),
   // snapshot (1)
   take_snapshot: onCdp(SHARED_TOOLS.take_snapshot),
   // interaction (8)
