@@ -5,7 +5,15 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-08-06
+
+This is the first npm release since 1.2.0. Both `v1.2.1` and `v1.3.0` were
+tagged and pushed to GitHub but never reached npm, because the release runs
+through GitHub Actions with OIDC trusted publishing and Actions was down. Their
+changes are folded in here rather than published separately, so 1.4.0 on npm
+carries the lease-conflict fix (1.2.1), the tab-origin ledger (1.3.0), and the
+cookie group plus the `evaluate_script` file sink below. See the [1.3.0] and
+[1.2.1] sections for the folded-in details.
 
 ### Added
 
