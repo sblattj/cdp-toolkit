@@ -192,7 +192,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "evaluate_script",
-    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string.",
+    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -215,6 +215,10 @@ export const MANIFEST: ToolSpec[] = [
         "args": {
           "type": "array",
           "description": "Positional JSON-serializable arguments to pass to the expression, treating it as a function. No live element/page handle is bound."
+        },
+        "savePath": {
+          "type": "string",
+          "description": "Write the evaluated value to this file as JSON and KEEP IT OUT OF THE RESPONSE: with savePath set the result is {path,bytes,type,target} only, with no copy, preview or truncation of the value. Use it to read credentials without putting them in a transcript. An absolute path (starting with /) is used as-is; a relative path is resolved under the artifact dir (/tmp/cdp-toolkit). Missing parent directories are created. Omit it to get the value back inline, exactly as before."
         }
       },
       "required": [
