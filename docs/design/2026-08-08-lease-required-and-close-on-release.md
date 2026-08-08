@@ -55,6 +55,42 @@ With the flag off, every code path in this spec must be byte-identical to 1.4.0.
 That is a test requirement, not an aspiration: the existing `test/leases.test.ts`
 suite must pass unmodified.
 
+#### Strict mode is MCP-only
+
+`cli.ts` already refuses `claim_page` outright, and its stated reason applies
+word for word to everything in this spec: *"a CLI invocation is one process per
+call, so the claiming process is already dead by the next call and the dead-pid
+rule would make the lease reclaimable at once... A lease that is reclaimable on
+arrival is worse than no lease, because it reads as protection that is not
+there."*
+
+Under strict mode a CLI process would auto-acquire a lease on every call and
+leave a dead-pid record behind when it exits seconds later. Worse, **reap would
+then treat those records as orphaned agent tabs and close the tabs** — a CLI
+user running `list_pages` twice could destroy their own tabs. So:
+
+```ts
+// Module state, which leases.ts's header otherwise forbids. The prohibition is
+// about state describing OTHER processes' ownership, which must live on disk
+// because two MCP servers drive one browser. This describes THIS process's own
+// role, which no other process can observe or contend for, so a module flag is
+// the correct scope rather than a violation of that rule.
+let longLived = false;
+
+/** Called once by mcp.ts at startup. cli.ts never calls it. */
+export function markLongLivedProcess(value = true): void { longLived = value; }
+
+export function requireLease(): boolean {
+  if (!longLived) return false;   // CLI: see cli.ts's claim_page refusal
+  const raw = (process.env.CDP_REQUIRE_LEASE ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+```
+
+CLI calls keep working exactly as today, `--lease <token>` included: they still
+pass through `assertLeaseOk` and are still refused against a tab another agent
+holds. They simply never acquire and never reap.
+
 ### 2. `LeaseRecord.auto` — the two-tier discriminator
 
 ```ts
@@ -282,7 +318,10 @@ release with, and the tab is never briefly unowned.
 
 `test/leases.test.ts` — pure, no browser:
 
-1. `requireLease()` parsing: unset, `0`, `1`, `true`, `TRUE`, `yes`, `on`, garbage.
+1. `requireLease()` parsing: unset, `0`, `1`, `true`, `TRUE`, `yes`, `on`,
+   garbage. Plus: with `CDP_REQUIRE_LEASE=1` but `markLongLivedProcess()` never
+   called (the CLI's state), `requireLease()` is `false`, no lease is acquired
+   by `assertLeaseOk`, and `staleAgentTabs` is never consulted.
 2. `claimLease` default writes `auto:false`; `{auto:true}` writes `auto:true`;
    a `<=1.4.0` record with no `auto` key reads as `false`.
 3. Strict, unleased, no token: `assertLeaseOk` resolves **and** a lease file now
