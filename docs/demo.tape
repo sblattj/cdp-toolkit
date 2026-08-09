@@ -2,8 +2,12 @@
 #
 # Render:  vhs docs/demo.tape          → writes docs/demo.gif (referenced by the README)
 # Install: brew install vhs            (https://github.com/charmbracelet/vhs)
-# Prereq:  a Chrome/Chromium running with --remote-debugging-port=9222
-#            open -a "Google Chrome" --args --remote-debugging-port=9222
+# Prereq:  a DEDICATED, throwaway Chrome/Chromium for recording only, never your
+#          daily-driver browser, with --remote-debugging-port matching the hidden
+#          `export CDP_BASE=...` line below (currently a scratch port, not 9222,
+#          since 9222 is commonly someone's live browser):
+#            open -a "Google Chrome" --args --headless=new --remote-debugging-port=9414 \
+#              --user-data-dir=/tmp/cdp-toolkit-demo-chrome
 #          and `bun install` already run in this checkout.
 #
 # Tip for the strongest demo: instead of the CLI below, screen-record a real
@@ -20,6 +24,19 @@ Set Height 760
 Set Padding 24
 Set Theme "Dracula"
 Set TypingSpeed 45ms
+
+# Point the CLI at the dedicated recording Chrome above, not whatever's on 9222.
+# `clear` before Show: Hide only skips capturing frames, it does not erase the
+# pty's own scrollback, so the export line would otherwise still be visible
+# once recording resumes.
+Hide
+Type "export CDP_BASE=http://127.0.0.1:9414"
+Enter
+Sleep 500ms
+Type "clear"
+Enter
+Sleep 300ms
+Show
 
 Type "# cdp-toolkit: drive the Chrome tabs you name over raw CDP, no fan-out, no hang"
 Enter
@@ -43,6 +60,6 @@ Type `bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{"results":
 Enter
 Sleep 3000ms
 
-Type "# 39 tools, one direct WebSocket per call, a bounded timeout on every call."
+Type "# 41 tools, one direct WebSocket per call, a bounded timeout on every call."
 Enter
 Sleep 2200ms

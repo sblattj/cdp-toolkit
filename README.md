@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser, plus a built-in network-mocking fake backend. **39 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser, plus a built-in network-mocking fake backend. **41 tools.**
 
 > For AI-agent developers and Claude Code / Cursor users who need **the tabs they name driven reliably**, not a Puppeteer-managed browser.
 
@@ -118,7 +118,7 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 - **One target per call, never a broadcast.** Each call opens one WebSocket to the one target it named, with a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. Drive as many tabs as you like across calls; there is still no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
-- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, and a cookie group that reads, writes, and deletes httpOnly cookies. 39 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, a cookie group that reads, writes, and deletes httpOnly cookies, and tab-to-video screen recording. 41 single-purpose tools, no discovery overhead, and they coexist with `chrome-devtools-mcp` in a separate namespace.
 - **Many agents, one browser, no stolen tabs.** `claim_page` hands out an opaque lease token for one tab; every other tool checks it at target resolution, so an unqualified call against a leased tab is refused by name rather than silently retargeted to whatever tab a different agent is driving.
 - **Out-of-model secret handling.** A read that would return a credential, a JWT in `localStorage` via `evaluate_script` or an httpOnly session cookie via `list_cookies`, takes a `savePath` that writes the value to a file and keeps it out of the tool response entirely, so the secret never lands in the agent transcript. That same per-call, in-process design makes cdp-toolkit a clean substrate for credential-injection tools: a vaulted password can be typed straight into the DOM while only a status crosses back to the model, never the secret.
 - **Provenance that outlives the lease.** `list_pages` reports `origin: "agent"` (with the creating `label`) for every tab this toolkit opened, and `"unknown"` otherwise. It never claims `"human"`: the absence of a creation record cannot prove a person opened the tab, so `"unknown"` is the honest word once an agent releases, expires, or dies and its tab is left behind.
@@ -201,7 +201,7 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 
 ## Firefox (WebDriver BiDi)
 
-cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 39-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
+cdp-toolkit ships a second backend, Firefox over [WebDriver BiDi](https://w3c.github.io/webdriver-bidi/), behind the same 41-tool surface. Chrome stays the default and its behavior is unchanged, opt in explicitly to reach Firefox:
 
 ```bash
 cdp --browser firefox take_snapshot                 # CLI: explicit flag
@@ -221,8 +221,9 @@ Backend selection precedence: `--browser chrome|firefox` flag, then `CDP_BROWSER
 - `performance_start_trace`, `performance_stop_trace`, `performance_analyze_insight`, `performance_trace` (needs `trace.performance`)
 - `take_heapsnapshot` (needs `heap.snapshot`)
 - `lighthouse_audit` (needs `audit.lighthouse`)
+- `start_screen_recording`, `stop_screen_recording` (needs `capture.screencast`): BiDi has no streamed-frame primitive at all, only the one-shot `browsingContext.captureScreenshot`.
 
-Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain) and the `claim_page`/`release_page`/`list_leases` lease group, is available under both backends: 33 of the 39 tools.
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain) and the `claim_page`/`release_page`/`list_leases` lease group, is available under both backends: 33 of the 41 tools.
 
 **Honest capability gaps, not oversold parity:**
 
@@ -233,9 +234,9 @@ Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's 
 - **`locate.text` is not available** (Firefox 153's `browsingContext.locateNodes` rejects the `innerText` locator type as unsupported), unlike Chrome, which has it via `DOM.performSearch`.
 - **No `--browser firefox` attach mode.** By design, per the launch model above: every invocation gets its own throwaway Firefox process and profile.
 
-## The tools (29 parity + 10 superset = 39)
+## The tools (29 parity + 12 superset = 41)
 
-The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 10 superset tools (`performance_trace`, the `list_cookies`/`set_cookie`/`delete_cookies` cookie group, the `mock_request`/`list_mocks`/`clear_mocks` group, and the `claim_page`/`release_page`/`list_leases` lease group) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
+The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 12 superset tools (`performance_trace`, the `list_cookies`/`set_cookie`/`delete_cookies` cookie group, the `mock_request`/`list_mocks`/`clear_mocks` group, the `claim_page`/`release_page`/`list_leases` lease group, and the `start_screen_recording`/`stop_screen_recording` screen-recording pair) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
 
 | MCP name | CDP method(s) | Parity notes / gaps |
 |---|---|---|
@@ -259,6 +260,8 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 10 superset tools (`
 | `press_key` | `Input.dispatchKeyEvent` | Curated named-key table + single chars; not the full Puppeteer KeyInput enum. |
 | `upload_file` | `DOM.setFileInputFiles` | Requires a resolvable `<input type=file>` (uid or selector). |
 | `take_screenshot` | `Page.captureScreenshot` (+ layout metrics) | Clip scale fixed at 1. Full-page uses `captureBeyondViewport` + layout-metrics clip. |
+| `start_screen_recording` *(superset)* | `Page.startScreencast` / `Page.screencastFrame` / `Page.screencastFrameAck` | **Toolkit addition; chrome-devtools-mcp has no screen-recording tool.** Opens a persistent per-target connection and spools frames to a ledger on disk; pairs with `stop_screen_recording` in the SAME process, for the same cross-process reason as `performance_start_trace`. ffmpeg is probed here so a missing encoder fails before a recording is captured. Chrome only: absent from `tools/list` under `--browser firefox` (needs `capture.screencast`, which BiDi has no primitive for). |
+| `stop_screen_recording` *(superset)* | `Page.stopScreencast` (+ ffmpeg encode) | Assembles the spooled frames into an H.265 (`hevc_videotoolbox`, falling back to `h264_videotoolbox` → `libx265` → `libx264`) MP4 using per-frame durations from the capture ledger, coalesced onto ffmpeg's 40ms concat-demuxer grid. Returns `{path,bytes,durationMs,frameCount,encodedFrames,codec,encoder,width,height,droppedFrames,target}` (`frameCount` captured vs. `encodedFrames` in the video). On an ffmpeg failure the spool is kept and the exact re-run command is named in the error. |
 | `emulate` | `Emulation.*` / `Network.emulateNetworkConditions` | Stateless: UA/CPU/media/network overrides reset when the per-call connection closes. No named device presets. |
 | `resize_page` | `Emulation.setDeviceMetricsOverride` | Verifies via `window.innerWidth/innerHeight`. Override persists on the target. |
 | `handle_dialog` | `Page.javascriptDialogOpening` / `handleJavaScriptDialog` | Caller arms first and triggers out-of-band (or `handleDialogForExpression` to trigger-and-handle atomically). Supports wait-for-next and auto-handle-for-N-ms. |
@@ -340,7 +343,7 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 src/
   client.ts          # CdpConnection, openPage/withPage/openBrowser, resolveTarget, timeouts
   types.ts           # Target, TargetSelector, Uid, CDP envelopes
-  index.ts           # TOOLS registry (39) + re-exported client primitives
+  index.ts           # TOOLS registry (41) + re-exported client primitives
   cli.ts             # the Bun CLI
   mcp.ts             # stdio MCP server (exposes TOOLS via @modelcontextprotocol/sdk)
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)
