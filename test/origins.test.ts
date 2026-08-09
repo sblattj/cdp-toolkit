@@ -136,12 +136,44 @@ describe("list_pages annotates origin", () => {
   test("the record OUTLIVES the lease: still agent after release_page", async () => {
     const { driver } = stubDriver();
     const created = await newPage(driver, { claim: true, label: "agent-one" });
-    const released = await releasePage(driver, { lease: created.lease });
+    // close:false is what keeps the tab OPEN, which is the only reason
+    // list_pages can still be asked about it: release_page closes a tab this
+    // toolkit opened. The thing under test is that the origin RECORD survives
+    // the lease, not that the tab does, so the override is scaffolding for the
+    // observation rather than part of the property. The sibling test below
+    // proves the same property the other way, with the tab actually closed.
+    const released = await releasePage(driver, { lease: created.lease, close: false });
     expect(released.released).toBe(true);
     const { pages } = await listPages(driver, {});
     const hit = pages.find((p) => p.id === created.targetId);
     expect(hit?.origin).toBe("agent");
     expect(hit?.label).toBe("agent-one");
+  });
+
+  test("the record outlives the lease AND the tab: closed on release, still on disk", async () => {
+    // The default path, and the sharper version of the invariant above. The tab
+    // is gone from list_pages because release_page closed it, so the listing can
+    // no longer answer the question at all - and the record is still readable
+    // anyway. That is what "the ledger outlives the lease" actually means: the
+    // record's lifetime is tied to neither the lease nor the tab.
+    // Renamed on destructure: this is the stub's live tab array, distinct from
+    // the `pages` the list_pages result yields further down.
+    const { driver, pages: livePages } = stubDriver();
+    const created = await newPage(driver, { claim: true, label: "agent-two" });
+    const released = await releasePage(driver, { lease: created.lease });
+    expect(released).toEqual({ released: true, closed: true, targetId: created.targetId });
+    // The browser really lost the tab, not just the result object saying so.
+    expect(livePages.map((p) => p.id)).not.toContain(created.targetId);
+    // ORDER IS LOAD-BEARING: read the ledger BEFORE listing. list_pages reaps
+    // records for targets the browser no longer has (see listOrigins' liveIds),
+    // so the listing below is itself what eventually collects this record. That
+    // is the ledger's own lifetime rule and not the property under test; doing
+    // it in the other order would test the reaper and quietly assert nothing.
+    const rec = await readOrigin("chrome", created.targetId);
+    expect(rec?.label).toBe("agent-two");
+    expect(rec?.targetId).toBe(created.targetId);
+    const { pages } = await listPages(driver, {});
+    expect(pages.map((p) => p.id)).not.toContain(created.targetId);
   });
 
   test("the record also outlives a lease that was never taken at all", async () => {
