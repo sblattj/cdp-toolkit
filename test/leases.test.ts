@@ -793,11 +793,55 @@ describe("registry and manifest wiring", () => {
     }
   });
 
-  test("only release_page requires a lease", () => {
+  test("no tool makes lease a required argument", () => {
+    // Old contract: release_page took only a token, so it alone had
+    // required:["lease"]. Under the current contract release_page accepts
+    // exactly one of 'lease' OR 'target', so neither key is required in the
+    // schema — the one-of rule is enforced at runtime by releasePage, not
+    // expressed here as an `anyOf` (MCP clients handle `anyOf`
+    // inconsistently). A mandatory `lease` on any ordinary tool would break
+    // every unleased call, which is the invariant this still guards.
     for (const spec of MANIFEST) {
       const required = spec.inputSchema.required ?? [];
-      expect(required.includes("lease"), spec.name).toBe(spec.name === "release_page");
+      expect(required.includes("lease"), spec.name).toBe(false);
     }
+  });
+});
+
+describe("manifest reflects the lease-required surface", () => {
+  const spec = (name: string) => MANIFEST.find((s) => s.name === name);
+
+  test("no tool still claims unleased tabs behave exactly as before", () => {
+    // That sentence is false under CDP_REQUIRE_LEASE and appeared on 36 tools.
+    const stale = MANIFEST.filter((s) =>
+      JSON.stringify(s.inputSchema).includes("which behave exactly as before"));
+    expect(stale.map((s) => s.name)).toEqual([]);
+  });
+
+  test("release_page advertises target and close, and requires neither key", () => {
+    const s = spec("release_page")!;
+    expect(Object.keys(s.inputSchema.properties ?? {}).sort()).toEqual(["close", "lease", "target"]);
+    expect(s.inputSchema.required ?? []).toEqual([]);
+    expect(s.description.toLowerCase()).not.toContain("does not close the tab");
+  });
+
+  test("every lease-bearing tool mentions CDP_REQUIRE_LEASE", () => {
+    const bearing = MANIFEST.filter((s) => "lease" in (s.inputSchema.properties ?? {}));
+    expect(bearing.length).toBeGreaterThan(30);
+    for (const s of bearing) {
+      const d = JSON.stringify((s.inputSchema.properties as Record<string, { description?: string }>).lease?.description);
+      expect(d).toContain("CDP_REQUIRE_LEASE");
+    }
+  });
+
+  test("list_pages and list_leases document reaped", () => {
+    expect(spec("list_pages")!.description).toContain("reaped");
+    expect(spec("list_leases")!.description).toContain("reaped");
+  });
+
+  test("new_page documents the strict-mode auto-claim", () => {
+    const claim = (spec("new_page")!.inputSchema.properties as Record<string, { description?: string }>).claim;
+    expect(claim?.description).toContain("CDP_REQUIRE_LEASE");
   });
 });
 
