@@ -49,6 +49,15 @@ export interface LeaseRecord {
   createdAt: number;
   lastUsedAt: number;
   ttlMs: number;
+  /**
+   * How this lease was taken, and therefore who may use it without a token.
+   *   true  - the gate acquired it implicitly; passes for any call from `pid`.
+   *   false - claim_page or new_page{claim:true}; the token is required, even
+   *           from the owning process.
+   * Absent on records written by <=1.4.0 and read as false, so an upgrade never
+   * downgrades a held lease from token-required to pid-only.
+   */
+  auto?: boolean;
 }
 
 /** 15 minutes. Refresh-on-use means an active agent never expires, so this only
@@ -63,6 +72,43 @@ export function leaseDir(): string {
 export function leaseTtlMs(): number {
   const raw = Number(process.env.CDP_LEASE_TTL_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LEASE_TTL_MS;
+}
+
+/**
+ * Whether THIS process is the long-lived MCP server rather than a one-shot CLI
+ * invocation. Module state, which this file's header otherwise forbids: that
+ * prohibition is about state describing OTHER processes' ownership, which must
+ * live on disk because two MCP servers drive one browser. This describes this
+ * process's own role, which no other process can observe or contend for, so a
+ * module flag is the correct scope rather than a violation of the rule.
+ */
+let longLived = false;
+
+/** Called once by mcp.ts at startup. cli.ts never calls it. The parameter
+ *  exists so a test can put the module back into CLI state. */
+export function markLongLivedProcess(value = true): void {
+  longLived = value;
+}
+
+/**
+ * Strict mode: every tool call acquires a lease for the tab it resolves, and
+ * stale agent tabs are reaped on read. Off by default, so 1.4.0 consumers are
+ * unaffected.
+ *
+ * ALWAYS FALSE UNDER THE CLI, regardless of the env var, and that is not a
+ * convenience. cli.ts already refuses claim_page because a CLI invocation is
+ * one process per call, so its lease is reclaimable by the dead-pid rule the
+ * moment the process exits, and "a lease that is reclaimable on arrival is
+ * worse than no lease". Auto-acquire would mint exactly such a lease on every
+ * call. The sharper danger is reap: those dead-pid records would read as
+ * orphaned agent tabs, so a CLI user running list_pages twice could watch the
+ * second run close the tabs the first run leased. Read per call, like
+ * leaseDir(), so a test can flip it.
+ */
+export function requireLease(): boolean {
+  if (!longLived) return false;
+  const raw = (process.env.CDP_REQUIRE_LEASE ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 /** The label recorded when a caller supplies none. ONE definition, because it
@@ -158,6 +204,9 @@ export interface ClaimOptions {
   now?: number;
   /** Live target ids from the browser, enabling the "target-gone" reclamation. */
   liveIds?: readonly string[];
+  /** Marks the lease gate-acquired. See LeaseRecord.auto. Defaults to false:
+   *  an unmarked claim is an explicit one, which is the stricter reading. */
+  auto?: boolean;
 }
 
 /** Why an existing lease may be taken over. All three are sufficient alone. */
@@ -214,6 +263,7 @@ export async function claimLease(
       createdAt: now,
       lastUsedAt: now,
       ttlMs: opts.ttlMs ?? leaseTtlMs(),
+      auto: opts.auto === true,
     };
     try {
       await writeFile(leaseFile(backend, targetId), JSON.stringify(record), { flag: "wx" });
