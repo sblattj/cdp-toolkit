@@ -39,7 +39,7 @@ import type {
   BrowserCookie, BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
-import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, type LeaseBackend, type LeaseToken } from "./leases.ts";
+import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, requireLease, type LeaseBackend, type LeaseToken } from "./leases.ts";
 import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -199,12 +199,22 @@ export async function newPage(
   // Creates the tab AND writes its creation record. The record outlives any
   // lease taken below, which is the point: a released tab is still an agent's.
   const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label });
-  if (args.claim !== true) return { targetId: p.id, url: p.url };
+  // Under strict mode a tab nobody holds is a tab nobody may drive, so creating
+  // one without claiming it would hand back a target the very next call has to
+  // auto-acquire anyway. Doing it here means the tab is never briefly unowned
+  // AND the caller is handed a token it can release with, which matters because
+  // an auto-acquired lease never returns one.
+  const explicit = args.claim === true;
+  if (!explicit && !requireLease()) return { targetId: p.id, url: p.url };
   // Atomic in the sense that matters: the tab is claimed before this call
   // returns, so no other agent can see it unclaimed and take it first.
   const { record, token } = await claimLease(backendOf(driver), p.id, {
     label,
     ttlMs: typeof args.ttlMs === "number" && args.ttlMs > 0 ? args.ttlMs : leaseTtlMs(),
+    // An explicit claim:true stays explicit under strict mode: the caller asked
+    // for the strong tier and must keep getting it, or turning strict on would
+    // silently WEAKEN every existing claim:true call site to pid-only.
+    auto: !explicit,
   });
   return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
 }
