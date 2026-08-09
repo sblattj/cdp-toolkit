@@ -1,5 +1,5 @@
 /**
- * ADR-001: one browser-neutral Driver interface behind the 39 tools.
+ * ADR-001: one browser-neutral Driver interface behind the 41 tools.
  *
  * Context. Every tool in src/tools/ is a stateless one-shot on withPage():
  * open a socket, act, always close. That is only correct because a CDP `Uid`
