@@ -259,12 +259,15 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * not "not armed in advance", so an honest capability set omits it rather than reading true by
  * construction. locate.text/locate.xpath both ride DOM.performSearch (see searchLocate above),
  * which is a real Chrome capability, not a line-budget artifact, so both ARE declared.
+ * capture.screencast rides Page.startScreencast / Page.screencastFrame / Page.screencastFrameAck,
+ * the streamed-repaint primitive behind start_screen_recording and stop_screen_recording.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
+  "capture.screencast",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {

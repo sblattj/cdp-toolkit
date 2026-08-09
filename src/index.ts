@@ -4,7 +4,7 @@
  * Two exports:
  *   1. `TOOLS` : the registry mapping every chrome-devtools-mcp tool name
  *      (snake_case string, all 29 of them) plus the toolkit's own superset
- *      tools, 39 entries in all, to its raw-CDP implementation function. The
+ *      tools, 41 entries in all, to its raw-CDP implementation function. The
  *      CLI and any embedder dispatch through this single table.
  *   2. The client primitives, re-exported so consumers can build their own
  *      flows on the same connection/timeout machinery the tools use.
@@ -33,6 +33,8 @@ import {
   performanceAnalyzeInsight,
   performanceTrace,
 } from "./tools/performance.ts";
+// --- screen recording (Page.startScreencast + ffmpeg) ---
+import { startScreenRecording, stopScreenRecording } from "./tools/screencast.ts";
 // --- heap ---
 import { takeHeapsnapshot } from "./tools/heap.ts";
 // --- lighthouse (the sole non-CDP tool) ---
@@ -62,8 +64,11 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * plus a 3-tool cookie group (list_cookies/set_cookie/delete_cookies : the
  * cookie store including httpOnly cookies, which no page script can read or
  * write), plus a 3-tool lease group (claim_page/release_page/list_leases :
- * opt-in tab ownership so many agents can share one browser).
- * 29 + 1 + 3 + 3 + 3 = 39 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * opt-in tab ownership so many agents can share one browser), plus a 2-tool
+ * screen-recording pair (start_screen_recording/stop_screen_recording : a tab
+ * captured to an H.265 MP4 with per-frame durations, so a variable-rate
+ * repaint stream plays back at wallclock speed).
+ * 29 + 1 + 3 + 3 + 3 + 2 = 41 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -113,6 +118,9 @@ export const TOOLS = {
   performance_stop_trace: performanceStopTrace,
   performance_analyze_insight: performanceAnalyzeInsight,
   performance_trace: performanceTrace,
+  // screen recording (2) : toolkit addition, a tab-to-H.265-MP4 pair over Page.startScreencast
+  start_screen_recording: startScreenRecording,
+  stop_screen_recording: stopScreenRecording,
   // heap (1)
   take_heapsnapshot: takeHeapsnapshot,
   // lighthouse (1) : the only non-CDP tool

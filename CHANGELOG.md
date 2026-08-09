@@ -5,6 +5,101 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-09
+
+This release skips 1.5.0 (reserved for in-flight work on another branch).
+
+### Added
+
+- **`start_screen_recording` and `stop_screen_recording`, a tab-to-video capture
+  pair.** `take_screenshot` answers "what did the page look like"; nothing in
+  the toolkit answered "what did it DO", so proving a flow worked meant
+  stitching stills together by hand or shelling out to a desktop recorder that
+  captures the whole screen instead of the tab it was told to drive. The pair
+  records one named target over `Page.startScreencast`, keyed by targetId like
+  network mocking, so several agents can record different tabs in the same
+  browser at once. `start_screen_recording` opens a persistent page connection,
+  probes ffmpeg, and returns `{target, format, spoolDir, encoder, codec,
+  startedAt, note}`; `stop_screen_recording` tears the stream down, encodes the
+  spooled frames with ffmpeg, and returns `{path, bytes, durationMs,
+  frameCount, encodedFrames, codec, encoder, width, height, droppedFrames,
+  target}`. Like `performance_start_trace`/`performance_stop_trace`, the pair
+  must run WITHIN THE SAME PROCESS: the frames are events on the connection
+  that started the screencast and cannot be re-attached from a fresh process,
+  so this needs the MCP server rather than the one-process-per-call CLI.
+
+- **Chrome only, and absent rather than throwing on Firefox.** WebDriver BiDi
+  has no streamed-frame primitive at all (the spec offers only the one-shot
+  `browsingContext.captureScreenshot`), so both tools declare a new capability,
+  `capture.screencast`, that the BiDi driver never offers. Per the toolkit's
+  ADR-001 pattern, a capability a backend cannot run means the tool is missing
+  from `tools/list` under `--browser firefox`, not present and failing mid-call.
+
+- **Frames are acked before the disk write, not after.** Chrome will not send
+  screencast frame N+1 until frame N is acknowledged with
+  `Page.screencastFrameAck`, so the ack fires from the event handler before
+  the frame's bytes are written to the spool; anything awaited before the ack
+  becomes the frame rate. An unacked frame stalls the whole stream.
+
+- **Variable frame rate handled with a timestamped ledger, not a fixed
+  encoding rate.** Chrome emits a screencast frame on repaint, not on a clock:
+  a still page emits nothing and an animating one emits at whatever rate it
+  paints. Every captured frame is timestamped into an in-memory ledger, and on
+  stop that ledger is rendered as an ffconcat manifest with an explicit
+  per-frame duration, so a still page holds one long frame and the total video
+  duration tracks wallclock rather than racing or freezing.
+
+- **Frames are coalesced onto the encoder's 40ms PTS grid, deliberately and
+  visibly.** ffmpeg's concat demuxer takes its stream time_base from the first
+  file's sub-demuxer, and image files arrive through `image2` at its default
+  25fps, so every frame's presentation timestamp is silently snapped to a
+  1/25s grid no matter what the manifest's `duration` lines say — `-vsync vfr`
+  then drops every frame that collides with an earlier one on that grid, with
+  no warning on stderr. A first pass caught this the hard way: a 373-frame
+  capture encoded to 102 frames with every check green. Three other fixes were
+  measured and rejected: `-r` before `-i` overrides the durations outright (a
+  1.000s clip became 0.101s), `-framerate` is not an option the concat demuxer
+  accepts, and `settb`/`-video_track_timescale` change only the output
+  timebase. The toolkit now snaps the ledger onto the 40ms grid itself before
+  handing it to ffmpeg, keeping the first frame per slot, and reports both
+  numbers instead of letting them silently differ: `frameCount` is what was
+  captured off the wire, `encodedFrames` is what actually reached the video.
+
+- **Encoder ladder, probed once per process from `ffmpeg -hide_banner
+  -encoders`, matched on the name column only:** `hevc_videotoolbox` →
+  `h264_videotoolbox` → `libx265` → `libx264`. Both HEVC rungs get `-tag:v
+  hvc1`, without which QuickTime refuses to play the MP4 it just wrote.
+  Matching only the encoder-name column (not the raw text) matters because
+  ffmpeg repeats a family name inside a sibling encoder's description — a
+  substring match on `libx264` also hits `libx264rgb`, an RGB-only encoder
+  that cannot write the `yuv420p` file the tool just promised.
+
+- **ffmpeg is probed at START, with an actionable error, not at stop.** A
+  missing ffmpeg now fails before a recording is captured and thrown away,
+  rather than after. The error names the two install commands
+  (`brew install ffmpeg` / `apt install ffmpeg`) and `CDP_FFMPEG`, the env var
+  that points the toolkit at a binary not on `PATH`.
+
+- **A failed encode keeps the spool and hands back the exact re-run
+  command.** If ffmpeg exits non-zero, the spooled frames and the generated
+  `frames.ffconcat` manifest are kept on disk (named in the error) instead of
+  being deleted with the failed attempt, along with the literal ffmpeg
+  command line to re-run by hand.
+
+- **`start_screen_recording` takes the same capture knobs as the underlying
+  CDP call:** `format` (`jpeg` default, or `png`), `quality` (JPEG 0-100),
+  `maxWidth`/`maxHeight` (also pins frame size against a mid-recording
+  viewport change), and `everyNthFrame` to skip repaints on a high-framerate
+  page before they're coalesced away. `stop_screen_recording` takes
+  `savePath` to override the default `<artifact dir>/screen-recording-
+  <targetIdShort>-<stamp>.mp4` output path.
+
+### Notes
+- Tool count is now 41 (29 parity + 12 superset); 33 under Firefox, which
+  lacks the eight capability-gated tools (`start_screen_recording` /
+  `stop_screen_recording` join the tracing, heap-snapshot, and Lighthouse
+  groups already absent there).
+
 ## [1.4.0] - 2026-08-06
 
 This is the first npm release since 1.2.0. Both `v1.2.1` and `v1.3.0` were
@@ -220,4 +315,5 @@ First public release.
 - Zero runtime dependencies in the CDP/CLI layer (Node's global `WebSocket` + `fetch`). The MCP server adds only `@modelcontextprotocol/sdk`; `lighthouse_audit` is the sole non-CDP tool and shells out to `npx lighthouse`.
 - Runtime: Bun ≥ 1.1 (recommended) or Node ≥ 22 (for the global `WebSocket`). Requires Chrome/Chromium started with `--remote-debugging-port=9222`.
 
+[1.6.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.6.0
 [1.0.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.0.0
