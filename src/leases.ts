@@ -420,7 +420,29 @@ export async function assertLeaseOk(
   const where = describeTarget(targetId, ctx);
 
   if (token === undefined) {
-    if (!held) return; // unleased, or leased-but-reclaimable: today's behavior
+    if (!held) {
+      // STRICT MODE: acquire rather than wave through. This is the change that
+      // makes "you cannot drive a tab you do not hold" true, and it is done
+      // here rather than by refusing because refusing would force every caller
+      // to learn a claim/release protocol to do what used to just work.
+      // Marked auto:true, which is what lets a later call from this same
+      // process pass with no token. A LeaseConflictError from claimLease (two
+      // processes racing to acquire the same tab, resolved by the "wx"
+      // exclusive create) propagates: the loser is genuinely refused.
+      if (requireLease()) {
+        await claimLease(backend, targetId, { label: defaultLabel(), ttlMs: leaseTtlMs(), auto: true, now });
+      }
+      return; // unleased, or leased-but-reclaimable: today's behavior
+    }
+    // An auto lease is owned by a PROCESS, not by a token, so any call from the
+    // owning pid passes. NOT gated on requireLease(): an auto:true record can
+    // only exist because strict mode created it, and gating this too would mean
+    // turning the flag off locks this process out of leases it still holds. It
+    // cannot regress 1.4.0, where no auto:true record can exist at all.
+    if (held.auto === true && held.pid === process.pid) {
+      await touchLease(held, now);
+      return;
+    }
     throw new LeaseConflictError(
       `${where} is leased by '${held.label}' (pid ${held.pid}). Pass that lease's token as the 'lease' argument, or call release_page to free it. list_leases shows every active lease.`,
       targetId,
@@ -446,8 +468,16 @@ export async function assertLeaseOk(
   // call arrives here, select_page via activatePage included.
   if (parts.backend !== backend || parts.targetId !== targetId) {
     // The token is about a different tab, so it says nothing about this one.
-    // An unleased tab is open to everyone, token in hand or not.
-    if (!held) return;
+    // Under strict mode this tab still has to be acquired: an agent holding
+    // tab A that reaches into unleased tab C is exactly the case the feature
+    // exists to cover, and it is the COMMON case under the ambient dispatch
+    // scope, not an edge one.
+    if (!held) {
+      if (requireLease()) {
+        await claimLease(backend, targetId, { label: defaultLabel(), ttlMs: leaseTtlMs(), auto: true, now });
+      }
+      return;
+    }
     throw new LeaseConflictError(
       `the lease token you passed is for ${parts.backend} target '${parts.targetId}', not ${where}, which is leased by '${held.label}'. Resolve the tab you actually hold, or claim this one.`,
       targetId,

@@ -1047,3 +1047,102 @@ describe("LeaseRecord.auto", () => {
     expect((await readLease("chrome", "TIER-C"))?.auto ?? false).toBe(false);
   });
 });
+
+describe("assertLeaseOk auto-acquire (strict mode)", () => {
+  const originalRequire = process.env.CDP_REQUIRE_LEASE;
+  beforeEach(() => {
+    markLongLivedProcess();
+    process.env.CDP_REQUIRE_LEASE = "1";
+  });
+  afterEach(() => {
+    if (originalRequire === undefined) delete process.env.CDP_REQUIRE_LEASE;
+    else process.env.CDP_REQUIRE_LEASE = originalRequire;
+    markLongLivedProcess(false);
+  });
+
+  test("an unleased tab with no token is ACQUIRED, not waved through", async () => {
+    await assertLeaseOk("chrome", "AUTO-1");
+    const rec = await readLease("chrome", "AUTO-1");
+    expect(rec?.auto).toBe(true);
+    expect(rec?.pid).toBe(process.pid);
+    expect(rec?.label).toBe(`pid-${process.pid}`);
+  });
+
+  test("our own auto lease passes without a token and refreshes lastUsedAt", async () => {
+    await claimLease("chrome", "AUTO-2", { label: "x", auto: true, now: 1000 });
+    await assertLeaseOk("chrome", "AUTO-2", { now: 5000 });
+    expect((await readLease("chrome", "AUTO-2"))?.lastUsedAt).toBe(5000);
+  });
+
+  test("our own EXPLICIT lease still demands its token, even same-process", async () => {
+    // The whole point of the two tiers: a subagent that claimed explicitly is
+    // protected from its siblings, which share this pid.
+    await claimLease("chrome", "AUTO-3", { label: "sibling" });
+    await expect(assertLeaseOk("chrome", "AUTO-3")).rejects.toThrow(LeaseConflictError);
+  });
+
+  test("another live pid's auto lease is refused", async () => {
+    // pid 1 is alive on every platform this runs on, so isPidAlive is true and
+    // the record is not stale for the dead-pid reason.
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "AUTO-4", nonce: "b".repeat(24),
+      pid: 1, label: "other-agent", createdAt: Date.now(), lastUsedAt: Date.now(),
+      ttlMs: 900_000, auto: true,
+    };
+    await writeFile(leaseFile("chrome", "AUTO-4"), JSON.stringify(rec));
+    await expect(assertLeaseOk("chrome", "AUTO-4")).rejects.toThrow(LeaseConflictError);
+  });
+
+  test("a token for TAB-A causes an unrelated unleased TAB-C to be acquired", async () => {
+    const { token } = await claimLease("chrome", "AUTO-5-A", { label: "holder" });
+    await assertLeaseOk("chrome", "AUTO-5-C", { lease: token });
+    expect((await readLease("chrome", "AUTO-5-C"))?.auto).toBe(true);
+  });
+
+  test("a token naming THIS tab, when the tab is unleased, still throws and mints nothing", async () => {
+    // The caller asserted it holds a specific lease and is wrong. Minting one
+    // here would turn a real error into a silent success.
+    const { token } = await claimLease("chrome", "AUTO-6", { label: "gone" });
+    await releaseLease(token);
+    await expect(assertLeaseOk("chrome", "AUTO-6", { lease: token })).rejects.toThrow(LeaseConflictError);
+    expect(await readLease("chrome", "AUTO-6")).toBeUndefined();
+  });
+
+  test("a malformed token throws and mints nothing", async () => {
+    await expect(assertLeaseOk("chrome", "AUTO-7", { lease: "not-a-token" })).rejects.toThrow(LeaseConflictError);
+    expect(await readLease("chrome", "AUTO-7")).toBeUndefined();
+  });
+
+  test("an auto lease from a DEAD pid is reclaimed, not inherited", async () => {
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "AUTO-8", nonce: "c".repeat(24),
+      pid: 999_999, label: "dead-agent", createdAt: 1, lastUsedAt: 1,
+      ttlMs: 900_000, auto: true,
+    };
+    await writeFile(leaseFile("chrome", "AUTO-8"), JSON.stringify(rec));
+    await assertLeaseOk("chrome", "AUTO-8");
+    const after = await readLease("chrome", "AUTO-8");
+    expect(after?.pid).toBe(process.pid);
+    expect(after?.nonce).not.toBe("c".repeat(24));
+  });
+});
+
+describe("assertLeaseOk with strict mode OFF (1.4.0 regression guard)", () => {
+  test("an unleased tab with no token is left completely untouched", async () => {
+    // markLongLivedProcess is not called, so requireLease() is false.
+    await assertLeaseOk("chrome", "OFF-1");
+    expect(await readLease("chrome", "OFF-1")).toBeUndefined();
+  });
+
+  test("our own auto lease still passes with the flag off", async () => {
+    // Line 2 of the gate is deliberately NOT flag-gated: turning strict off
+    // must not lock this process out of leases it is still holding.
+    markLongLivedProcess();
+    process.env.CDP_REQUIRE_LEASE = "1";
+    await assertLeaseOk("chrome", "OFF-2");
+    markLongLivedProcess(false);
+    delete process.env.CDP_REQUIRE_LEASE;
+    await assertLeaseOk("chrome", "OFF-2");  // must not throw
+    expect((await readLease("chrome", "OFF-2"))?.auto).toBe(true);
+  });
+});
