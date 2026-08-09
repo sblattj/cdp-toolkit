@@ -5,6 +5,7 @@
  */
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage, readOrigin } from "./origins.ts";
+import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 import { resolvePage } from "./shared-tools.ts";
 import type { TargetSelector } from "./types.ts";
 import {
@@ -14,6 +15,7 @@ import {
   listLeases,
   releaseLease,
   releaseLeaseFor,
+  requireLease,
   tokenParts,
   type LeaseBackend,
   type LeaseSummary,
@@ -150,12 +152,19 @@ export async function releasePage(
 export async function listLeasesTool(
   driver: BrowserDriver,
   _args: Record<string, never> = {} as Record<string, never>,
-): Promise<{ leases: LeaseSummary[]; count: number }> {
+): Promise<{ leases: LeaseSummary[]; count: number; reaped?: ReapedTab[] }> {
+  const backend = backendOf(driver);
+  // Same reap as list_pages, and for the same reason: this is the other tool an
+  // operator runs when tabs look wrong, so it must not report a lease it is
+  // about to delete. Strict mode only.
+  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backend) : [];
+  const reapedIds = new Set(reaped.map((r) => r.targetId));
   const liveIds = (await driver.listPages()).map((p) => p.id);
   // liveBackend scopes the target-gone test to the browser these ids came from,
   // so leases held on the OTHER backend are not mislabeled as reclaimable.
-  const leases = await listLeases({ liveIds, liveBackend: backendOf(driver) });
-  return { leases, count: leases.length };
+  const all = await listLeases({ liveIds, liveBackend: backend });
+  const leases = all.filter((l) => !(l.backend === backend && reapedIds.has(l.targetId)));
+  return { leases, count: leases.length, ...(reaped.length ? { reaped } : {}) };
 }
 
 export const LEASE_TOOLS = {

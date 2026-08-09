@@ -41,6 +41,7 @@ import type {
 import type { TargetSelector } from "./types.ts";
 import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, requireLease, type LeaseBackend, type LeaseToken } from "./leases.ts";
 import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
+import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
@@ -178,8 +179,15 @@ async function reapSet(driver: BrowserDriver, pages: PageInfo[], all?: boolean):
   }
 }
 
-export async function listPages(driver: BrowserDriver, args: { all?: boolean } = {}): Promise<{ pages: ListedPage[]; count: number }> {
-  const pages = await driver.listPages({ all: args.all });
+export async function listPages(
+  driver: BrowserDriver,
+  args: { all?: boolean } = {},
+): Promise<{ pages: ListedPage[]; count: number; reaped?: ReapedTab[] }> {
+  // Reap FIRST, so a tab this call is about to close never appears in the
+  // listing it returns. Under strict mode only: see requireLease.
+  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backendOf(driver)) : [];
+  const reapedIds = new Set(reaped.map((r) => r.targetId));
+  const pages = (await driver.listPages({ all: args.all })).filter((p) => !reapedIds.has(p.id));
   // Never let provenance break the listing: originIndex does not throw, and a
   // missing or unreadable ledger yields an empty map, so every page falls back
   // to origin "unknown" exactly as a pre-ledger consumer always saw.
@@ -190,7 +198,10 @@ export async function listPages(driver: BrowserDriver, args: { all?: boolean } =
     if (rec.unreadable !== undefined) return { ...p, origin: "unknown", originUnreadable: rec.unreadable };
     return { ...p, origin: "agent", label: rec.label, createdAt: rec.createdAt };
   });
-  return { pages: annotated, count: annotated.length };
+  // `reaped` is present only when it has something to say, so the common-case
+  // shape is byte-identical to 1.4.0. Silently closing a tab is not acceptable:
+  // if a read closed something, the read says so.
+  return { pages: annotated, count: annotated.length, ...(reaped.length ? { reaped } : {}) };
 }
 
 export async function newPage(

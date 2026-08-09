@@ -17,11 +17,11 @@
  * tab someone wanted. A pure selector over plain data is testable across the
  * whole matrix of {provenance} x {lease state} x {liveness} with no browser and
  * no filesystem, which is the only way to be confident about a destructive
- * operation. The impure wrapper that calls it and acts lands separately, so
- * nothing in this file touches a driver, the clock, or the disk.
+ * operation. The impure wrapper below does nothing but call it and act.
  */
-import type { LeaseBackend, LeaseSummary } from "./leases.ts";
-import type { OriginSummary } from "./origins.ts";
+import type { BrowserDriver } from "./driver.ts";
+import { listLeases, releaseLeaseFor, type LeaseBackend, type LeaseSummary } from "./leases.ts";
+import { originIndex, type OriginSummary } from "./origins.ts";
 
 export interface ReapedTab {
   targetId: string;
@@ -77,4 +77,38 @@ export function staleAgentTabs(input: ReapInput): ReapedTab[] {
     out.push({ targetId: row.targetId, label: row.label, reason: row.stale });
   }
   return out;
+}
+
+/**
+ * Select, close, and drop the leases. Returns ONLY the tabs actually closed.
+ *
+ * A close that fails is not reported, and that asymmetry is deliberate: the
+ * caller filters its listing by this array, so reporting a tab we failed to
+ * close would hide a tab that is still open. Failing quietly leaves the tab
+ * visible and the lease in place, and the next read tries again.
+ *
+ * The lease file is unlinked; the ORIGIN record is not. listOrigins already
+ * reaps records for targets the browser no longer has, so the record disappears
+ * on the next listing. One lifetime rule for origin records, not three.
+ */
+export async function reapStaleAgentTabs(driver: BrowserDriver, backend: LeaseBackend): Promise<ReapedTab[]> {
+  // The PAGE-ONLY listing: see ReapInput.livePageIds.
+  const livePageIds = (await driver.listPages()).map((p) => p.id);
+  const [origins, leases] = await Promise.all([
+    // undefined liveIds = reap nothing from the ledger here. Reaping origin
+    // records is list_pages' job and it uses a DIFFERENT id set (the unfiltered
+    // listing); doing it here too would delete records for targets that are
+    // live but filtered out of the page-only view.
+    originIndex(backend, undefined),
+    listLeases({ liveIds: livePageIds, liveBackend: backend }).catch(() => [] as LeaseSummary[]),
+  ]);
+  const candidates = staleAgentTabs({ backend, livePageIds, origins, leases });
+  const closed: ReapedTab[] = [];
+  for (const c of candidates) {
+    const res = await driver.closePage(c.targetId).catch(() => ({ success: false }));
+    if (res.success !== true) continue;
+    await releaseLeaseFor(backend, c.targetId);
+    closed.push(c);
+  }
+  return closed;
 }
