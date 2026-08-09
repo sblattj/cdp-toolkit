@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TOOL_NAMES } from "../src/index.ts";
 import { MANIFEST } from "../src/manifest.ts";
-import type { BrowserDriver, PageInfo } from "../src/driver.ts";
 import type { Target } from "../src/types.ts";
 import type { BrowsingContextInfo } from "../src/bidi/protocol.ts";
 import { resolveTarget } from "../src/client.ts";
@@ -38,6 +37,7 @@ import {
   withLeaseScope,
   type LeaseRecord,
 } from "../src/leases.ts";
+import { page, stubDriver } from "./helpers/stub-driver.ts";
 
 let dir = "";
 const originalArtifactDir = process.env.CDP_ARTIFACT_DIR;
@@ -822,48 +822,6 @@ describe("close_page clears the lease (spec section 6)", () => {
 });
 
 /* ------------------------- the tab lifecycle, end to end ------------------------- */
-
-/**
- * Minimal BrowserDriver stand-in: only the five members the three tools under
- * test touch. `hidden` models targets that appear ONLY in the `all:true`
- * listing (a worker, an iframe), which is the one resolvePage branch whose hit
- * is not a member of the page list.
- */
-function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean } = {}) {
-  const pages: PageInfo[] = [...(opts.pages ?? [])];
-  const hidden: PageInfo[] = [...(opts.hidden ?? [])];
-  const closed: string[] = [];
-  const activated: string[] = [];
-  let created = 0;
-  const driver = {
-    scheme: opts.scheme ?? "cdp",
-    async listPages(o?: { all?: boolean }): Promise<PageInfo[]> {
-      return o?.all ? [...pages, ...hidden] : [...pages];
-    },
-    async newPage(url?: string): Promise<PageInfo> {
-      const p: PageInfo = { id: `NEW-${++created}`, url: url ?? "about:blank", title: "", type: "page" };
-      pages.push(p);
-      return p;
-    },
-    async closePage(id: string): Promise<{ success: boolean }> {
-      closed.push(id);
-      // Mirrors CdpDriver.closePage: success reflects the real
-      // Target.closeTarget result and is never hardcoded, so a stub that
-      // models a refused/already-gone close must not remove the page either.
-      if (opts.failClose) return { success: false };
-      const i = pages.findIndex((p) => p.id === id);
-      if (i >= 0) pages.splice(i, 1);
-      return { success: true };
-    },
-    async activatePage(id: string): Promise<PageInfo> {
-      activated.push(id);
-      return [...pages, ...hidden].find((p) => p.id === id) ?? { id, url: "", title: "" };
-    },
-  };
-  return { driver: driver as unknown as BrowserDriver, closed, activated, pages };
-}
-
-const page = (id: string, url = `https://example.test/${id}`): PageInfo => ({ id, url, title: id, type: "page" });
 
 describe("new_page claims the tab it opens", () => {
   test("claim:true returns a token that is a real, readable lease on the new tab", async () => {
