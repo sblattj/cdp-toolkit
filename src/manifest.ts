@@ -1126,7 +1126,7 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
         },
         "target": {
           "type": "string",
@@ -1173,7 +1173,7 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
         },
         "target": {
           "type": "string",
