@@ -21,7 +21,7 @@ import { MANIFEST } from "./manifest.ts";
 import { resolveBrowserKind, stripBrowserFlag, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
-import { leaseFromArgs, withLeaseScope } from "./leases.ts";
+import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
 
 const VERSION = "1.4.0";
 
@@ -100,6 +100,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 auditCoverage();
+// This process is the long-lived MCP server, which is what makes strict mode
+// (CDP_REQUIRE_LEASE) safe to honor here and unsafe in cli.ts. See requireLease.
+markLongLivedProcess();
 await server.connect(new StdioServerTransport());
 console.error(`[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}, ${AVAILABILITY.available.length} tools, CDP_BASE=${BASE}`);
 

@@ -5,7 +5,7 @@
  * section 9. CDP_ARTIFACT_DIR is redirected to a per-run temp dir, which is
  * why leaseDir() reads the env var per call instead of at module load.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,8 +28,10 @@ import {
   isPidAlive,
   leaseFile,
   listLeases,
+  markLongLivedProcess,
   readLease,
   releaseLease,
+  requireLease,
   staleReason,
   tokenParts,
   touchLease,
@@ -986,5 +988,62 @@ describe("close_page and select_page are the third choke point", () => {
     await claimLease("chrome", "A", { label: "agent-one" });
     await expect(selectPage(driver, { target: "A" })).rejects.toThrow(LeaseConflictError);
     expect(activated).toEqual([]);
+  });
+});
+
+describe("requireLease (the strict-mode switch)", () => {
+  const originalRequire = process.env.CDP_REQUIRE_LEASE;
+  afterEach(() => {
+    if (originalRequire === undefined) delete process.env.CDP_REQUIRE_LEASE;
+    else process.env.CDP_REQUIRE_LEASE = originalRequire;
+    markLongLivedProcess(false);
+  });
+
+  test("is false in a CLI process no matter what the env says", () => {
+    process.env.CDP_REQUIRE_LEASE = "1";
+    // markLongLivedProcess deliberately NOT called: this is cli.ts's state.
+    expect(requireLease()).toBe(false);
+  });
+
+  test("accepts 1, true, yes, on, case-insensitively, in a long-lived process", () => {
+    markLongLivedProcess();
+    for (const raw of ["1", "true", "TRUE", " True ", "yes", "on"]) {
+      process.env.CDP_REQUIRE_LEASE = raw;
+      expect(requireLease()).toBe(true);
+    }
+  });
+
+  test("rejects unset, 0, false, and garbage", () => {
+    markLongLivedProcess();
+    delete process.env.CDP_REQUIRE_LEASE;
+    expect(requireLease()).toBe(false);
+    for (const raw of ["0", "false", "no", "off", "", "maybe"]) {
+      process.env.CDP_REQUIRE_LEASE = raw;
+      expect(requireLease()).toBe(false);
+    }
+  });
+});
+
+describe("LeaseRecord.auto", () => {
+  test("claimLease defaults to an explicit (auto:false) lease", async () => {
+    await claimLease("chrome", "TIER-A", { label: "a" });
+    expect((await readLease("chrome", "TIER-A"))?.auto).toBe(false);
+  });
+
+  test("claimLease records auto:true when asked", async () => {
+    await claimLease("chrome", "TIER-B", { label: "b", auto: true });
+    expect((await readLease("chrome", "TIER-B"))?.auto).toBe(true);
+  });
+
+  test("a 1.4.0 record with no auto key reads as explicit, not auto", async () => {
+    // Exactly what <=1.4.0 wrote: no auto key at all. It must NOT be treated as
+    // an auto lease, or upgrading would silently downgrade a held lease's
+    // protection from token-required to pid-only.
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "TIER-C", nonce: "a".repeat(24),
+      pid: process.pid, label: "legacy", createdAt: 1, lastUsedAt: 1, ttlMs: 900_000,
+    };
+    await writeFile(leaseFile("chrome", "TIER-C"), JSON.stringify(rec));
+    expect((await readLease("chrome", "TIER-C"))?.auto ?? false).toBe(false);
   });
 });
