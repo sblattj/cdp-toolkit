@@ -70,7 +70,9 @@ async function withPage<T>(driver: BrowserDriver, target: TargetSelector | undef
   }
 }
 
-async function resolvePage(driver: BrowserDriver, selector?: TargetSelector): Promise<PageInfo> {
+/** Exported for leases-tools.ts's release_page{target}, which needs exactly this
+ *  gate: resolving through here is what authorizes the release. */
+export async function resolvePage(driver: BrowserDriver, selector?: TargetSelector): Promise<PageInfo> {
   const pages = await driver.listPages();
   const hit = await pickPage(driver, pages, selector);
   // THE third choke point. close_page and select_page resolve here and nowhere

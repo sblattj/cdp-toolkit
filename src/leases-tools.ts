@@ -4,13 +4,17 @@
  * Firefox, exactly as the 23 unified tools in that file do.
  */
 import type { BrowserDriver } from "./driver.ts";
-import { newTrackedPage } from "./origins.ts";
+import { newTrackedPage, readOrigin } from "./origins.ts";
+import { resolvePage } from "./shared-tools.ts";
+import type { TargetSelector } from "./types.ts";
 import {
   claimLease,
   defaultLabel,
   leaseTtlMs,
   listLeases,
   releaseLease,
+  releaseLeaseFor,
+  tokenParts,
   type LeaseBackend,
   type LeaseSummary,
   type LeaseToken,
@@ -76,16 +80,70 @@ export async function claimPage(
   };
 }
 
-/** Release a held lease. Idempotent: an already-released or reclaimed lease
- *  reports released:false rather than throwing. */
+/**
+ * Give a lease back, and close the tab if this toolkit opened it.
+ *
+ * TWO WAYS IN, because an auto-acquired lease never handed the caller a token:
+ * `lease` is the 1.4.0 path, `target` resolves through shared-tools' resolvePage
+ * and is authorized by the same gate as any other call. Exactly one is required;
+ * accepting both would leave it ambiguous which one authorizes the close.
+ *
+ * WHY PROVENANCE DECIDES THE CLOSE. A lease says who is driving a tab, never who
+ * opened it. Closing on release is right for a tab this toolkit opened for an
+ * agent and wrong for a tab the human already had open and an agent merely
+ * claimed. origins.ts records exactly that distinction and its records outlive
+ * the lease, so the answer is still there at release time.
+ *
+ * A RELEASE THAT DID NOT HAPPEN NEVER CLOSES. An already-released or reclaimed
+ * lease reports released:false, and the tab may well belong to another agent by
+ * then; closing it would destroy a tab someone else is driving. This is the one
+ * rule in this function that is a safety property rather than a convenience.
+ */
 export async function releasePage(
-  _driver: BrowserDriver,
-  args: { lease?: LeaseToken },
-): Promise<{ released: boolean }> {
-  if (typeof args.lease !== "string" || !args.lease.length) {
-    throw new LeaseToolError("release_page requires the 'lease' token returned by claim_page");
+  driver: BrowserDriver,
+  args: { lease?: LeaseToken; target?: TargetSelector; close?: boolean } = {},
+): Promise<{ released: boolean; closed: boolean; targetId?: string }> {
+  const hasLease = typeof args.lease === "string" && args.lease.length > 0;
+  const hasTarget = typeof args.target === "string" && args.target.length > 0;
+  if (hasLease === hasTarget) {
+    throw new LeaseToolError(
+      "release_page takes exactly one of 'lease' (the token claim_page returned) or 'target' (a selector for a tab this process holds)",
+    );
   }
-  return releaseLease(args.lease);
+
+  const backend = backendOf(driver);
+  let targetId: string;
+  let released: boolean;
+
+  if (hasLease) {
+    const parts = tokenParts(args.lease as LeaseToken);
+    // A malformed token names no tab, so there is nothing to release and
+    // nothing to close. Idempotent rather than throwing, as in 1.4.0.
+    if (!parts) return { released: false, closed: false };
+    targetId = parts.targetId;
+    released = (await releaseLease(args.lease as LeaseToken)).released;
+  } else {
+    // resolvePage runs assertLeaseOk, which IS the authorization: a tab held by
+    // another process throws here, and under strict mode an unleased tab is
+    // acquired first, so the caller holds it by the time we release it.
+    const page = await resolvePage(driver, args.target);
+    targetId = page.id;
+    released = (await releaseLeaseFor(backend, targetId)).released;
+  }
+
+  if (!released) return { released: false, closed: false, ...(hasTarget ? { targetId } : {}) };
+
+  const shouldClose =
+    args.close === false ? false
+    : args.close === true ? true
+    : (await readOrigin(backend, targetId)) !== undefined;
+  if (!shouldClose) return { released: true, closed: false, targetId };
+
+  // The release already succeeded and is not undone by a failed close: the
+  // caller has genuinely given the lease back either way, and throwing here
+  // would report a release that did happen as an error.
+  const res = await driver.closePage(targetId).catch(() => ({ success: false }));
+  return { released: true, closed: res.success === true, targetId };
 }
 
 /** Enumerate active leases for diagnosis. Requires no token by design. */
