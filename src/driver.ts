@@ -126,6 +126,7 @@ export type Capability =
   | "trace.performance" // Chrome tracing, behind every performance_* tool
   | "heap.snapshot" // V8 heap snapshots
   | "audit.lighthouse" // shelling out to lighthouse against a debug port
+  | "capture.screencast" // streamed repaint frames (CDP Page.startScreencast); BiDi has no equivalent
   | "emulate.cpuThrottling" // CPU multiplier; absent from BiDi's emulation module
   | "emulate.mediaFeatures" // media type + features, e.g. prefers-color-scheme
   | "emulate.deviceMetrics" // past width/height: scale factor, mobile flag
@@ -151,6 +152,8 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   performance_trace: ["trace.performance"],
   take_heapsnapshot: ["heap.snapshot"],
   lighthouse_audit: ["audit.lighthouse"],
+  start_screen_recording: ["capture.screencast"],
+  stop_screen_recording: ["capture.screencast"],
   mock_request: ["network.intercept"],
   list_mocks: ["network.intercept"],
   clear_mocks: ["network.intercept"],

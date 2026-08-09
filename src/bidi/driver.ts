@@ -269,6 +269,10 @@ const BUTTON_CODES: Record<"left" | "right" | "middle", number> = { left: 0, mid
  * supported yet" on real Firefox 153.0.3, contradicting the initial assumption that both text and
  * xpath locators were live; ElementLocator's `text` branch still resolves and correctly surfaces
  * "unsupported" rather than silently misbehaving, it is simply not offered as a capability.
+ * capture.screencast is absent because WebDriver BiDi has no streamed-frame primitive at all:
+ * the spec offers only the one-shot browsingContext.captureScreenshot, with no screencast
+ * start/stop command and no per-repaint frame event to subscribe to, so the screen-recording
+ * pair is honestly missing under Firefox rather than present and throwing.
  * network.intercept rides network.addIntercept + network.beforeRequestSent, verified working
  * (see intercept()'s comment on why urlPatterns is never populated). screenshot.fullPage uses
  * captureScreenshot's origin:"document", screenshot.element uses its clip:{type:"element"}, both verified.

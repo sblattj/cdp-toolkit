@@ -1119,6 +1119,76 @@ export const MANIFEST: ToolSpec[] = [
     }
   },
   {
+    "name": "start_screen_recording",
+    "description": "Start recording the target tab to video over raw CDP (Page.startScreencast), holding one persistent connection open and spooling every Page.screencastFrame to disk. Chrome emits a frame ON REPAINT, not on a clock, so the stream is variable-rate: each frame is timestamped into a ledger and stop_screen_recording turns those timestamps into per-frame display durations, which is what makes a still page hold one long frame instead of the video racing or freezing. Every frame is acked immediately (an unacked frame stalls the stream). ffmpeg is probed here, not at stop, so a missing encoder fails before a recording is captured and thrown away. Must be paired with stop_screen_recording WITHIN THE SAME PROCESS (the frames are events on this connection and cannot be re-attached from another process, so the pair works under the MCP server, not the one-process-per-call CLI). Throws if a recording is already in progress for the target; recordings on DIFFERENT targets run concurrently. Chrome only: WebDriver BiDi has no screencast primitive, so both tools are absent under --browser firefox.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "jpeg",
+            "png"
+          ],
+          "description": "Frame image format. Defaults to jpeg (far smaller per repaint); png is lossless. quality applies to jpeg only."
+        },
+        "quality": {
+          "type": "number",
+          "description": "JPEG frame quality 0-100. Ignored for png. Omitted by default, which leaves Chrome's own default in place."
+        },
+        "maxWidth": {
+          "type": "number",
+          "description": "Cap the streamed frame width in pixels. Also the way to pin frame size if the viewport might change mid-recording."
+        },
+        "maxHeight": {
+          "type": "number",
+          "description": "Cap the streamed frame height in pixels."
+        },
+        "everyNthFrame": {
+          "type": "number",
+          "description": "Capture only every Nth repaint (1 = every frame). Reduces spool size on a busy page; per-frame durations keep playback at wallclock speed either way."
+        },
+        "bringToFront": {
+          "type": "boolean",
+          "description": "Activate the tab (Page.bringToFront) before recording. Default false. A fully backgrounded or occluded tab may never repaint, and a recording of one captures 0 frames."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "stop_screen_recording",
+    "description": "Stop the recording started by start_screen_recording, assemble the spooled frames into an MP4 with ffmpeg using PER-FRAME durations from the ledger (frame N is held until frame N+1 painted; the last frame is held until this call), and return {path,bytes,durationMs,frameCount,encodedFrames,codec,encoder,width,height,droppedFrames,target}. Encoder ladder, probed once at start: hevc_videotoolbox then h264_videotoolbox then libx265 then libx264, with -tag:v hvc1 on HEVC so QuickTime plays it, +faststart, yuv420p, and even dimensions forced. With one recording in flight 'target' may be omitted; with several it is required, because guessing which to stop can lose another agent's recording. Throws if nothing is recording in this process, and throws rather than writing a silent empty video when 0 frames arrived. On an ffmpeg failure the spooled frames are KEPT and the spool path plus the exact command are named in the error. Encoded video tops out at 25 fps: ffmpeg's concat demuxer represents image timestamps on a 1/25s grid, so frames captured less than 40ms apart are coalesced deliberately (frameCount reports what was captured, encodedFrames what reached the video) instead of being dropped silently by ffmpeg. durationMs is the sum of the encoded durations; the file itself runs one 40ms step longer, because the concat demuxer needs the final frame repeated for its hold to count.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Required only when the tab this call resolves to is leased by someone; omit it for unleased tabs, which behave exactly as before."
+        },
+        "target": {
+          "type": "string",
+          "description": "Which recording to stop: 'active' (default, valid only when exactly one recording is in flight) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "savePath": {
+          "type": "string",
+          "description": "Override the output file path. Default: /tmp/cdp-toolkit/screen-recording-<targetIdShort>-<stamp>.mp4."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "take_heapsnapshot",
     "description": "Capture a V8 heap snapshot of the selected page target over raw CDP (HeapProfiler.takeHeapSnapshot, accumulating addHeapSnapshotChunk events) and write it as a .heapsnapshot JSON file loadable by the DevTools Memory panel; returns {path,bytes,chunks,target} only and does not parse/summarize the snapshot. Writes under /tmp/cdp-toolkit (CDP_ARTIFACT_DIR) unless savePath is given.",
     "inputSchema": {
