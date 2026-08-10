@@ -24,12 +24,13 @@
  */
 import type { TargetSelector } from "../types.ts";
 import {
-  UID_STAMP_ATTR, isDriverError,
+  UID_STAMP_ATTR, isDriverError, interpolatePoints,
   type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type DragDestination, type DragOptions,
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
-  type ScreenshotOptions, type SnapshotNode, type UidStability,
+  type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
@@ -40,7 +41,7 @@ import type {
   BrowsingContextId, BrowsingContextInfo, BrowsingContextLocator, BrowsingContextReadinessState,
   BrowsingContextCaptureScreenshotParameters, ScriptSharedReference, ScriptRemoteValue, ScriptLocalValue,
   ScriptNodeRemoteValue, ScriptExceptionDetails, InputSourceActions, InputPointerSourceAction, InputKeySourceAction,
-  NetworkCookie,
+  InputWheelSourceAction, NetworkCookie,
 } from "./protocol.ts";
 
 /* ---------------------------------- cookies ---------------------------------- */
@@ -257,6 +258,14 @@ const KEY_VALUES: Record<string, string> = {
 const MODIFIER_VALUES: Record<string, string> = { shift: "\uE008", control: "\uE009", ctrl: "\uE009", alt: "\uE00A", meta: "\uE03D", cmd: "\uE03D", command: "\uE03D" };
 const BUTTON_CODES: Record<"left" | "right" | "middle", number> = { left: 0, middle: 1, right: 2 };
 
+/** Same scroll-settle technique as cdp/driver.ts's ARM_SCROLL_SETTLE_WATCH / awaitScrollSettle,
+ *  see that file's doc comment for the full rationale: a capture-phase 'scroll' listener on
+ *  window, debounced 60ms with a 500ms cap, so scroll()'s caller observes the settled position. */
+const ARM_SCROLL_SETTLE_WATCH_SOURCE =
+  "function(){window.__cdpScrollSettle=new Promise((resolve)=>{let t;const done=()=>{window.removeEventListener('scroll',on,true);resolve(true);};" +
+  "const on=()=>{clearTimeout(t);t=setTimeout(done,60);};window.addEventListener('scroll',on,true);t=setTimeout(done,60);setTimeout(done,500);});}";
+const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}";
+
 /**
  * Firefox 153 capabilities. Only what was empirically verified is declared: emulate.deviceMetrics
  * (browsingContext.setViewport) and the userAgent path (universal, no capability token) both work.
@@ -386,9 +395,51 @@ class BidiPageDriver implements PageDriver {
   private bodyCollector?: string;
   constructor(private readonly conn: BidiConnection, private readonly contextId: BrowsingContextId, readonly info: PageInfo, readonly browser: BrowserDriver) {}
 
+  /** `location.href` and `document.readyState` in one round trip, NUL-joined so the result comes
+   *  back as one plain string (deserializeRemote's simplest shape). Empty strings on any failure —
+   *  a transient evaluate error during a navigation is normal and must not abort a poll. */
+  private async urlAndReadyState(): Promise<[string, string]> {
+    const raw = await this.conn.send("script.evaluate", {
+      expression: "location.href + '\\u0000' + document.readyState",
+      target: { context: this.contextId }, awaitPromise: false,
+    }).then((r) => (r.type === "success" ? String(deserializeRemote(r.result) ?? "") : "")).catch(() => "");
+    const [url = "", ready = ""] = raw.split("\u0000");
+    return [url, ready];
+  }
+
+  /**
+   * Bounded readiness wait after a history traversal.
+   *
+   * WHY THIS EXISTS AT ALL. browsingContext.navigate and .reload both take a `wait` readiness state
+   * and block server-side until it is reached, which is why the two branches below simply return
+   * `waitedFor: waitUntil`. browsingContext.traverseHistory takes NO `wait` parameter and returns
+   * as soon as the traversal is dispatched, so this driver owns the wait for that one path — the
+   * same position cdp/driver.ts is in for every navigation.
+   *
+   * Polling rather than a `browsingContext.load` subscription, matching waitForText's in-file
+   * pattern: a bfcache restore does not necessarily re-fire a load event, so an event wait could
+   * hang on a perfectly successful traversal while a poll observes the settled document directly.
+   *
+   * KNOWN LIMIT, stated rather than hidden: "we moved" is inferred from the url changing. A
+   * traversal between two history entries with the IDENTICAL url therefore cannot be confirmed and
+   * burns the whole budget before returning "timeout" — with the correct url, and after the
+   * traversal really did happen. That is the honest reading of the only signal available here.
+   */
+  private async settleAfterTraversal(beforeUrl: string, waitUntil: "load" | "domcontentloaded", timeoutMs: number): Promise<{ waitedFor: NavigateResult["waitedFor"]; url: string }> {
+    const ready = waitUntil === "domcontentloaded" ? ["interactive", "complete"] : ["complete"];
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [url, state] = await this.urlAndReadyState();
+      if (url && url !== beforeUrl && ready.includes(state)) return { waitedFor: waitUntil, url };
+      if (Date.now() >= deadline) return { waitedFor: "timeout", url: url || beforeUrl };
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
   async navigate(opts: NavigateOptions): Promise<NavigateResult> {
     const reload = opts.reload === true;
-    if (!reload && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    const history = opts.history;
+    if (!reload && !history && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
     const waitUntil = opts.waitUntil ?? "load";
     const wait: BrowsingContextReadinessState = waitUntil === "domcontentloaded" ? "interactive" : "complete";
     const sendOpts = opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {};
@@ -396,6 +447,21 @@ class BidiPageDriver implements PageDriver {
       if (reload) {
         const r = await this.conn.send("browsingContext.reload", { context: this.contextId, ignoreCache: opts.ignoreCache === true, wait }, sendOpts);
         return { url: r.url, contextId: this.contextId, reloaded: true, waitedFor: waitUntil };
+      }
+      if (history) {
+        const [beforeUrl] = await this.urlAndReadyState();
+        // NavigateOptions.history forbids a silent no-op. Firefox answers a traversal past either
+        // end of the session history with a "no such history entry" error, which mapBidiError would
+        // relay verbatim — a message that never names the direction the caller asked for. Rewrapped
+        // here so back-at-the-start and forward-at-the-end read the same on both backends.
+        await this.conn.send("browsingContext.traverseHistory", { context: this.contextId, delta: history === "back" ? -1 : 1 }, sendOpts)
+          .catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/no such history entry|history/i.test(msg)) throw driverError("page-error", `navigate: no history entry to go ${history} to (${msg})`);
+            throw e;
+          });
+        const settled = await this.settleAfterTraversal(beforeUrl, waitUntil, opts.timeoutMs ?? 15_000);
+        return { url: settled.url, contextId: this.contextId, traversed: history, waitedFor: settled.waitedFor };
       }
       const r = await this.conn.send("browsingContext.navigate", { context: this.contextId, url: opts.url as string, wait }, sendOpts);
       return { url: r.url, contextId: this.contextId, waitedFor: waitUntil };
@@ -504,7 +570,18 @@ class BidiPageDriver implements PageDriver {
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions: [{ type: "pointerMove", x, y, duration: 0 }] }]);
     return { x, y };
   }
+  // modifiers is new in 1.8.0 (Track P1). Chrome expresses it as a bitmask on the same
+  // mousePressed/mouseReleased events (cdp/driver.ts's inputModifierBits); WebDriver BiDi has no
+  // equivalent field on a pointerDown/pointerUp action; a modifier chord instead requires a SECOND
+  // "key" input source ticked in lockstep with the pointer source across the same performActions
+  // call, which the spec explicitly permits skipping ("throw a clear error when modifiers are
+  // passed on firefox" — see cdp-toolkit's 1.8.0 spec, Track P1 §3) and this driver was not
+  // verified against real Firefox for this pass, so it throws "unsupported" rather than guess at
+  // untested tick-synchronization semantics.
   async click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }> {
+    if (opts?.modifiers && opts.modifiers.length > 0) {
+      throw driverError("unsupported", "click: 'modifiers' is not supported by the Firefox/BiDi driver; omit 'modifiers' or use --browser chrome for a modifier click.");
+    }
     const ref = await resolveElementLocator(this.conn, this.contextId, loc);
     const { x, y } = await this.centerOf(ref);
     const button = BUTTON_CODES[opts?.button ?? "left"];
@@ -513,16 +590,62 @@ class BidiPageDriver implements PageDriver {
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions }]);
     return { x, y };
   }
-  async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+  // 1.8.0 Track P1: BiDi's "wheel" input source (a distinct source type from "pointer"/"key")
+  // carries x/y/deltaX/deltaY directly on its one "scroll" action — no tick synchronization with
+  // another source needed, unlike click's modifiers above, which is what makes this tractable.
+  // Same settle-wait rationale as cdp/driver.ts's armScrollSettleWatch: a wheel-triggered scroll
+  // is a browser-animated effect, not a synchronous DOM mutation, so a caller reading scroll
+  // position immediately after performActions resolves risks the pre-scroll value. Not empirically
+  // verified against real Firefox this pass (no Firefox available in this environment), but applied
+  // for consistency with the verified Chrome behavior rather than left as a known, unfixed gap.
+  async scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }> {
+    const { x, y } = await this.resolveScrollPoint(anchor);
+    const deltaX = Math.round(opts.deltaX ?? 0);
+    const deltaY = Math.round(opts.deltaY ?? 0);
+    await this.callFunctionValue(ARM_SCROLL_SETTLE_WATCH_SOURCE, []);
+    const actions: InputWheelSourceAction[] = [{ type: "scroll", x: Math.round(x), y: Math.round(y), deltaX, deltaY }];
+    await this.performActions([{ type: "wheel", id: "cdp-wheel", actions }]);
+    await this.callFunctionValue(AWAIT_SCROLL_SETTLE_SOURCE, []).catch(() => undefined);
+    return { x, y };
+  }
+  private async resolveScrollPoint(anchor: ElementLocator | { x: number; y: number } | undefined): Promise<{ x: number; y: number }> {
+    if (anchor === undefined) {
+      const v = await this.callFunctionValue("function(){return {x: window.innerWidth / 2, y: window.innerHeight / 2};}", []);
+      if (!v || typeof v !== "object") throw driverError("page-error", "could not measure viewport for scroll center");
+      return v as { x: number; y: number };
+    }
+    if ("x" in anchor) return anchor;
+    return this.centerOf(await resolveElementLocator(this.conn, this.contextId, anchor));
+  }
+  // 1.8.0 Track P2. mode:"html5" is REFUSED here, never silently downgraded to mouse mode: WebDriver
+  // BiDi has no drag-interception primitive at all (no setInterceptDrags equivalent, no drag event
+  // to subscribe to, no dispatchDragEvent), so there is nothing to port. The param-level refusal
+  // mirrors click's modifiers-on-Firefox above — `drag` itself stays in tools/list because mouse
+  // mode is fully supported here. `to` accepting a point or an offset, and `steps`, are both
+  // backend-neutral and DO work on this driver.
+  async drag(from: ElementLocator, to: DragDestination, opts?: DragOptions): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+    if (opts?.mode === "html5") {
+      throw driverError(
+        "unsupported",
+        "drag: mode:'html5' is not supported by the Firefox/BiDi driver (WebDriver BiDi has no drag-interception primitive); " +
+          "omit 'mode' for the synthetic-mouse drag, or use --browser chrome for real HTML5 drag events.",
+      );
+    }
     const fromPt = await this.centerOf(await resolveElementLocator(this.conn, this.contextId, from));
-    const toPt = await this.centerOf(await resolveElementLocator(this.conn, this.contextId, to));
+    const toPt = await this.resolveDragDestination(to, fromPt);
+    const steps = Math.max(1, Math.trunc(opts?.steps ?? 2));
     const actions: InputPointerSourceAction[] = [
       { type: "pointerMove", x: fromPt.x, y: fromPt.y, duration: 0 }, { type: "pointerDown", button: 0 },
-      { type: "pointerMove", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, duration: 50 },
-      { type: "pointerMove", x: toPt.x, y: toPt.y, duration: 50 }, { type: "pointerUp", button: 0 },
     ];
+    for (const pt of interpolatePoints(fromPt, toPt, steps)) actions.push({ type: "pointerMove", x: pt.x, y: pt.y, duration: 50 });
+    actions.push({ type: "pointerUp", button: 0 });
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions }]);
     return { from: fromPt, to: toPt };
+  }
+  private async resolveDragDestination(to: DragDestination, fromPt: { x: number; y: number }): Promise<{ x: number; y: number }> {
+    if ("dx" in to) return { x: fromPt.x + to.dx, y: fromPt.y + to.dy };
+    if ("x" in to) return to;
+    return this.centerOf(await resolveElementLocator(this.conn, this.contextId, to));
   }
   // No atomic value-commit primitive over BiDi (established fact): every key goes through
   // input.performActions, batched into ONE call regardless of string length, so setValue/typeText

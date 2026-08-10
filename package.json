@@ -79,7 +79,8 @@
     "mcp:smoke": "bun run ./test/mcp-smoke.ts",
     "firefox:smoke": "bun run ./test/firefox-smoke.ts",
     "lease:smoke": "bun run ./test/lease-smoke.ts",
-    "staleness:smoke": "bun run ./test/staleness-smoke.ts"
+    "staleness:smoke": "bun run ./test/staleness-smoke.ts",
+    "input:smoke": "bun run ./test/input-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "22.10.10",
