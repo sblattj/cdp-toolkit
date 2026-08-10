@@ -537,7 +537,7 @@ export const MANIFEST: ToolSpec[] = [
             "mouse",
             "html5"
           ],
-          "description": "'mouse' (default): synthetic mouse press/move/release; works on pointer-event widgets, does nothing on HTML5 draggable elements. 'html5': real HTML5 drag-and-drop (dragstart/dragEnter/dragOver/drop with the page's own dataTransfer). 'html5' is CHROME-ONLY and is rejected with a clear error under the Firefox backend."
+          "description": "'mouse' (default): synthetic mouse press/move/release, right for widgets built on raw pointer events. Chrome does turn this into a real HTML5 drag too, but WHICH drag events reach the page depends on the interpolated pointer path: at the default steps:2, an HTML5 drop zone written the standard way (preventDefault inside dragover) sees zero dragover events and refuses the drop. 'html5': real HTML5 drag-and-drop (dragstart/dragEnter/dragOver/drop with the page's own dataTransfer), deterministic regardless of pointer path. 'html5' is CHROME-ONLY and is rejected with a clear error under the Firefox backend."
         },
         "steps": {
           "type": "number",

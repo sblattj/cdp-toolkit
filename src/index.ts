@@ -4,7 +4,7 @@
  * Two exports:
  *   1. `TOOLS` : the registry mapping every chrome-devtools-mcp tool name
  *      (snake_case string, all 29 of them) plus the toolkit's own superset
- *      tools, 41 entries in all, to its raw-CDP implementation function. The
+ *      tools, 45 entries in all, to its raw-CDP implementation function. The
  *      CLI and any embedder dispatch through this single table.
  *   2. The client primitives, re-exported so consumers can build their own
  *      flows on the same connection/timeout machinery the tools use.

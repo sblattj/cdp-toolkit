@@ -5,6 +5,289 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-09
+
+Two tracks land together, merged onto one integration branch. Track S closes the
+gap 1.7.0's takeover mode opened: an agent can now claim a human's open tab, but
+nothing detected the human was still there, and reap could destroy an
+agent-abandoned tab the moment it went idle. Track P is four groups of input
+parity chrome-devtools-mcp already had and this toolkit didn't: a wheel/scroll
+tool, a raw mouse primitive, real HTML5 drag-and-drop, and navigation
+history/downloads/permissions. Tool count moves 41 → 45. Every new
+input-dispatching path (Track P) was wired through Track S's dispatch log as
+part of the merge, not left as a follow-up — see "Changed" below.
+
+### Added
+
+- **An activity beacon: `claim_page` and `list_leases` now know when a human is
+  already using a tab (`src/activity.ts`).** A tiny in-page script records the
+  timestamp of the last `pointerdown`/`mousedown`/`keydown`/`wheel`/`touchstart`,
+  installed at claim time on both `claim_page` modes and
+  `new_page{claim:true}`. On Chrome, `Page.addScriptToEvaluateOnNewDocument`
+  alone does **not** survive navigation under this toolkit's per-call connection
+  lifetime — the registration dies with the connection that made it, which is
+  every tool call, a fact verified against a live browser before anything was
+  built on it (`addScriptToEvaluateOnNewDocument` → new connection → navigate →
+  `null`). So the CDP driver now holds one connection open per beaconed tab
+  purely to keep the registration alive across navigations, bounded at 32
+  tabs with oldest-first eviction; an evicted tab still answers for input on
+  its current document, only the next navigation's re-arm is lost. Firefox
+  needs none of this — its BiDi session lives for the whole process, so a
+  `script.addPreloadScript` registration survives navigation for free, and was
+  implemented and live-verified rather than left absent, since the spec's
+  Firefox carve-out only applied if the plumbing was intractable and it wasn't.
+  CDP-dispatched input is `isTrusted:true` too, so the beacon alone cannot tell
+  a human click from the toolkit's own: every input-dispatching call writes to
+  an in-process dispatch log, and a beacon timestamp counts as human only when
+  it postdates this server's last dispatch on that tab by more than 1500ms.
+  `claim_page`/`list_leases` surface it as `humanActiveMs` — milliseconds since
+  input this server did not dispatch. **`null`/absent means NO DATA, never "no
+  human"**: a fresh tab, a tab whose every input was this server's own, and a
+  backend that cannot answer at all are all indistinguishable from each other
+  and from silence. A `claim_page` takeover of a tab a human used within the
+  last 30 seconds additionally carries a `contention` warning string, and **the
+  claim is never refused for it** — taking over a person's tab is what
+  takeover mode is for, so the warning informs a caller who already holds the
+  lease, it does not gate anything. Known blind spots, stated rather than
+  designed away: input inside a cross-origin iframe is invisible to the
+  beacon, and a *second* MCP server process's dispatches read as human to this
+  one, since dispatch-log correlation is scoped to this process.
+
+- **Split reap horizon: reclaimable and destroyed are different moments, now
+  separated by `CDP_REAP_GRACE_MS`.** Before this release, `list_pages` and
+  `list_leases` closed an agent's tab the instant its lease read `expired`,
+  which is also the instant another agent becomes *entitled* to take it —
+  fine for handing the lease to someone else, destructive when applied to the
+  tab itself. An agent 20 minutes into a build between tool calls does not
+  expect to come back to a destroyed tab just because it could, in principle,
+  have been reclaimed. `staleAgentTabs` (`src/reap.ts`) stays a pure function
+  but now takes `now`/`reapGraceMs`: an `expired` lease qualifies for the
+  destructive close only once `now - lastUsedAt > ttlMs + reapGraceMs`.
+  `CDP_REAP_GRACE_MS` defaults to `2700000` (45 minutes), for a 60-minute total
+  fuse after last use. Lease *reclaimability* — `list_leases`' `stale` field —
+  is byte-for-byte unchanged at `ttlMs`; only the destructive close moved.
+  `dead-pid` is unaffected by grace and reaps immediately, because that
+  process is never coming back and there is nothing to wait for.
+
+- **Renderer ping and lease observability on `list_pages`/`list_leases`.**
+  `list_pages` gains `probe?: boolean` (default false, byte-identical shape
+  when omitted): one bounded (500ms) `Runtime.evaluate` per page-type target,
+  run concurrently so one wedged tab cannot stall the rest of the listing
+  beyond its own budget. Adds `responsive: boolean` (false on a timeout, a
+  page-side exception, or an unreachable target — never an error for the
+  whole call) and, where the same round trip finds human-attributed input,
+  `humanActiveMs`, reusing the beacon's own discrimination rule rather than a
+  second implementation of it. Separately and unconditional on `probe`,
+  `list_leases` rows gain computed `idleMs` (now−lastUsedAt) and `expiresAt`
+  (lastUsedAt+ttlMs, the same value `claim_page` already returns under that
+  name), and `list_pages` entries for a tab under an active, readable lease of
+  the driver's own backend gain `lease: {label,pid,idleMs,expiresAt,stale}`.
+  Both are computed fresh in the tool layer on every call, never stored.
+
+- **`scroll`, a new wheel-dispatch tool, on both backends.** Anchor at
+  `uid`/`selector`/`x`+`y` (element anchors are scrolled into view first, same
+  as `click`), or the viewport center if all three are omitted; at least one
+  of `deltaX`/`deltaY` is required, positive `deltaY` scrolling down and
+  positive `deltaX` scrolling right (wheel convention). Chrome dispatches
+  `Input.dispatchMouseEvent{type:"mouseWheel"}`; Firefox dispatches WebDriver
+  BiDi's `wheel` input source — both live-verified against a real browser, not
+  left on "it typechecks." A real bug surfaced along the way: Chrome
+  smooth-scrolls a wheel dispatch, so the command's ack resolves once the
+  event is *queued*, not once the resulting scroll has *settled*, and a
+  caller reading `scrollTop` immediately after could see the pre-scroll
+  value. Fixed with a capture-phase `scroll` listener armed before dispatch
+  (window-level, since `scroll` doesn't bubble but a capture-phase listener on
+  `window` still sees it), debounced 60ms with a 500ms hard cap rather than a
+  blind sleep sized wrong for both large and small deltas.
+
+- **`dispatch_mouse`, the raw move/down/up primitive, Chrome-only.** Dispatch
+  exactly one `move`/`down`/`up` mouse event at absolute viewport coordinates
+  (`x`/`y` required on every call — CDP has no notion of a current pointer
+  position to default from); compose your own move/down/move/up sequences for
+  anything a physical mouse can do that `click`/`drag`'s fixed sequences
+  can't — canvas drag-painting, marquee/rubber-band selection, a custom
+  hit-testing widget. Takes the same `button`/`clickCount`/`modifiers` as
+  `click`. Lives outside the Driver abstraction by design, alongside
+  `heap.ts`/`screencast.ts`'s other chrome-only-tool modules, but is
+  lease-gated through the exact same choke point every other interaction tool
+  uses. Chrome-only, capability `input.raw`: absent from `tools/list` under
+  `--browser firefox`, never present-and-throwing.
+
+- **`click` gains `modifiers` and `clickCount:3`.** `modifiers` (Alt/Control/
+  Meta/Shift, CDP bits 1/2/4/8) is held for both press and release, e.g.
+  `["Shift"]` for a shift-click; `clickCount:3` triple-clicks, selecting a
+  paragraph/line in most editors. `modifiers` is a **Chrome-only parameter on
+  an otherwise-universal tool**: a non-empty array throws a clear error under
+  `--browser firefox` rather than being silently dropped or ignored — a
+  documented param-level gap under ADR-001, not a missing tool.
+
+- **Real HTML5 drag-and-drop (`drag mode:"html5"`), plus `steps`, `to:{x,y}`,
+  and `by:{dx,dy}` on the existing mouse-mode drag.** The spec's premise —
+  that synthetic mouse events cannot drive HTML5 drag-and-drop at all — is
+  **false**, measured against Chrome 151: `mode:"mouse"` (the default) does
+  start a real drag and can fire `dragstart`/`dragover`/`drop`. The actual gap
+  is that *which* `dragover` events reach the page depends on where the
+  interpolated pointer path happens to land, because mouse mode's drag
+  events follow that path rather than being dispatched at fixed points. At
+  the default `steps:2`, a drop zone written the standard way (`preventDefault`
+  only inside `dragover`, the HTML spec's own pattern) sees **zero** `dragover`
+  events and refuses the drop outright — a coin flip decided by geometry, not
+  a reliable "it doesn't work." `mode:"html5"` closes that gap deterministically:
+  `Input.setInterceptDrags(true)` arms interception, the mouse press/move
+  sequence runs, `Input.dragIntercepted` hands back the page's own `dragstart`
+  DragData, and the toolkit replays it as `dragEnter`→`dragOver`→`drop` exactly
+  at the destination — path-independent, and interception is always disabled
+  in a `finally`. Missing the intercepted event within 5 seconds (e.g. the
+  source isn't `draggable="true"`) is an actionable error, never a silent
+  no-op. `mode:"html5"` is Chrome-only (capability `input.html5Drag`, absent
+  from `REQUIRED_CAPABILITIES` so `drag` itself stays available on both
+  backends) and is rejected with a clear error under Firefox rather than
+  silently downgrading to mouse mode, which would report a drop that never
+  happened. `steps` (default 2, matching the exact pre-1.8.0 dispatch) sets
+  the interpolated-move count for mouse mode; `to` now also accepts an
+  absolute `{x,y}` alongside `uid`/`selector`, and a new top-level `by:{dx,dy}`
+  offsets from the source point instead (sliders, map panning, resize
+  handles) — exactly one of `to`/`by` is required, refused rather than
+  resolved by precedence when both or neither are given.
+
+- **`navigate_page` gains `history: "back"|"forward"`, on both backends.**
+  Traverses this tab's session history like the browser's own Back/Forward
+  buttons: Chrome via `Page.getNavigationHistory` + `Page.navigateToHistoryEntry`,
+  Firefox via BiDi's `browsingContext.traverseHistory{delta:±1}`. Mutually
+  exclusive with `url`/`reload` — passing two of the three is refused by name,
+  never resolved by precedence. Going back from the first entry, or forward
+  from the last, is an **error naming the direction**, never a silent
+  no-op that navigates nowhere; both backends were made to raise the same
+  sentence (Firefox's own error never names a direction, so the BiDi driver
+  rewraps it). Waits for the same load milestone as an ordinary navigation.
+
+- **`wait_for_download`, capture a real file download as a file on disk,
+  Chrome-only and MCP-server-only.** Returns `{path,suggestedFilename,bytes,
+  url,target}`, renaming Chrome's internal guid to the page's own filename
+  (collision-suffixed: `report.csv`, `report-1.csv`, ...). Two premises in the
+  original design were probed against a real browser before anything was
+  built, and both were **false**: `Browser.setDownloadBehavior` does **not**
+  persist past the arming client's disconnect (measured: an armed-then-closed
+  connection followed by a click landed zero files, no events, anywhere — the
+  download is *denied*, not merely misdirected), and the toolkit's per-call
+  CDP lifetime means every tool call is exactly such a disconnect. The fix is
+  `src/tools/browser-session.ts`: one lazily-opened, module-scoped connection
+  to the browser endpoint, held open for the process's life, arming download
+  capture once and keeping a ring buffer of completions — opened only when
+  `wait_for_download` or `grant_permissions` is first called, so a session
+  that never downloads pays nothing. **Ordering rule, not optional:** call
+  `wait_for_download{arm:true}` *before* the click that starts the download
+  (it arms and returns immediately: `{armed:true,downloadPath,pending}`), then
+  click, then call `wait_for_download` again to collect the finished file —
+  arming late loses the download with no file anywhere to recover it from.
+  **Browser-global side effect:** while armed, *every* download in the
+  browser, all tabs and origins, is redirected into the toolkit's downloads
+  directory for as long as the server runs. **MCP-server only, not a
+  preference:** the arm lives on a connection this server process holds open;
+  under the one-shot CLI that connection dies with the process before a
+  download could ever complete, so the tool needs the long-lived server the
+  same way `performance_start_trace`/`start_screen_recording` already do.
+  Chrome-only, capability `browser.downloads`: WebDriver BiDi has no command
+  to redirect a download to a chosen directory.
+
+- **`grant_permissions`, pre-answer permission prompts for an origin,
+  Chrome-only and MCP-server-only.** `permissions: string[]` takes CDP
+  PermissionType values (`geolocation`, `notifications`, `clipboardReadWrite`,
+  `camera`, `microphone`, `midi`, ...; an unknown name is refused by Chrome
+  with the bad value in the message), keyed by **origin**, not tab — every
+  tab on that origin is affected, including ones opened later. `reset:true`
+  clears this server's previous grants first, or instead when no permissions
+  are given; CDP's reset is not itself origin-scoped, so it clears every
+  origin at once. The same probe that falsified `wait_for_download`'s
+  persistence assumption was run against `Browser.grantPermissions` on
+  spec, since the same per-connection-state trap applies here too, and it
+  sprang: a grant also does **not** survive the granting client's disconnect.
+  Shares `browser-session.ts`'s standing connection with `wait_for_download`
+  for exactly that reason. Chrome-only, capability `browser.permissions`:
+  absent from `tools/list` under Firefox, never present-and-throwing.
+
+### Changed (behavior, no flag)
+
+- **Every input-dispatching path, old and new, now writes through one choke
+  point, closing a real bug the individual branches could not see.** Track P
+  was built against pre-1.8.0 main, before Track S's dispatch log existed, so
+  its `scroll` and html5-drag paths sent `Input.*` straight down the
+  connection. Merged as-is, this compiles, typechecks, and passes both
+  branches' full test suites while the activity beacon reports the toolkit's
+  own scroll as a human using the tab — an agent warned about contention with
+  itself, the exact failure the beacon exists to prevent, invisible to either
+  branch's own tests because neither branch could see the other's code.
+  `dispatch_mouse` lives outside the Driver abstraction and has no
+  `dispatchInput` to call, so the write moved to a new shared function,
+  `sendInput(conn, backend, targetId, method, params)` in `src/activity.ts`;
+  `CdpPageDriver.dispatchInput` now delegates to it and `dispatch-mouse.ts`
+  calls it directly. `Input.setInterceptDrags` (html5 drag's arm and its
+  `finally`) is sent but deliberately **not** recorded: it synthesizes no
+  page input, and logging it would suppress a real human input landing in the
+  same 1500ms window — classified by denylist, so an `Input.*` command nobody
+  thought to classify defaults to being logged, because over-warning is
+  recoverable and silent misattribution is the bug this feature exists to
+  avoid. Firefox needed no code change: Track P built its BiDi scroll and drag
+  on `performActions`, which already called `recordDispatch`, so it inherited
+  the log for free — the whole argument for having a choke point in the first
+  place. The invariant — nothing in `src/` sends `Input.*` except through
+  `sendInput` — is grep-verified post-merge and is now also a test
+  (`test/input-dispatch-wiring.test.ts`), mutation-checked by reverting
+  `scroll` to a raw send and confirming the test names the exact line and the
+  live smoke reproduces the bug (`humanActiveMs=202` on the toolkit's own
+  scroll, instead of `undefined`).
+
+### Residuals
+
+- **A stale claim in `drag`'s own manifest description was caught and fixed
+  during integration, not by a fresh reader later.** An earlier pass on the
+  top-level `drag` description already stated the measured mouse-vs-html5
+  finding, but the `mode` property's own enum description still read "does
+  nothing on HTML5 draggable elements" — the exact folklore the rest of this
+  release measured false. Corrected to match; no test pinned the stale
+  string.
+- **Second-MCP-server blind spot, stated plainly.** Two MCP server processes
+  driving the same browser cannot see each other's dispatch logs, so one
+  server's tool calls read as human activity to the other. Accepted: the
+  discrimination rule is honest about what it can and cannot see, and the
+  alternative (a shared dispatch log across processes) is a much larger
+  feature for a scenario this toolkit does not otherwise support (see
+  "Parallel tabs" — one writer per flow).
+- **Cross-origin iframe input is invisible to the beacon,** since the
+  listener is installed on the top document only. Under-warning here is the
+  same accepted direction as the denylist above: a missed human input reads
+  as agent-only, never the reverse.
+- **`dispatch_mouse`'s `modifiers` and `click`'s `modifiers` are two separate
+  parameters that happen to share an enum,** not one modifier system: each
+  tool validates and documents its own Firefox behavior independently.
+- **Firefox's BiDi `scroll` path shipped once and was verified twice, in two
+  different seats.** It typechecked and passed unit tests against the real
+  BiDi capability set when Track P landed, but no Firefox was available to
+  that seat to run it live; the integration seat had one, ran it, and it
+  passed unmodified — the implementation was correct the first time, only the
+  live evidence was missing. Recorded here so "typechecks" is never mistaken
+  for "verified" on the next capability that ships without a live check.
+
+### Notes
+
+- Tool count is now 45 (29 parity + 16 superset: `performance_trace`, the
+  cookie group, the network-mocking group, the lease group, the
+  screen-recording pair, `scroll`, `dispatch_mouse`, `wait_for_download`, and
+  `grant_permissions`); 34 under Firefox, which lacks the eleven
+  capability-gated tools — the pre-1.8.0 eight (tracing, heap-snapshot,
+  Lighthouse, screen-recording) plus `dispatch_mouse`, `wait_for_download`,
+  and `grant_permissions`. `scroll` and the extended `navigate_page`/`click`/
+  `drag` params ship on both backends; only `click`'s `modifiers` and `drag`'s
+  `mode:"html5"` stay Chrome-only, and only at the parameter level — the
+  tools themselves are universal.
+- Two new live-smoke scripts, `bun run staleness:smoke` and `bun run
+  input:smoke`, are each a single process talking to a single browser:
+  `CDP_BASE` is a module-level constant captured at import time, so one
+  process cannot address two browsers on two ports. Each is therefore
+  env-driven — `staleness:smoke` honors `STALENESS_SMOKE_PORT` (default
+  9501), `input:smoke` honors `CDP_SMOKE_PORT` (default 9513) — so the two
+  can run against separate scratch Chromes without colliding.
+
 ## [1.7.0] - 2026-08-09
 
 Four things land on top of 1.2's opt-in lease model, all under one new switch
@@ -469,6 +752,7 @@ First public release.
 - Zero runtime dependencies in the CDP/CLI layer (Node's global `WebSocket` + `fetch`). The MCP server adds only `@modelcontextprotocol/sdk`; `lighthouse_audit` is the sole non-CDP tool and shells out to `npx lighthouse`.
 - Runtime: Bun ≥ 1.1 (recommended) or Node ≥ 22 (for the global `WebSocket`). Requires Chrome/Chromium started with `--remote-debugging-port=9222`.
 
+[1.8.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.7.0
 [1.6.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.6.0
 [1.0.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.0.0
