@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { MANIFEST } from "../src/manifest.ts";
 import { claimPage, listLeasesTool, type ClaimPageResult, type LeaseRow } from "../src/leases-tools.ts";
 import { claimLease, leaseFile, releaseLeaseFor } from "../src/leases.ts";
-import { newPage } from "../src/shared-tools.ts";
+import { listPages, newPage } from "../src/shared-tools.ts";
 import { page, stubDriver } from "./helpers/stub-driver.ts";
 import {
   BEACON_DATA_GLOBAL,
@@ -30,6 +30,7 @@ import {
   BeaconSessions,
   CONTENTION_WINDOW_MS,
   DISPATCH_ATTRIBUTION_WINDOW_MS,
+  RENDERER_PROBE_TIMEOUT_MS,
   beaconSupported,
   clearDispatchLog,
   contentionWarning,
@@ -38,8 +39,10 @@ import {
   installBeacon,
   isHumanAttributed,
   lastDispatchAt,
+  probeRendererActivity,
   readHumanActiveMs,
   recordDispatch,
+  rendererProbeSupported,
 } from "../src/activity.ts";
 
 const ORIGINAL_ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR;
@@ -320,6 +323,118 @@ describe("driver-facing helpers", () => {
   });
 });
 
+/* -------------------------------- the renderer ping -------------------------------- */
+
+describe("the renderer probe (list_pages{probe:true})", () => {
+  test("RENDERER_PROBE_TIMEOUT_MS is 500ms", () => {
+    expect(RENDERER_PROBE_TIMEOUT_MS).toBe(500);
+  });
+
+  test("rendererProbeSupported is false for a driver with no probeRenderer", () => {
+    const { driver } = stubDriver({ pages: [page("A")] });
+    expect(rendererProbeSupported(driver)).toBe(false);
+  });
+
+  test("rendererProbeSupported is true for a driver that has it", () => {
+    const { driver } = stubDriver({ pages: [page("A")], probe: {} });
+    expect(rendererProbeSupported(driver)).toBe(true);
+  });
+
+  test("probeRendererActivity on an unsupported driver degrades to unresponsive, never a throw", async () => {
+    const { driver } = stubDriver({ pages: [page("A")] });
+    expect(await probeRendererActivity(driver, "chrome", "A")).toEqual({ responsive: false });
+  });
+
+  test("a responsive probe with no beacon data reports responsive:true and no humanActiveMs", async () => {
+    const { driver, probeCalls } = stubDriver({
+      pages: [page("A")],
+      probe: { responses: { A: { responsive: true, beaconTs: null } } },
+    });
+    expect(await probeRendererActivity(driver, "chrome", "A")).toEqual({ responsive: true });
+    expect(probeCalls).toEqual(["A"]);
+  });
+
+  test("a responsive probe with human-attributed beacon data reports humanActiveMs", async () => {
+    const now = Date.now();
+    const { driver } = stubDriver({
+      pages: [page("A")],
+      probe: { responses: { A: { responsive: true, beaconTs: now - 3_000 } } },
+    });
+    const res = await probeRendererActivity(driver, "chrome", "A", now);
+    expect(res.responsive).toBe(true);
+    expect(res.humanActiveMs).toBeGreaterThanOrEqual(3_000);
+  });
+
+  test("a beacon timestamp inside our own dispatch window is not human, even though the probe was responsive", async () => {
+    const now = Date.now();
+    recordDispatch("chrome", "A", now - 100);
+    const { driver } = stubDriver({
+      pages: [page("A")],
+      probe: { responses: { A: { responsive: true, beaconTs: now } } },
+    });
+    const res = await probeRendererActivity(driver, "chrome", "A", now);
+    expect(res.responsive).toBe(true);
+    expect("humanActiveMs" in res).toBe(false);
+  });
+
+  test("a wedged/unresponsive probe never throws and carries no humanActiveMs", async () => {
+    const { driver } = stubDriver({
+      pages: [page("A")],
+      probe: { responses: { A: { responsive: false, beaconTs: null } } },
+    });
+    expect(await probeRendererActivity(driver, "chrome", "A")).toEqual({ responsive: false });
+  });
+
+  test("a driver whose probeRenderer rejects still degrades to unresponsive rather than throwing", async () => {
+    const { driver } = stubDriver({ pages: [page("A")], probe: { throws: true } });
+    expect(await probeRendererActivity(driver, "chrome", "A")).toEqual({ responsive: false });
+  });
+});
+
+describe("list_pages{probe:true} wiring", () => {
+  test("annotates a page-type entry with responsive:true when the probe answers", async () => {
+    const stub = stubDriver({ pages: [page("P1")], probe: { responses: { P1: { responsive: true, beaconTs: null } } } });
+    const res = await listPages(stub.driver, { probe: true });
+    const entry = res.pages.find((p) => p.id === "P1")!;
+    expect(entry.responsive).toBe(true);
+    expect("humanActiveMs" in entry).toBe(false);
+    expect(stub.probeCalls).toEqual(["P1"]);
+  });
+
+  test("a wedged tab reports responsive:false without failing the call", async () => {
+    const stub = stubDriver({ pages: [page("P2")], probe: { responses: { P2: { responsive: false, beaconTs: null } } } });
+    const res = await listPages(stub.driver, { probe: true });
+    const entry = res.pages.find((p) => p.id === "P2")!;
+    expect(entry.responsive).toBe(false);
+  });
+
+  test("a responsive probe with human-attributed data surfaces humanActiveMs on the entry", async () => {
+    const stub = stubDriver({
+      pages: [page("P3")],
+      probe: { responses: { P3: { responsive: true, beaconTs: Date.now() - 4_000 } } },
+    });
+    const res = await listPages(stub.driver, { probe: true });
+    const entry = res.pages.find((p) => p.id === "P3")!;
+    expect(entry.responsive).toBe(true);
+    expect(entry.humanActiveMs).toBeGreaterThanOrEqual(4_000);
+  });
+
+  test("without probe:true, no responsive field is added even on a driver that supports it", async () => {
+    const stub = stubDriver({ pages: [page("P4")], probe: { responses: { P4: { responsive: true, beaconTs: null } } } });
+    const res = await listPages(stub.driver, {});
+    const entry = res.pages.find((p) => p.id === "P4")!;
+    expect("responsive" in entry).toBe(false);
+    expect(stub.probeCalls).toEqual([]);
+  });
+
+  test("on a driver with no probe support, probe:true adds nothing and never throws", async () => {
+    const stub = stubDriver({ pages: [page("P5")] });
+    const res = await listPages(stub.driver, { probe: true });
+    const entry = res.pages.find((p) => p.id === "P5")!;
+    expect("responsive" in entry).toBe(false);
+  });
+});
+
 /* --------------------------- the keep-alive session registry --------------------------- */
 
 describe("BeaconSessions", () => {
@@ -571,5 +686,26 @@ describe("the manifest describes the new fields", () => {
       expect(props).not.toContain("humanActiveMs");
       expect(props).not.toContain("contention");
     }
+  });
+
+  test("list_pages documents the split reap horizon, the lease field, and probe", () => {
+    const d = spec("list_pages").description;
+    expect(d).toContain("CDP_REAP_GRACE_MS");
+    expect(d).toContain("'lease'");
+    expect(d).toContain("idleMs");
+    expect(d).toContain("expiresAt");
+    expect(d).toContain("'responsive'");
+  });
+
+  test("list_pages advertises 'probe' as an input, and it defaults to false", () => {
+    const props = spec("list_pages").inputSchema.properties as Record<string, { type?: string; description?: string }>;
+    expect(props.probe?.type).toBe("boolean");
+    expect(props.probe?.description).toContain("500ms");
+  });
+
+  test("list_leases documents the computed idleMs/expiresAt fields", () => {
+    const d = spec("list_leases").description;
+    expect(d).toContain("idleMs");
+    expect(d).toContain("expiresAt");
   });
 });

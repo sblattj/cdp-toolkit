@@ -265,6 +265,13 @@ export async function releasePage(
  * as data", see its staleReason) and answering this needs a live driver. Keeping
  * the annotation in the tool layer is what preserves that, and it is the same
  * split shared-tools.ts uses for ListedPage's provenance fields.
+ *
+ * `idleMs` and `expiresAt` need no driver at all — they are arithmetic on a
+ * record leases.ts already has in hand — but they live here for the same
+ * reason: this is the DISPLAY layer, and the rule "compute presentation
+ * fields where they are shown, not in the store that owns the data" should
+ * not have two different homes depending on whether a given field happens to
+ * need a browser.
  */
 export interface LeaseRow extends LeaseSummary {
   /** Ms since a human last touched this tab (src/activity.ts). ABSENT — never
@@ -272,6 +279,14 @@ export interface LeaseRow extends LeaseSummary {
    *  server's own, when the row belongs to the other backend, or when the read
    *  failed. A diagnosis tool must not fail because one page would not answer. */
   humanActiveMs?: number;
+  /** now - lastUsedAt, computed fresh on every call and never stored: storing
+   *  it would mean every row goes stale the instant it is written. ABSENT on
+   *  an `unreadable` row, whose lastUsedAt is a zeroed placeholder (see
+   *  LeaseSummary) that would otherwise print as "idle since the epoch". */
+  idleMs?: number;
+  /** lastUsedAt + ttlMs — the same value claim_page already returns under this
+   *  name. Same omission rule as idleMs. */
+  expiresAt?: number;
 }
 
 /**
@@ -307,15 +322,22 @@ export async function listLeasesTool(
   const now = Date.now();
   const leases: LeaseRow[] = [];
   for (const row of kept) {
+    // idleMs/expiresAt are pure arithmetic on the record itself, so they apply
+    // to BOTH backends and to leases on tabs that are not currently open — the
+    // browser has nothing to do with this computation. An unreadable row is
+    // the one exception: its lastUsedAt/ttlMs are zeroed placeholders (see
+    // LeaseSummary), and computing off zeros would print a meaningless number
+    // rather than the honest "we cannot say" an unreadable row already means.
+    const computed: LeaseRow = row.unreadable !== undefined ? row : { ...row, idleMs: now - row.lastUsedAt, expiresAt: row.lastUsedAt + row.ttlMs };
     // A row this driver cannot speak to at all: other backend, unreadable
     // record (its targetId came from a FILENAME, not from the browser), or a
     // tab that is simply not open any more.
     if (row.backend !== backend || row.unreadable !== undefined || !liveSet.has(row.targetId)) {
-      leases.push(row);
+      leases.push(computed);
       continue;
     }
     const humanMs = await readHumanActiveMs(driver, backend, row.targetId, now).catch(() => null);
-    leases.push(humanMs === null ? row : { ...row, humanActiveMs: humanMs });
+    leases.push(humanMs === null ? computed : { ...computed, humanActiveMs: humanMs });
   }
   return { leases, count: leases.length, ...(reaped.length ? { reaped } : {}) };
 }

@@ -339,6 +339,73 @@ export async function readHumanActiveMs(
   return humanActiveMs(beaconTs, lastDispatchAt(backend, targetId), now);
 }
 
+/* ------------------------------- the renderer ping ------------------------------- */
+
+/**
+ * How long list_pages{probe:true} waits for one target's renderer to answer
+ * before calling it unresponsive. Bounded so ONE wedged tab cannot stall the
+ * whole listing beyond its own budget; see BrowserDriver.probeRenderer.
+ */
+export const RENDERER_PROBE_TIMEOUT_MS = 500;
+
+/**
+ * Evaluated in-page by the bounded probe. The leading `1` is a liveness
+ * marker, not a beacon reading: it is what lets a caller distinguish "the
+ * renderer executed this and came back with genuinely no beacon data"
+ * (`[1, null]`) from a probe that never got a value back at all, which the
+ * driver reports as a rejection — see probeRenderer — rather than as this
+ * expression evaluating to something falsy. `window.X ?? null` is safe on a
+ * document with no beacon: property access through `window` never throws for
+ * an unset global, unlike a bare identifier reference.
+ */
+export const RENDERER_PROBE_EXPRESSION = `[1, window.${BEACON_DATA_GLOBAL} ?? null]`;
+
+/**
+ * Whether this backend can answer the renderer ping at all.
+ *
+ * Same rule as beaconSupported and the same reason: not a `Capability`,
+ * because no whole TOOL is gated here, only an additive field on list_pages
+ * that works fine (simply absent) without it.
+ */
+export function rendererProbeSupported(driver: BrowserDriver): boolean {
+  return typeof driver.probeRenderer === "function";
+}
+
+export interface RendererProbeResult {
+  responsive: boolean;
+  /** Same rule as everywhere else in this module: present only where the
+   *  same round trip found beacon data AND that data is human-attributed. */
+  humanActiveMs?: number;
+}
+
+/**
+ * Probe one target and fold the answer through the SAME discrimination rule as
+ * every other beacon read (isHumanAttributed via humanActiveMs, keyed by this
+ * process's own dispatch log), so probe:true can never disagree with
+ * claim_page or list_leases about what counts as human.
+ *
+ * NEVER THROWS. driver.probeRenderer is documented to never reject, but this
+ * defends anyway (matching readHumanActiveMs's own defensive `.catch`) rather
+ * than trust every implementer to honor that. A driver with no probeRenderer
+ * at all degrades to `{responsive:false}` with no humanActiveMs — the same
+ * shape as a backend that answered and found nothing, which is deliberate:
+ * the caller that needs to tell "cannot answer" from "answered, no data" is
+ * list_pages itself, via rendererProbeSupported, not this function.
+ */
+export async function probeRendererActivity(
+  driver: BrowserDriver,
+  backend: LeaseBackend,
+  targetId: string,
+  now: number = Date.now(),
+): Promise<RendererProbeResult> {
+  if (typeof driver.probeRenderer !== "function") return { responsive: false };
+  const { responsive, beaconTs } = await driver
+    .probeRenderer(targetId, RENDERER_PROBE_TIMEOUT_MS)
+    .catch(() => ({ responsive: false, beaconTs: null as number | null }));
+  const ms = humanActiveMs(beaconTs, lastDispatchAt(backend, targetId), now);
+  return ms === null ? { responsive } : { responsive, humanActiveMs: ms };
+}
+
 /* ------------------------- keep-alive session bookkeeping ------------------------- */
 
 /**
