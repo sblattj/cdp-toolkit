@@ -117,7 +117,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "navigate_page",
-    "description": "Navigate a target page to a URL (Page.navigate) OR reload it (reload:true) over raw CDP, then wait for the load milestone with a bounded timeout so a wedged renderer can't hang. Returns {url,frameId,waitedFor} (plus reloaded:true on a reload); waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'), and there is no auto-snapshot of the new page. Pass reload:true with ignoreCache:true for a hard reload that refetches every subresource (e.g. to pick up a freshly-deployed, non-content-hashed bundle the HTTP cache would serve stale).",
+    "description": "Navigate a target page to a URL (Page.navigate), reload it (reload:true), OR go back/forward in its session history (history:'back'|'forward'), then wait for the load milestone with a bounded timeout so a wedged renderer can't hang. Exactly one of url / reload / history per call. Returns {url,frameId,waitedFor} (plus reloaded:true on a reload, traversed:'back'|'forward' on a history move); waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'), and there is no auto-snapshot of the new page. Pass reload:true with ignoreCache:true for a hard reload that refetches every subresource (e.g. to pick up a freshly-deployed, non-content-hashed bundle the HTTP cache would serve stale).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -136,6 +136,14 @@ export const MANIFEST: ToolSpec[] = [
         "reload": {
           "type": "boolean",
           "description": "Reload the current page (Page.reload) instead of navigating to url. Default false."
+        },
+        "history": {
+          "type": "string",
+          "enum": [
+            "back",
+            "forward"
+          ],
+          "description": "Traverse this tab's session history instead of loading a url: 'back' and 'forward' are the browser's Back and Forward buttons. Mutually exclusive with 'url' and 'reload' — passing two of the three is refused by name rather than resolved by precedence. Works on BOTH backends (Chrome: Page.getNavigationHistory + Page.navigateToHistoryEntry; Firefox: browsingContext.traverseHistory) and waits for the same load milestone as an ordinary navigation. Going back from the first entry, or forward from the last, is an ERROR naming the direction — never a silent success that navigated nowhere. The result carries traversed:'back'|'forward' alongside the resulting url."
         },
         "ignoreCache": {
           "type": "boolean",
@@ -644,6 +652,67 @@ export const MANIFEST: ToolSpec[] = [
         "x",
         "y"
       ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wait_for_download",
+    "description": "Wait for a file download to finish and return it as a real file on disk: {path,suggestedFilename,bytes,url,target}. The file is written under the artifact dir's downloads/ folder and renamed from Chrome's internal guid to the page's own filename, collision-suffixed (report.csv, report-1.csv, ...). ORDERING RULE, and it is not optional: download capture must be ARMED BEFORE the click that starts the download — call wait_for_download{arm:true} first (it arms and returns immediately, reporting {armed:true,downloadPath,pending}), then click, then call wait_for_download to collect the finished file. This is Chrome's behavior, not a preference: the download-behavior override is per-connection state that Chrome REVERTS the moment the arming client disconnects, and an unarmed headless Chrome denies the download outright, so a download triggered before anything armed is lost with no file anywhere. SIDE EFFECT, browser-global: arming redirects EVERY download in this browser (all tabs, all origins) into the toolkit's downloads directory for as long as this server runs, and downloads no longer land in the user's normal Downloads folder. Because the arm lives on a connection this server process holds open, this is an MCP-server capability: under the one-shot CLI the connection dies with the process and nothing is captured. Chrome-only (capability 'browser.downloads'): absent from tools/list under the Firefox backend, never present-and-throwing, because WebDriver BiDi has no command to redirect a download to a chosen directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. A download is browser-scoped, so this names the tab for the lease check and for the echoed target, not which download is returned."
+        },
+        "arm": {
+          "type": "boolean",
+          "description": "Arm download capture and return immediately instead of waiting: {armed:true,downloadPath,pending}. Call this BEFORE the click that triggers the download. 'pending' counts downloads that already completed and have not been collected yet, so an arm call doubles as a peek."
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "How long to wait for a download to complete, in milliseconds. Default 30000. Ignored with arm:true. A download that already completed and was not yet collected is returned immediately, so this only bounds the wait for a download still in flight."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "grant_permissions",
+    "description": "Grant browser permissions for an origin up front, so a page asking for geolocation / notifications / clipboard gets an answer instead of showing a prompt no agent can click. 'permissions' takes CDP PermissionType values ('geolocation', 'notifications', 'clipboardReadWrite', 'camera', 'microphone', 'midi', ...); an unknown name is refused by Chrome with the bad value in the message. Returns {granted,origin,target}, or {reset:true,target} for a reset-only call. Grants are keyed by ORIGIN, not by tab: every tab on that origin is affected, including ones opened later. reset:true clears this server's previous grants first (or instead, when no permissions are given) — note CDP's reset is not origin-scoped, so it clears them for every origin at once. The grant lives on a connection this server process holds open and Chrome DISCARDS IT when that connection closes, so this is an MCP-server capability: under the one-shot CLI the grant dies with the process. Chrome-only (capability 'browser.permissions'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. Used for the lease check and, when 'origin' is omitted, as the source of the origin to grant for."
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CDP PermissionType values to grant, e.g. ['geolocation'] or ['clipboardReadWrite','clipboardSanitizedWrite']. Required unless reset:true. An empty array is refused rather than treated as a successful no-op."
+        },
+        "origin": {
+          "type": "string",
+          "description": "Origin the grant applies to, e.g. 'https://example.com'. Defaults to the target tab's own origin. Required explicitly when that tab has no grantable origin (data:, blob:, about:blank all serialize to the opaque origin 'null'), which is refused with a message naming the tab's url."
+        },
+        "reset": {
+          "type": "boolean",
+          "description": "Clear this server's previous permission grants (Browser.resetPermissions). With 'permissions' it resets FIRST and then grants, so the result is exactly the listed permissions; on its own it is a reset-only call answering {reset:true}. Not scoped to 'origin': CDP resets every origin at once."
+        }
+      },
+      "required": [],
       "additionalProperties": false
     }
   },

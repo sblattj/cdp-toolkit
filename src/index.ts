@@ -43,6 +43,9 @@ import { lighthouseAudit } from "./tools/lighthouse.ts";
 import { mockRequest, listMocks, clearMocks } from "./tools/network_mock.ts";
 // --- raw mouse dispatch (Input.dispatchMouseEvent, one event per call) : chrome-only, capability "input.raw" ---
 import { dispatchMouse } from "./tools/dispatch-mouse.ts";
+// --- downloads + permissions (browser-endpoint state on a standing connection) : chrome-only, 1.8.0 Track P3 ---
+import { waitForDownload } from "./tools/downloads.ts";
+import { grantPermissions } from "./tools/permissions.ts";
 
 /** A toolkit tool: a single typed-args function returning JSON-serializable data. */
 export type ToolFn = (args: never) => Promise<unknown>;
@@ -73,8 +76,12 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * addition (1.8.0 Track P1: `scroll`, a wheel-event dispatch at an anchor
  * point sharing click/hover's element-locator and lease-gate contract; and
  * `dispatch_mouse`, the raw move/down/up mouse-event primitive composable
- * into anything a physical mouse can do, chrome-only per capability "input.raw").
- * 29 + 1 + 3 + 3 + 3 + 2 + 2 = 43 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * into anything a physical mouse can do, chrome-only per capability "input.raw"), plus a 2-tool
+ * browser-state addition (1.8.0 Track P3: `wait_for_download`, which captures a file download to a
+ * named path, and `grant_permissions`, which answers permission prompts for an origin; both
+ * chrome-only and both driven from a standing browser-endpoint connection, see
+ * tools/browser-session.ts).
+ * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 = 45 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -138,6 +145,12 @@ export const TOOLS = {
   clear_mocks: clearMocks,
   // raw mouse dispatch (1) : 1.8.0 Track P1 toolkit addition, chrome-only (capability "input.raw")
   dispatch_mouse: dispatchMouse,
+  // downloads + permissions (2) : 1.8.0 Track P3 toolkit additions, chrome-only (capabilities
+  // "browser.downloads" / "browser.permissions"). Both drive browser-endpoint state that Chrome
+  // reverts when the issuing client disconnects, so both run on tools/browser-session.ts's standing
+  // connection rather than a per-call socket : see that module's header for the measurements.
+  wait_for_download: waitForDownload,
+  grant_permissions: grantPermissions,
   // tab leases (3) : opt-in ownership so many agents can share one browser
   claim_page: onCdp(LEASE_TOOLS.claim_page),
   release_page: onCdp(LEASE_TOOLS.release_page),
