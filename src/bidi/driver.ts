@@ -33,6 +33,7 @@ import {
   type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
+import { resolveLiveLabel } from "../origins.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
@@ -383,6 +384,23 @@ async function pickContext(
     const needle = selector.slice(6);
     for (const c of contexts) if ((await safeTitle(conn, c.context)).includes(needle)) return c;
     throw driverError("no-such-target", `no context with title containing '${needle}'`);
+  }
+  if (selector.startsWith("label:")) {
+    const label = selector.slice(6);
+    const { matchIds, knownLabels } = await resolveLiveLabel("firefox", label, contexts.map((c) => c.context));
+    if (matchIds.length > 1) {
+      throw driverError("no-such-target", `label 'label:${label}' matches more than one live target: ${matchIds.join(", ")}. Resolve by target id instead.`);
+    }
+    if (matchIds.length === 1) {
+      const hit = contexts.find((c) => c.context === matchIds[0]);
+      if (hit) return hit;
+    }
+    throw driverError(
+      "no-such-target",
+      knownLabels.length
+        ? `no live target with label '${label}' (labels currently in use: ${knownLabels.join(", ")})`
+        : `no live target with label '${label}' (no labels are currently assigned to any open target)`,
+    );
   }
   const exact = contexts.find((c) => c.context === selector);
   if (exact) return exact;

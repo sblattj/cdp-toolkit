@@ -32,7 +32,7 @@
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserDriver, PageInfo } from "./driver.ts";
-import { defaultLabel, leaseDir, type LeaseBackend } from "./leases.ts";
+import { defaultLabel, leaseDir, listLeases, type LeaseBackend } from "./leases.ts";
 
 /** What list_pages can say about where a tab came from. There is deliberately
  *  no "human": see the file header. */
@@ -263,4 +263,44 @@ export async function newTrackedPage(
   const page = await driver.newPage(opts.url);
   await recordOrigin(backend, page.id, { label: opts.label });
   return page;
+}
+
+/** What "label:<name>" resolution found, common to all three selector-grammar
+ *  copies (shared-tools.ts's pickPage, client.ts's pickTarget, bidi/driver.ts's
+ *  pickContext): 0, 1 or >1 live targetIds carrying the queried label, plus
+ *  every label actually in use, for a miss error that teaches something. */
+export interface LabelResolution {
+  matchIds: string[];
+  /** Deduped, sorted. Empty when no live target has any recorded label. */
+  knownLabels: string[];
+}
+
+/**
+ * The shared core of "label:<name>" resolution: exact match against BOTH the
+ * origin ledger (agent-created tabs) and live lease records (covers a
+ * taken-over tab claimed with a label, which has no origin record — see
+ * leases-tools.ts's claimPage), scoped to `liveIds` so a label whose tab is
+ * gone neither matches nor pollutes the miss list.
+ *
+ * PURE OVER ITS INPUTS BEYOND THE TWO READS: no reap, no write, no lease gate.
+ * Each of the three callers formats its own error in its own idiom
+ * (SharedToolError, CdpError, DriverError), so this returns data, never
+ * throws — a caller decides what "matches.length !== 1" means to it.
+ */
+export async function resolveLiveLabel(backend: LeaseBackend, label: string, liveIds: readonly string[]): Promise<LabelResolution> {
+  const live = new Set(liveIds);
+  const [origins, leases] = await Promise.all([originIndex(backend), listLeases({ liveBackend: backend })]);
+  const knownLabels = new Set<string>();
+  const matchIds = new Set<string>();
+  for (const rec of origins.values()) {
+    if (rec.unreadable !== undefined || !live.has(rec.targetId)) continue;
+    knownLabels.add(rec.label);
+    if (rec.label === label) matchIds.add(rec.targetId);
+  }
+  for (const rec of leases) {
+    if (rec.backend !== backend || rec.unreadable !== undefined || !live.has(rec.targetId)) continue;
+    knownLabels.add(rec.label);
+    if (rec.label === label) matchIds.add(rec.targetId);
+  }
+  return { matchIds: [...matchIds], knownLabels: [...knownLabels].sort() };
 }

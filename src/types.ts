@@ -41,6 +41,16 @@ export interface CdpEvent<P = Record<string, unknown>> {
  *   - "index:N"              -> Nth page-type target (0-based)
  *   - "url:<substring>"      -> first page whose url contains substring
  *   - "title:<substring>"    -> first page whose title contains substring
+ *   - "label:<name>"         -> the page-type target whose label EXACTLY
+ *     matches `name`, checked against both the origin ledger (agent-created
+ *     tabs, see src/origins.ts) and live lease records (covers a taken-over
+ *     tab claimed with a label, which has no origin record — see
+ *     src/leases-tools.ts's claimPage). The resolved id must be present in
+ *     the listing this call is resolving against; a label whose tab is gone
+ *     falls through to the normal no-match error. A miss enumerates the
+ *     labels that DO exist; two live targets sharing a label is an ambiguity
+ *     error naming both ids, never a silent first-match. See pickPage in
+ *     src/shared-tools.ts.
  */
 export type TargetSelector = string | undefined;
 

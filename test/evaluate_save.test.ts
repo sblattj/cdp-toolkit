@@ -170,6 +170,11 @@ describe("errors keep their current behavior", () => {
     await expect(evaluateScript(driver, { expression: "" })).rejects.toThrow("non-empty string");
   });
 
+  test("a missing expression, with no alias key present, keeps the unchanged plain error", async () => {
+    const { driver } = stubDriver("x");
+    await expect(evaluateScript(driver, { other: "irrelevant" } as never)).rejects.toThrow("evaluateScript: 'expression' must be a non-empty string");
+  });
+
   test("the page is released on both the save path and the error path", async () => {
     const ok = stubDriver("v");
     await evaluateScript(ok.driver, { expression: "1", savePath: join(dir, "released.json") });
@@ -178,5 +183,37 @@ describe("errors keep their current behavior", () => {
     const bad = stubDriver(undefined, { throws: new Error("boom") });
     await expect(evaluateScript(bad.driver, { expression: "1", savePath: join(dir, "no.json") })).rejects.toThrow("boom");
     expect(bad.releases()).toBe(1);
+  });
+});
+
+describe("evaluate_script key-echo: a wrong-key call names the key it should have used", () => {
+  const ALIASES = ["function", "code", "js", "script", "fn", "body"] as const;
+
+  for (const alias of ALIASES) {
+    test(`'${alias}' instead of 'expression' is named in the error`, async () => {
+      const { driver } = stubDriver("unreached");
+      await expect(evaluateScript(driver, { [alias]: "() => 1" } as never)).rejects.toThrow(
+        new RegExp(`you passed '${alias}'; the key is 'expression'`),
+      );
+    });
+  }
+
+  test("the message teaches where function literals go", async () => {
+    const { driver } = stubDriver("unreached");
+    await expect(evaluateScript(driver, { function: "() => 1" } as never)).rejects.toThrow(
+      "function literals go in 'expression', invoked with 'args'",
+    );
+  });
+
+  test("an alias key alongside a genuinely empty expression still triggers the echo, not the plain error", async () => {
+    const { driver } = stubDriver("unreached");
+    await expect(evaluateScript(driver, { expression: "", code: "1+1" } as never)).rejects.toThrow(/you passed 'code'/);
+  });
+
+  test("a present, non-empty expression is used even when an alias key also happens to be set", async () => {
+    const { driver } = stubDriver(42);
+    // The alias key is noise once 'expression' is valid: it must never surface
+    // in the result or change resolution.
+    expect(await evaluateScript(driver, { expression: "6*7", code: "ignored" } as never)).toBe(42);
   });
 });

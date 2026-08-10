@@ -48,7 +48,7 @@ Backend selection: --browser chrome|firefox, else the CDP_BROWSER env var, else 
 zero behavior change for existing users). Firefox is LAUNCHED per invocation (it cannot be attached
 to), used for exactly one tool call, then disposed before the process exits.
 
-Target selector grammar: active | index:N | url:<substr> | title:<substr> | <targetId>
+Target selector grammar: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>
 Leases: pass --lease <token> to act on a tab another agent claimed with claim_page (MCP only).
 Run list_leases to see who holds what; release_page --lease <token> gives a lease back.
 Run with --list to print every tool name available under the selected backend.

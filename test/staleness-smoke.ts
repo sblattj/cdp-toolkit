@@ -238,6 +238,7 @@ interface ClaimResult {
   lease: string;
   targetId: string;
   opened: boolean;
+  label?: string;
   humanActiveMs?: number | null;
   contention?: string;
 }
@@ -570,6 +571,29 @@ try {
     bareEntry !== undefined && !("lease" in bareEntry),
     `entry=${JSON.stringify(bareEntry)}`,
   );
+
+  /* ==================== W2 (1.9.0): label: selector round-trip ==================== */
+  // claim_page{label} on a FRESH tab records the label in the origin ledger
+  // (opened:true), unlike the takeover proof in section 5 above which is
+  // lease-only. evaluate_script{target:"label:<name>"} has to resolve that
+  // ledger-backed label through pickPage and drive the SAME tab, over the real
+  // MCP tool surface, not a direct pickPage call.
+  const labelClaim = (await TOOLS.claim_page({ url: `${ORIGIN}/9`, label: "w2-proof" })) as ClaimResult;
+  openedTabs.push(labelClaim.targetId);
+  record(
+    "claim_page{label:'w2-proof'} opens a fresh tab under that label",
+    labelClaim.opened === true && labelClaim.label === "w2-proof",
+    `targetId=${labelClaim.targetId}, label=${labelClaim.label}`,
+  );
+  const labelDriven = await withLeaseScope(labelClaim.lease, () =>
+    TOOLS.evaluate_script({ target: "label:w2-proof", expression: "'label-selector-works'" }),
+  );
+  record(
+    "evaluate_script{target:'label:w2-proof'} resolves the SAME tab and evaluates in it",
+    labelDriven === "label-selector-works",
+    `=> ${JSON.stringify(labelDriven)}`,
+  );
+  await TOOLS.release_page({ lease: labelClaim.lease, close: false }).catch(() => undefined);
 
   /* --- S2.3 a wedged renderer reports responsive:false without stalling the call --- */
   const wedgeTab = await TOOLS.new_page({ url: `${ORIGIN}/8` }) as { targetId: string };
