@@ -1,12 +1,20 @@
 /**
- * Live end-to-end smoke test for 1.8.0 Track P1: scroll, dispatch_mouse, and click's
- * modifiers/clickCount:3 upgrade. (P2/P3 seats extend this same file with their own scenarios.)
+ * Live end-to-end smoke test for 1.8.0 Track P: P1 (scroll, dispatch_mouse, click's
+ * modifiers/clickCount:3) and P2 (drag's mode:"html5", steps, to:{x,y}, by:{dx,dy}).
+ * (The P3 seat extends this same file with its own scenarios.)
  *
  * SAFETY: this launches its OWN isolated headless Chrome — never the owner's live browser on
- * port 9222. Scratch port 9511, a throwaway --user-data-dir, and a throwaway CDP_ARTIFACT_DIR are
+ * port 9222. A scratch port, a throwaway --user-data-dir, and a throwaway CDP_ARTIFACT_DIR are
  * all created fresh under a private temp dir and torn down in `finally`. Every page this script
  * touches is one it created itself via data: URLs; nothing pre-existing is read, clicked, or
  * closed. Run with `bun run input:smoke`.
+ *
+ * ON THE PORT. The 1.8.0 spec assigns each Track P seat its own scratch port (9511/9512/9513 for
+ * P1/P2/P3) so concurrent seats cannot collide. One RUN of this file can only use one of them:
+ * CDP_BASE is captured into a module-level const inside src/client.ts at import time, so a second
+ * browser on a second port would be unreachable from the same process. The port is therefore
+ * overridable (CDP_SMOKE_PORT) and defaults to the current seat's assignment — P1 was verified on
+ * 9511, P2 (and this default) on 9512.
  *
  * CDP_BASE is read into a module-level const inside src/client.ts, so it (and CDP_ARTIFACT_DIR)
  * must be set in the environment BEFORE src/index.ts is ever imported — hence the dynamic import
@@ -17,7 +25,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const PORT = 9511;
+const PORT = Number(process.env.CDP_SMOKE_PORT ?? 9512);
 const CHROME_BIN =
   process.env.CDP_SMOKE_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -179,6 +187,195 @@ try {
     expression: "window.getSelection().toString().length",
   })) as number;
   record("click (clickCount:3 triple-click selects the paragraph)", selectionLength > 0, `selection length=${selectionLength}`);
+
+  /* ============================= Track P2: drag ============================= */
+
+  /**
+   * Bounded read-back poll. P1's scroll finding generalises: a CDP input dispatch is acked when
+   * the event has been handed to the renderer, not when whatever it triggered has finished, so a
+   * DOM read immediately after can observe the pre-event state. Polling to a deadline is honest
+   * for BOTH directions — it returns as soon as the expectation holds, and for a NEGATIVE check
+   * (mouse mode must NOT fire a drop) it burns the whole window before concluding "never
+   * happened", which is exactly the evidence that claim needs. A blind sleep would be a guess in
+   * both cases.
+   */
+  async function readUntil<T>(expression: string, ok: (v: T) => boolean, timeoutMs: number): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    let last = (await TOOLS.evaluate_script({ target: targetId, expression })) as T;
+    while (!ok(last) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      last = (await TOOLS.evaluate_script({ target: targetId, expression })) as T;
+    }
+    return last;
+  }
+
+  /**
+   * The HTML5 drop zone, written EXACTLY the way the HTML spec says to write one: a
+   * draggable="true" source that stocks the dataTransfer in dragstart, and a zone that marks
+   * itself a valid drop target by calling preventDefault inside `dragover` (MDN's canonical
+   * pattern) — nothing else. No mousedown/mouseup/mousemove handler anywhere, so nothing here can
+   * respond to a pointer gesture that is not a real drag; and no preventDefault in dragenter,
+   * because a page that only does it in dragover is the normal case, not a corner case.
+   *
+   * That last detail is the whole test. Chrome 151 DOES start a real drag from synthetic mouse
+   * events, so mouse mode is not inert the way the folklore says — but which drag events the page
+   * receives follows the interpolated pointer path, and at the default steps:2 this page gets
+   * ZERO dragover events, so the drop is refused. html5 mode dispatches dragEnter/dragOver/drop
+   * explicitly at the destination and always lands. (Measured, both ways, below. steps:1 and
+   * steps:8 happen to produce a dragover on this geometry and DO drop under mouse mode — which is
+   * exactly why "it worked once" is not evidence and mode:"html5" is the deterministic answer.)
+   */
+  const DND_PAGE =
+    "data:text/html,<title>dnd</title><style>html,body{margin:0}</style>" +
+    "<div id='src' draggable='true' style='position:absolute;left:20px;top:20px;width:120px;height:60px;background:orange'>DRAG ME</div>" +
+    "<div id='zone' style='position:absolute;left:320px;top:200px;width:200px;height:120px;background:lightgray'>EMPTY</div>" +
+    "<script>" +
+    "window.__dnd = {dragstart:0, dragover:0, drop:0, payload:null};" +
+    "var src = document.getElementById('src'), zone = document.getElementById('zone');" +
+    "src.addEventListener('dragstart', function(e){ window.__dnd.dragstart++; e.dataTransfer.setData('text/plain','PARCEL-42'); });" +
+    "zone.addEventListener('dragover', function(e){ e.preventDefault(); window.__dnd.dragover++; });" +
+    "zone.addEventListener('drop', function(e){ e.preventDefault(); window.__dnd.drop++;" +
+    "  window.__dnd.payload = e.dataTransfer.getData('text/plain'); zone.textContent = 'DROPPED:' + window.__dnd.payload; });" +
+    "</script>";
+  const resetDnd = () =>
+    TOOLS.evaluate_script({ target: targetId, expression: "window.__dnd = {dragstart:0, dragover:0, drop:0, payload:null}" });
+  await TOOLS.navigate_page({ target: targetId, url: DND_PAGE });
+
+  // (a1) The negative half of the proof: mode:"mouse" does NOT get the drop accepted.
+  await TOOLS.drag({ target: targetId, from: { selector: "#src" }, to: { selector: "#zone" } });
+  const afterMouseDrag = await readUntil<{ dragstart: number; dragover: number; drop: number }>(
+    "window.__dnd", (v) => v.drop > 0, 750,
+  );
+  const zoneAfterMouse = (await TOOLS.evaluate_script({ target: targetId, expression: "document.getElementById('zone').textContent" })) as string;
+  record(
+    "drag mode:'mouse' does NOT get an HTML5 drop accepted (the gap html5 mode closes)",
+    afterMouseDrag.drop === 0 && zoneAfterMouse === "EMPTY",
+    `after a full mouse drag polled for 750ms: dragstart=${afterMouseDrag.dragstart} dragover=${afterMouseDrag.dragover} drop=${afterMouseDrag.drop}, zone.textContent=${JSON.stringify(zoneAfterMouse)} (the drag DID start; with no dragover the zone never became a valid drop target)`,
+  );
+
+  // (a2) The positive half: the same drag with mode:"html5" must really drop, with the payload.
+  await resetDnd();
+  const html5Result = (await TOOLS.drag({
+    target: targetId, from: { selector: "#src" }, to: { selector: "#zone" }, mode: "html5",
+  })) as { dragged: true; mode: string; steps: number; from: { x: number; y: number }; to: { x: number; y: number } };
+  const afterHtml5 = await readUntil<{ dragstart: number; dragover: number; drop: number; payload: string | null }>(
+    "window.__dnd", (v) => v.drop > 0, 3000,
+  );
+  const zoneText = (await TOOLS.evaluate_script({ target: targetId, expression: "document.getElementById('zone').textContent" })) as string;
+  record(
+    "drag mode:'html5' fires real dragstart/dragover/drop and carries the dataTransfer payload",
+    afterHtml5.dragstart >= 1 && afterHtml5.dragover >= 1 && afterHtml5.drop === 1 && afterHtml5.payload === "PARCEL-42" && zoneText === "DROPPED:PARCEL-42",
+    `dnd=${JSON.stringify(afterHtml5)}, zone.textContent=${JSON.stringify(zoneText)}, result mode=${html5Result.mode} steps=${html5Result.steps} from=(${html5Result.from.x},${html5Result.from.y}) to=(${html5Result.to.x},${html5Result.to.y})`,
+  );
+
+  // (a3) A non-draggable source must fail with the actionable error, not hang or claim success —
+  // and the tab must stay usable afterwards (the finally that disables drag interception).
+  let html5Error = "";
+  try {
+    await TOOLS.drag({ target: targetId, from: { selector: "#zone" }, to: { selector: "#src" }, mode: "html5" });
+  } catch (err) {
+    html5Error = err instanceof Error ? err.message : String(err);
+  }
+  record(
+    "drag mode:'html5' on a non-draggable source fails with an actionable error",
+    /never started a drag/.test(html5Error) && /draggable/.test(html5Error),
+    `error=${JSON.stringify(html5Error)}`,
+  );
+
+  await resetDnd();
+  await TOOLS.drag({ target: targetId, from: { selector: "#src" }, to: { selector: "#zone" }, mode: "html5" });
+  const afterRecovery = await readUntil<{ drop: number }>("window.__dnd", (v) => v.drop > 0, 3000);
+  record(
+    "drag mode:'html5' still works after a failed html5 drag (interception is not left wedged)",
+    afterRecovery.drop === 1,
+    `second html5 drag after the failure: drop=${afterRecovery.drop}`,
+  );
+
+  // (a5) html5 mode is INDEPENDENT of the pointer path: the dragEnter/dragOver/drop triple is
+  // dispatched at the destination whatever `steps` is. Mouse mode is not — steps:2 refuses the
+  // drop on this page while steps:8 lands it, which is the coin flip html5 mode removes.
+  await resetDnd();
+  await TOOLS.drag({ target: targetId, from: { selector: "#src" }, to: { selector: "#zone" }, mode: "html5", steps: 1 });
+  const html5Steps1 = await readUntil<{ dragover: number; drop: number }>("window.__dnd", (v) => v.drop > 0, 3000);
+  await resetDnd();
+  await TOOLS.drag({ target: targetId, from: { selector: "#src" }, to: { selector: "#zone" }, steps: 8 });
+  const mouseSteps8 = await readUntil<{ dragover: number; drop: number }>("window.__dnd", (v) => v.drop > 0, 3000);
+  record(
+    "drag mode:'html5' drops regardless of steps, while mouse mode's outcome swings with the pointer path",
+    html5Steps1.drop === 1 && mouseSteps8.drop === 1 && afterMouseDrag.drop === 0,
+    `html5 steps:1 -> dragover=${html5Steps1.dragover} drop=${html5Steps1.drop}; mouse steps:8 -> dragover=${mouseSteps8.dragover} drop=${mouseSteps8.drop}; mouse steps:2 (default) -> drop=${afterMouseDrag.drop}`,
+  );
+
+  // (b) by:{dx,dy} and to:{x,y} against an absolutely-positioned pointer-event handle. Exact
+  // pixel assertions: the handle tracks the pointer with a fixed grab offset, so a dx/dy offset
+  // drag must land it exactly dx/dy from where it started.
+  const HANDLE_PAGE =
+    "data:text/html,<title>handle</title><style>html,body{margin:0}</style>" +
+    "<div id='handle' style='position:absolute;left:60px;top:80px;width:40px;height:40px;background:teal'></div>" +
+    "<script>" +
+    "var h = document.getElementById('handle'), dragging = false, ox = 0, oy = 0;" +
+    "h.addEventListener('mousedown', function(e){ dragging = true; ox = e.clientX - h.offsetLeft; oy = e.clientY - h.offsetTop; });" +
+    "document.addEventListener('mousemove', function(e){ if (!dragging) return; h.style.left = (e.clientX - ox) + 'px'; h.style.top = (e.clientY - oy) + 'px'; });" +
+    "document.addEventListener('mouseup', function(){ dragging = false; });" +
+    "</script>";
+  await TOOLS.navigate_page({ target: targetId, url: HANDLE_PAGE });
+
+  const posExpr = "({left: document.getElementById('handle').offsetLeft, top: document.getElementById('handle').offsetTop})";
+  const posBefore = (await TOOLS.evaluate_script({ target: targetId, expression: posExpr })) as { left: number; top: number };
+  await TOOLS.drag({ target: targetId, from: { selector: "#handle" }, by: { dx: 120, dy: 60 } });
+  const posAfterBy = await readUntil<{ left: number; top: number }>(posExpr, (v) => v.left === posBefore.left + 120, 2000);
+  record(
+    "drag by:{dx,dy} moves the handle exactly that offset",
+    posAfterBy.left === posBefore.left + 120 && posAfterBy.top === posBefore.top + 60,
+    `handle (${posBefore.left},${posBefore.top}) -> (${posAfterBy.left},${posAfterBy.top}), expected (${posBefore.left + 120},${posBefore.top + 60})`,
+  );
+
+  // to:{x,y}: drop the handle's CENTER on an absolute viewport point, so its top-left lands at
+  // (x - 20, y - 20) for the 40x40 box.
+  await TOOLS.drag({ target: targetId, from: { selector: "#handle" }, to: { x: 400, y: 300 } });
+  const posAfterXY = await readUntil<{ left: number; top: number }>(posExpr, (v) => v.left === 380, 2000);
+  record(
+    "drag to:{x,y} drops the handle at an absolute viewport point",
+    posAfterXY.left === 380 && posAfterXY.top === 280,
+    `handle -> (${posAfterXY.left},${posAfterXY.top}), expected (380,280) for a 40x40 box centered on (400,300)`,
+  );
+
+  let byAndToThrew = false;
+  try {
+    await TOOLS.drag({ target: targetId, from: { selector: "#handle" }, to: { x: 1, y: 1 }, by: { dx: 1 } });
+  } catch {
+    byAndToThrew = true;
+  }
+  record("drag with both 'to' and 'by' throws", byAndToThrew, "to+by rejected as expected");
+
+  // (c) steps: more interpolated moves must reach the page as more mousemove events.
+  const MOVES_PAGE =
+    "data:text/html,<title>moves</title><style>html,body{margin:0}</style>" +
+    "<div id='a' style='position:absolute;left:10px;top:10px;width:30px;height:30px;background:orange'></div>" +
+    "<div id='b' style='position:absolute;left:420px;top:320px;width:30px;height:30px;background:purple'></div>" +
+    "<script>window.__moves = 0; document.addEventListener('mousemove', function(){ window.__moves++; });</script>";
+  await TOOLS.navigate_page({ target: targetId, url: MOVES_PAGE });
+
+  await TOOLS.evaluate_script({ target: targetId, expression: "window.__moves = 0" });
+  await TOOLS.drag({ target: targetId, from: { selector: "#a" }, to: { selector: "#b" } });
+  const movesDefault = await readUntil<number>("window.__moves", (v) => v > 0, 2000);
+
+  await TOOLS.evaluate_script({ target: targetId, expression: "window.__moves = 0" });
+  const steps8 = (await TOOLS.drag({ target: targetId, from: { selector: "#b" }, to: { selector: "#a" }, steps: 8 })) as { steps: number };
+  const movesSteps8 = await readUntil<number>("window.__moves", (v) => v > movesDefault, 2000);
+  record(
+    "drag steps:8 dispatches more intermediate mousemove events than the default",
+    movesSteps8 > movesDefault && steps8.steps === 8,
+    `default(steps:2) fired ${movesDefault} mousemove events, steps:8 fired ${movesSteps8} (result.steps=${steps8.steps})`,
+  );
+
+  let badStepsThrew = false;
+  try {
+    await TOOLS.drag({ target: targetId, from: { selector: "#a" }, to: { selector: "#b" }, steps: 0 });
+  } catch {
+    badStepsThrew = true;
+  }
+  record("drag steps:0 throws", badStepsThrew, "steps:0 rejected as expected");
 } catch (err) {
   record("FATAL", false, err instanceof Error ? (err.stack ?? err.message) : String(err));
 } finally {

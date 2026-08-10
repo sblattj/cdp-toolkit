@@ -24,8 +24,9 @@
  */
 import type { TargetSelector } from "../types.ts";
 import {
-  UID_STAMP_ATTR, isDriverError,
+  UID_STAMP_ATTR, isDriverError, interpolatePoints,
   type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  type DragDestination, type DragOptions,
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
@@ -529,16 +530,35 @@ class BidiPageDriver implements PageDriver {
     if ("x" in anchor) return anchor;
     return this.centerOf(await resolveElementLocator(this.conn, this.contextId, anchor));
   }
-  async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+  // 1.8.0 Track P2. mode:"html5" is REFUSED here, never silently downgraded to mouse mode: WebDriver
+  // BiDi has no drag-interception primitive at all (no setInterceptDrags equivalent, no drag event
+  // to subscribe to, no dispatchDragEvent), so there is nothing to port. The param-level refusal
+  // mirrors click's modifiers-on-Firefox above — `drag` itself stays in tools/list because mouse
+  // mode is fully supported here. `to` accepting a point or an offset, and `steps`, are both
+  // backend-neutral and DO work on this driver.
+  async drag(from: ElementLocator, to: DragDestination, opts?: DragOptions): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+    if (opts?.mode === "html5") {
+      throw driverError(
+        "unsupported",
+        "drag: mode:'html5' is not supported by the Firefox/BiDi driver (WebDriver BiDi has no drag-interception primitive); " +
+          "omit 'mode' for the synthetic-mouse drag, or use --browser chrome for real HTML5 drag events.",
+      );
+    }
     const fromPt = await this.centerOf(await resolveElementLocator(this.conn, this.contextId, from));
-    const toPt = await this.centerOf(await resolveElementLocator(this.conn, this.contextId, to));
+    const toPt = await this.resolveDragDestination(to, fromPt);
+    const steps = Math.max(1, Math.trunc(opts?.steps ?? 2));
     const actions: InputPointerSourceAction[] = [
       { type: "pointerMove", x: fromPt.x, y: fromPt.y, duration: 0 }, { type: "pointerDown", button: 0 },
-      { type: "pointerMove", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, duration: 50 },
-      { type: "pointerMove", x: toPt.x, y: toPt.y, duration: 50 }, { type: "pointerUp", button: 0 },
     ];
+    for (const pt of interpolatePoints(fromPt, toPt, steps)) actions.push({ type: "pointerMove", x: pt.x, y: pt.y, duration: 50 });
+    actions.push({ type: "pointerUp", button: 0 });
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions }]);
     return { from: fromPt, to: toPt };
+  }
+  private async resolveDragDestination(to: DragDestination, fromPt: { x: number; y: number }): Promise<{ x: number; y: number }> {
+    if ("dx" in to) return { x: fromPt.x + to.dx, y: fromPt.y + to.dy };
+    if ("x" in to) return to;
+    return this.centerOf(await resolveElementLocator(this.conn, this.contextId, to));
   }
   // No atomic value-commit primitive over BiDi (established fact): every key goes through
   // input.performActions, batched into ONE call regardless of string length, so setValue/typeText
