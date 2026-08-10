@@ -8,18 +8,89 @@
 import type { BrowserDriver, PageInfo } from "../../src/driver.ts";
 
 /**
- * Minimal BrowserDriver stand-in: only the five members the three tools under
- * test touch. `hidden` models targets that appear ONLY in the `all:true`
- * listing (a worker, an iframe), which is the one resolvePage branch whose hit
- * is not a member of the page list.
+ * How the stub answers the two OPTIONAL activity-beacon members of
+ * BrowserDriver (src/activity.ts).
+ *
+ * PRESENCE OF THIS OPTION IS ITSELF THE FIXTURE. The members are optional on
+ * the real interface, and callers branch on whether they exist (beaconSupported)
+ * to decide between an absent field and a null one. So a stub built WITHOUT
+ * `beacon` must not have them at all — that is the Firefox-shaped case — and one
+ * built with it declares support even when it has no timestamps to report,
+ * which is the "beacon installed, nobody has touched the tab" case.
  */
-export function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean } = {}) {
+export interface StubBeacon {
+  /** targetId -> the timestamp readActivityBeacon reports. Absent id => null. */
+  reads?: Record<string, number | null>;
+  /** Make readActivityBeacon reject, to prove a read failure degrades to a
+   *  missing field rather than failing the whole call. */
+  readThrows?: boolean;
+  /** Make installActivityBeacon reject, likewise. */
+  installThrows?: boolean;
+}
+
+/**
+ * How the stub answers the OPTIONAL probeRenderer member of BrowserDriver
+ * (src/activity.ts's renderer ping). Same presence-is-the-fixture rule as
+ * StubBeacon: a stub built WITHOUT `probe` has no probeRenderer at all, the
+ * Firefox-shaped (and pre-1.8.0 Chrome) case.
+ */
+export interface StubProbe {
+  /** targetId -> the {responsive,beaconTs} probeRenderer reports. Absent id
+   *  => {responsive:false, beaconTs:null}, the wedged/unreachable case. */
+  responses?: Record<string, { responsive: boolean; beaconTs: number | null }>;
+  /** Make probeRenderer reject. The real driver is documented never to do
+   *  this; the flag exists to prove the ACTIVITY layer degrades rather than
+   *  trusting every implementer, same rationale as StubBeacon.readThrows. */
+  throws?: boolean;
+}
+
+/**
+ * Minimal BrowserDriver stand-in: only the five members the three tools under
+ * test touch, plus the two optional beacon members when `beacon` is given.
+ * `hidden` models targets that appear ONLY in the `all:true` listing (a worker,
+ * an iframe), which is the one resolvePage branch whose hit is not a member of
+ * the page list.
+ */
+export function stubDriver(
+  opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean; beacon?: StubBeacon; probe?: StubProbe } = {},
+) {
   const pages: PageInfo[] = [...(opts.pages ?? [])];
   const hidden: PageInfo[] = [...(opts.hidden ?? [])];
   const closed: string[] = [];
   const activated: string[] = [];
+  /** Every target installActivityBeacon was called for, in call order. */
+  const beaconInstalls: string[] = [];
+  /** Every target readActivityBeacon was called for, in call order. */
+  const beaconReads: string[] = [];
+  /** Every target probeRenderer was called for, in call order. */
+  const probeCalls: string[] = [];
   let created = 0;
+  const beaconMembers = opts.beacon
+    ? {
+        async installActivityBeacon(id: string): Promise<boolean> {
+          beaconInstalls.push(id);
+          if (opts.beacon?.installThrows) throw new Error("stub: install failed");
+          return true;
+        },
+        async readActivityBeacon(id: string): Promise<number | null> {
+          beaconReads.push(id);
+          if (opts.beacon?.readThrows) throw new Error("stub: read failed");
+          return opts.beacon?.reads?.[id] ?? null;
+        },
+      }
+    : {};
+  const probeMembers = opts.probe
+    ? {
+        async probeRenderer(id: string, _timeoutMs?: number): Promise<{ responsive: boolean; beaconTs: number | null }> {
+          probeCalls.push(id);
+          if (opts.probe?.throws) throw new Error("stub: probe failed");
+          return opts.probe?.responses?.[id] ?? { responsive: false, beaconTs: null };
+        },
+      }
+    : {};
   const driver = {
+    ...beaconMembers,
+    ...probeMembers,
     scheme: opts.scheme ?? "cdp",
     async listPages(o?: { all?: boolean }): Promise<PageInfo[]> {
       return o?.all ? [...pages, ...hidden] : [...pages];
@@ -44,7 +115,7 @@ export function stubDriver(opts: { scheme?: string; pages?: PageInfo[]; hidden?:
       return [...pages, ...hidden].find((p) => p.id === id) ?? { id, url: "", title: "" };
     },
   };
-  return { driver: driver as unknown as BrowserDriver, closed, activated, pages };
+  return { driver: driver as unknown as BrowserDriver, closed, activated, pages, beaconInstalls, beaconReads, probeCalls };
 }
 
 export const page = (id: string, url = `https://example.test/${id}`): PageInfo => ({ id, url, title: id, type: "page" });

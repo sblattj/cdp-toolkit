@@ -32,6 +32,7 @@ import {
   type ScreenshotOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
+import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
@@ -301,6 +302,22 @@ async function getConnection(port: number, timeoutMs?: number): Promise<BidiConn
   return conn;
 }
 
+/**
+ * Contexts that already carry a beacon preload script, keyed port:context ->
+ * the script id BiDi handed back.
+ *
+ * WHY FIREFOX NEEDS NO HELD CONNECTION where Chrome does. This driver's
+ * LifetimeModel is "session": ONE BidiConnection is memoized per port above and
+ * lives until dispose(), so a preload script registered on it stays registered
+ * across navigations for free. Chrome's equivalent registration is cleared when
+ * the registering client disconnects, and this toolkit's CDP lifetime is
+ * "per-call", which is why cdp/driver.ts has to hold a socket per beaconed tab
+ * and this file does not. The map exists only to avoid stacking a second
+ * registration on a context that already has one; the in-page script is
+ * idempotent, so a duplicate would be harmless but pointless.
+ */
+const bidiBeaconScripts = new Map<string, string>();
+
 /* ----------------------------------- context/page lookup ----------------------------------- */
 async function safeTitle(conn: BidiConnection, contextId: BrowsingContextId): Promise<string> {
   try {
@@ -454,7 +471,20 @@ class BidiPageDriver implements PageDriver {
     if (!nodes.length) throw driverError("stale-uid", `uid does not resolve: ${uid}`);
   }
 
+  /**
+   * THE INPUT DISPATCH CHOKE POINT for Firefox, and the direct counterpart of
+   * cdp/driver.ts's dispatchInput. Every synthesized input this driver produces
+   * is already funnelled through this one method (hover, click, drag, setValue,
+   * typeText, pressKey all build actions and call it), so the dispatch-log write
+   * that keeps the toolkit's own input from reading as a human's needs exactly
+   * one line, here. See ../activity.ts.
+   *
+   * NOT routed through here: input.setFiles (upload_file). Same reasoning as the
+   * CDP side — it fires none of the beacon's events, so logging it could only
+   * suppress a real human input, never prevent a false one.
+   */
   private async performActions(actions: InputSourceActions[]): Promise<void> {
+    recordDispatch("firefox", this.contextId);
     try {
       await this.conn.send("input.performActions", { context: this.contextId, actions });
     } catch (e) {
@@ -921,7 +951,72 @@ class BidiBrowserDriver implements BrowserDriver {
     const info = await pageInfoOf(conn, ctx);
     return new BidiPageDriver(conn, ctx.context, info, this);
   }
+
+  /**
+   * Install the activity beacon (../activity.ts) into a context and every
+   * document it navigates to afterwards.
+   *
+   * Both legs matter: script.addPreloadScript arms every FUTURE document (and
+   * survives navigation for free here, see bidiBeaconScripts above), while the
+   * script.evaluate arms the document already loaded, which a preload script
+   * never retroactively reaches.
+   *
+   * DELIBERATELY GATE-FREE (no resolveContext), like its CDP twin and for the
+   * same reason: the claim_page{target} path reads and installs around a claim
+   * that the lease gate would otherwise take on its own behalf. Returning false
+   * rather than throwing is the contract — installBeacon's caller treats this as
+   * an annotation that must never fail real work.
+   */
+  async installActivityBeacon(contextId: string): Promise<boolean> {
+    const conn = await getConnection(this.port, this.timeoutMs).catch(() => undefined);
+    if (!conn) return false;
+    try {
+      const key = `${this.port}:${contextId}`;
+      if (!bidiBeaconScripts.has(key)) {
+        const registered = await conn.send("script.addPreloadScript", {
+          functionDeclaration: BEACON_FUNCTION_DECLARATION,
+          contexts: [contextId],
+        });
+        bidiBeaconScripts.set(key, registered.script);
+      }
+      await conn.send("script.evaluate", {
+        expression: BEACON_SOURCE,
+        target: { context: contextId },
+        awaitPromise: false,
+      });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** Read the beacon timestamp for a context, or null when it has none. Gate-free;
+   *  see the declaration in ../driver.ts for why that is required here. */
+  async readActivityBeacon(contextId: string): Promise<number | null> {
+    const conn = await getConnection(this.port, this.timeoutMs).catch(() => undefined);
+    if (!conn) return null;
+    try {
+      const res = await conn.send("script.evaluate", {
+        expression: BEACON_READ_EXPRESSION,
+        target: { context: contextId },
+        awaitPromise: false,
+      });
+      if (res.type !== "success") return null;
+      const value = deserializeRemote(res.result);
+      return typeof value === "number" && Number.isFinite(value) ? value : null;
+    } catch {
+      return null;
+    } finally {
+      conn.release();
+    }
+  }
+
   async dispose(): Promise<void> {
+    for (const key of [...bidiBeaconScripts.keys()]) {
+      if (key.startsWith(`${this.port}:`)) bidiBeaconScripts.delete(key);
+    }
     const conn = connections.get(this.port);
     if (!conn) return;
     connections.delete(this.port);

@@ -414,6 +414,54 @@ export interface BrowserDriver {
   /** Acquire a page handle. The caller MUST release() it. Prefer withDriver. */
   page(selector: TargetSelector): Promise<PageDriver>;
 
+  /**
+   * Install the activity beacon into a target and, where the backend can, into
+   * every document it navigates to afterwards. Resolves true when the beacon is
+   * in place. See src/activity.ts.
+   *
+   * OPTIONAL, per ADR-001's "absent rather than present-and-throwing" rule, but
+   * NOT a `Capability`: that union gates whole tools out of tools/list, and no
+   * tool is gated here. The beacon is an additive FIELD on claim_page and
+   * list_leases, both of which work unchanged without it, so the honest
+   * expression of a backend that cannot do this is an absent method producing an
+   * absent field — not a missing tool and not a throw.
+   */
+  installActivityBeacon?(targetId: string): Promise<boolean>;
+
+  /**
+   * Read the beacon's timestamp for a target, or null when the target has no
+   * beacon. WITHOUT THE LEASE GATE, which is required rather than convenient:
+   * claim_page{target} must read this BEFORE claiming, and under
+   * CDP_REQUIRE_LEASE a gated read would auto-acquire the lease and then collide
+   * with the explicit claim behind it (the same reason pickPage is gate-free;
+   * see leases-tools.ts's header).
+   *
+   * This is not a general gate bypass and must never become one: it returns one
+   * number and takes no expression, so it cannot be made to read or change
+   * anything else about the page.
+   */
+  readActivityBeacon?(targetId: string): Promise<number | null>;
+
+  /**
+   * Bounded liveness probe behind list_pages{probe:true}: run ONE Runtime.evaluate
+   * (or backend equivalent) capped at `timeoutMs`, and report whether it
+   * answered in time plus whatever the activity beacon said in that same round
+   * trip. See src/activity.ts's RENDERER_PROBE_EXPRESSION for exactly what is
+   * evaluated and why.
+   *
+   * MUST NEVER REJECT. A timeout, a thrown page-side exception, a dead
+   * connection, or a target that no longer exists are all
+   * `{responsive:false, beaconTs:null}` — indistinguishable from each other and
+   * from a genuinely wedged renderer, which is the honest answer: none of them
+   * let the caller drive that tab any faster than this call already told it.
+   *
+   * OPTIONAL and NOT a `Capability`, for the same reason installActivityBeacon
+   * and readActivityBeacon are not: no whole tool is gated, only an additive
+   * field on list_pages, so the honest expression of a backend that cannot do
+   * this is an absent method producing an absent field.
+   */
+  probeRenderer?(targetId: string, timeoutMs?: number): Promise<{ responsive: boolean; beaconTs: number | null }>;
+
   /** Tear down the transport: process exit (CLI) or shutdown (MCP server).
    *  Idempotent. MUST NOT be called by a tool. */
   dispose(): Promise<void>;

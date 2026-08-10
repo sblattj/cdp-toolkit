@@ -5,9 +5,10 @@
  * one connection via openPage and holds it for the PageDriver's life; release() closes it. Uid
  * codec (scheme "cdp"): `cdp:<backendDOMNodeId>`, or a bare legacy numeric uid, per THE UID CODEC block in ../driver.ts.
  */
-import { type CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
+import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { LeaseConflictError } from "../leases.ts";
+import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, recordDispatch } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
@@ -90,11 +91,22 @@ async function focusElement(conn: CdpConnection, objectId: string): Promise<void
 }
 // Copied verbatim (behaviorally) from src/tools/input.ts `setValue`. CRITICAL: must stay
 // byte-identical to input.ts; see the side-by-side quote in the driver report.
-async function setValueOnObject(conn: CdpConnection, objectId: string, value: string): Promise<void> {
+//
+// `sendInput` is the ONE addition, and it changes no command, no parameter and no ordering:
+// the Input.* leg is routed through the caller's input choke point instead of the raw
+// connection, so this function's dispatch is logged like every other (see ../activity.ts).
+// It is a parameter rather than a `conn.send` here because the choke point is per-PAGE
+// (it knows the target id) and this helper only has a connection.
+async function setValueOnObject(
+  conn: CdpConnection,
+  objectId: string,
+  value: string,
+  sendInput: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+): Promise<void> {
   await focusElement(conn, objectId);
   const fn = "function(){if('value'in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}else if(this.isContentEditable){this.textContent='';}}";
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true });
-  if (value.length) await conn.send("Input.insertText", { text: value });
+  if (value.length) await sendInput("Input.insertText", { text: value });
 }
 interface KeySpec { key: string; code: string; keyCode: number; text?: string }
 // Copied verbatim from src/tools/input.ts `NAMED_KEYS`.
@@ -286,6 +298,34 @@ class CdpPageDriver implements PageDriver {
     this.enabledDomains.add(name);
     await this.conn.send(`${name}.enable`);
   }
+  /**
+   * THE INPUT DISPATCH CHOKE POINT for Chrome. Every synthesized-input command
+   * this driver sends goes through here, and nothing else does.
+   *
+   * WHY IT IS A WRAPPER AND NOT A CALL AT THE TOP OF EACH METHOD. The
+   * bookkeeping (../activity.ts's dispatch log) is what keeps the toolkit's own
+   * clicks from reading as a human's, and a version of it that each new input
+   * method had to REMEMBER to call would be silently wrong for the first tool
+   * whose author did not know it existed — and the whole point of the log is
+   * that it is complete. Wrapping the send makes the coupling structural: an
+   * `Input.*` command cannot be sent from this class without being logged,
+   * because `this.conn.send` is not what sends it.
+   *
+   * IF YOU ARE ADDING AN INPUT TOOL (scroll, dispatch_mouse, a drag mode, ...):
+   * send through `this.dispatchInput(...)`, never `this.conn.send(...)`. That is
+   * the entire integration.
+   *
+   * Deliberately NOT routed through here: DOM.setFileInputFiles (upload_file).
+   * It attaches files to an input element and fires the page's change handler;
+   * it synthesizes none of the beacon's events (pointerdown/mousedown/keydown/
+   * wheel/touchstart), so logging it could only suppress a genuine human input
+   * that happened to land within the attribution window, never prevent a false
+   * one.
+   */
+  private async dispatchInput<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    recordDispatch("chrome", this.info.id);
+    return this.conn.send<T>(method, params);
+  }
   /** Same as ensureDomain but tolerates the enable call itself failing (matches a legacy
    *  `.catch(() => undefined)` site); a failed enable is NOT re-attempted on the next call. */
   private async ensureDomainSoft(name: string): Promise<void> {
@@ -404,7 +444,7 @@ class CdpPageDriver implements PageDriver {
   async hover(loc: ElementLocator): Promise<{ x: number; y: number }> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
     const { x, y } = await centerOf(this.conn, objectId);
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     return { x, y };
   }
   // Copied dispatch sequence verbatim from src/tools/input.ts `click` (its resolve+centerOf+mouseMoved prefix IS hover, reused here).
@@ -412,8 +452,8 @@ class CdpPageDriver implements PageDriver {
     const button = opts?.button ?? "left";
     const clickCount = opts?.clickCount ?? 1;
     const { x, y } = await this.hover(loc);
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount });
     return { x, y };
   }
   // Copied dispatch sequence verbatim from src/tools/input.ts `drag` (its "from" prefix IS hover, reused here).
@@ -421,20 +461,20 @@ class CdpPageDriver implements PageDriver {
     const fromPt = await this.hover(from);
     const { objectId: dstId } = await resolveElementLocator(this.conn, to);
     const toPt = await centerOf(this.conn, dstId);
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, button: "left" });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: toPt.x, y: toPt.y, button: "left" });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, button: "left" });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: toPt.x, y: toPt.y, button: "left" });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
     return { from: fromPt, to: toPt };
   }
   async setValue(loc: ElementLocator, value: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
-    await setValueOnObject(this.conn, objectId, value);
+    await setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params));
   }
   async typeText(loc: ElementLocator, text: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
     await focusElement(this.conn, objectId);
-    if (text.length) await this.conn.send("Input.insertText", { text });
+    if (text.length) await this.dispatchInput("Input.insertText", { text });
   }
   // Copied dispatch logic verbatim from src/tools/input.ts `pressKey`.
   async pressKey(press: KeyPress): Promise<void> {
@@ -448,8 +488,8 @@ class CdpPageDriver implements PageDriver {
     const suppressText = (modBits & ~(MODIFIER_BITS.shift as number)) !== 0;
     const down: Record<string, unknown> = { type: "keyDown", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits };
     if (spec.text && !suppressText) down.text = spec.text;
-    await this.conn.send("Input.dispatchKeyEvent", down);
-    await this.conn.send("Input.dispatchKeyEvent", { type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits });
+    await this.dispatchInput("Input.dispatchKeyEvent", down);
+    await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits });
   }
   async setFiles(loc: ElementLocator, files: readonly string[]): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
@@ -698,6 +738,75 @@ class CdpPageDriver implements PageDriver {
     this.conn.close();
   }
 }
+/* ------------------------------- activity beacon ------------------------------- */
+
+/**
+ * The held connections that keep each beaconed tab's init script armed.
+ *
+ * MODULE SCOPE, matching recorder.ts / network_mock.ts, which hold long-lived
+ * page connections the same way and for the same reason: the state belongs to
+ * the PROCESS, not to a driver instance, and index.ts constructs exactly one
+ * driver anyway. Under the CLI (one process per invocation) these die with the
+ * process, which degrades the beacon to current-document-only — correct, since
+ * a CLI process cannot hold anything across calls by construction.
+ */
+const beaconSessions = new BeaconSessions<CdpConnection>((conn) => conn.close());
+
+/** The page endpoint for a target id, or undefined if the browser no longer has it. */
+async function targetWsUrl(targetId: string): Promise<string | undefined> {
+  const hit = (await listTargets()).find((t) => t.id === targetId);
+  return hit?.webSocketDebuggerUrl;
+}
+
+/**
+ * Read the beacon over an existing connection.
+ *
+ * THREE-VALUED ON PURPOSE, because the caller has to tell two failures apart:
+ * `null` is "the connection worked and the page has no beacon", `undefined` is
+ * "this connection is dead". Collapsing them would make a socket that died with
+ * its tab look exactly like a live tab nobody has touched, and the held session
+ * would never be dropped or retried.
+ */
+async function readBeaconOver(conn: CdpConnection): Promise<number | null | undefined> {
+  try {
+    const res = await conn.send<{ result: { value?: unknown } }>("Runtime.evaluate", {
+      expression: BEACON_READ_EXPRESSION,
+      returnByValue: true,
+    });
+    const value = res.result?.value;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Evaluate the renderer probe over an existing connection, bounded to
+ * `timeoutMs`.
+ *
+ * NOT three-valued like readBeaconOver: a probe's whole job is "did it answer
+ * in time", so a dead socket and a genuinely wedged renderer both collapse to
+ * the same {responsive:false} — that IS the correct answer for both, since the
+ * caller cannot drive either tab any faster than this already told it.
+ */
+async function probeOver(conn: CdpConnection, timeoutMs: number): Promise<{ responsive: boolean; beaconTs: number | null }> {
+  try {
+    const res = await conn.send<{ result: { value?: unknown } }>(
+      "Runtime.evaluate",
+      { expression: RENDERER_PROBE_EXPRESSION, returnByValue: true },
+      { timeoutMs },
+    );
+    const value = res.result?.value;
+    if (Array.isArray(value) && value[0] === 1) {
+      const ts = value[1];
+      return { responsive: true, beaconTs: typeof ts === "number" && Number.isFinite(ts) ? ts : null };
+    }
+    return { responsive: false, beaconTs: null };
+  } catch {
+    return { responsive: false, beaconTs: null };
+  }
+}
+
 /* --------------------------------- BrowserDriver --------------------------------- */
 // Runs fn on a throwaway browser-endpoint connection, always closing it.
 async function withBrowserConn<T>(fn: (conn: CdpConnection) => Promise<T>): Promise<T> {
@@ -763,6 +872,10 @@ class CdpBrowserDriver implements BrowserDriver {
   async closePage(id: string): Promise<{ success: boolean }> {
     return withBrowserConn(async (conn) => {
       const res = await conn.send<{ success?: boolean }>("Target.closeTarget", { targetId: id });
+      // Opportunistic, not load-bearing: the beacon socket dies with the tab
+      // anyway, and readBeaconOver's dead-connection branch would drop it on the
+      // next read. Dropping it here just avoids holding a corpse until then.
+      if (res.success !== false) beaconSessions.drop(id);
       return { success: res.success ?? true };
     });
   }
@@ -780,7 +893,118 @@ class CdpBrowserDriver implements BrowserDriver {
     // the PageDriver method that actually needs it, matching each legacy tool's own timing.
     return new CdpPageDriver(conn, target, this);
   }
-  async dispose(): Promise<void> {}
+
+  /**
+   * Install the activity beacon, and HOLD the connection that keeps it armed.
+   *
+   * The held socket is the whole mechanism, not an optimization. Chrome clears
+   * Page.addScriptToEvaluateOnNewDocument registrations when the client that
+   * made them disconnects (verified against Chrome 151.0.7922.109: install,
+   * disconnect, reconnect, navigate, and the script does not run). This driver's
+   * lifetime is "per-call", so without a held connection the beacon would cover
+   * the current document and vanish on the person's next navigation — the
+   * single most common thing they do. See BeaconSessions in ../activity.ts for
+   * the bound on how many are held and what is lost when one is evicted.
+   *
+   * Both legs are needed and neither is redundant:
+   * addScriptToEvaluateOnNewDocument arms every FUTURE document, and the
+   * Runtime.evaluate arms the one already loaded, which the former never
+   * retroactively touches. The script itself is idempotent, so re-installing
+   * into a document that already has it adds no second set of listeners.
+   */
+  async installActivityBeacon(targetId: string): Promise<boolean> {
+    const held = beaconSessions.get(targetId);
+    if (held) {
+      const rearmed = await held
+        .send("Runtime.evaluate", { expression: BEACON_SOURCE, returnByValue: true })
+        .then(() => true)
+        .catch(() => false);
+      if (rearmed) return true;
+      // The socket is gone (tab closed, browser restarted): fall through and
+      // build a fresh one rather than reporting a beacon that is not there.
+      beaconSessions.drop(targetId);
+    }
+    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
+    if (!wsUrl) return false;
+    const conn = await new CdpConnection(wsUrl).connect().catch(() => undefined);
+    if (!conn) return false;
+    try {
+      await conn.send("Page.enable");
+      await conn.send("Page.addScriptToEvaluateOnNewDocument", { source: BEACON_SOURCE });
+      await conn.send("Runtime.evaluate", { expression: BEACON_SOURCE, returnByValue: true });
+    } catch {
+      conn.close();
+      return false;
+    }
+    beaconSessions.set(targetId, conn);
+    return true;
+  }
+
+  /**
+   * Read the beacon, gate-free (see the declaration in ../driver.ts for why that
+   * is required rather than convenient).
+   *
+   * Prefers the held session, which costs no new socket, and falls back to a
+   * throwaway connection so a tab whose beacon session was EVICTED — or one
+   * beaconed by a previous server process and never re-claimed by this one —
+   * still answers. That fallback is what makes the read work at all under the
+   * CLI, which holds nothing.
+   */
+  async readActivityBeacon(targetId: string): Promise<number | null> {
+    const held = beaconSessions.get(targetId);
+    if (held) {
+      const value = await readBeaconOver(held);
+      if (value !== undefined) return value;
+      beaconSessions.drop(targetId);
+    }
+    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
+    if (!wsUrl) return null;
+    const conn = await new CdpConnection(wsUrl).connect().catch(() => undefined);
+    if (!conn) return null;
+    try {
+      return (await readBeaconOver(conn)) ?? null;
+    } finally {
+      conn.close();
+    }
+  }
+
+  /**
+   * Bounded liveness probe, gate-free like readActivityBeacon (see ../driver.ts).
+   *
+   * PREFERS THE HELD BEACON SESSION when one exists — no new socket, and it is
+   * exactly the connection the beacon's init script is already registered on.
+   * Falls back to a FRESH, throwaway connection, itself capped at `timeoutMs`,
+   * for a tab this process never beaconed.
+   *
+   * Deliberately ONE attempt, never held-then-retry the way
+   * installActivityBeacon/readActivityBeacon are: those retry because losing a
+   * held socket is a correctness problem worth routing around, but a probe
+   * that failed already IS the answer this call exists to produce — retrying
+   * would let one wedged tab cost the listing two timeouts instead of one.
+   */
+  async probeRenderer(targetId: string, timeoutMs: number = RENDERER_PROBE_TIMEOUT_MS): Promise<{ responsive: boolean; beaconTs: number | null }> {
+    const held = beaconSessions.get(targetId);
+    if (held) return probeOver(held, timeoutMs);
+    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
+    if (!wsUrl) return { responsive: false, beaconTs: null };
+    const conn = new CdpConnection(wsUrl, { timeoutMs });
+    try {
+      await conn.connect();
+    } catch {
+      return { responsive: false, beaconTs: null };
+    }
+    try {
+      return await probeOver(conn, timeoutMs);
+    } finally {
+      conn.close();
+    }
+  }
+
+  /** Closes every held beacon connection. dispose() is the MCP server's shutdown
+   *  path and the CLI's exit path; a tool must never call it (see ../driver.ts). */
+  async dispose(): Promise<void> {
+    beaconSessions.clear();
+  }
 }
 /** Construct the CDP implementation of the frozen Driver contract. */
 export function createCdpDriver(): BrowserDriver { return new CdpBrowserDriver(); }
@@ -788,7 +1012,8 @@ export { CdpBrowserDriver, CdpPageDriver };
 /* ------------------------------------------------------------------------------
  * CDP methods/domains used: Target.createTarget/closeTarget/activateTarget; Page.enable/
  * navigate/reload/getFrameTree/loadEventFired/domContentEventFired/frameStoppedLoading/
- * captureScreenshot/getLayoutMetrics/javascriptDialogOpening/handleJavaScriptDialog;
+ * captureScreenshot/getLayoutMetrics/javascriptDialogOpening/handleJavaScriptDialog/
+ * addScriptToEvaluateOnNewDocument (the activity beacon, see ../activity.ts);
  * Runtime.enable/evaluate/callFunctionOn/consoleAPICalled; Accessibility.enable/getFullAXTree;
  * DOM.resolveNode (via resolveUid)/describeNode/performSearch/getSearchResults/
  * discardSearchResults/scrollIntoViewIfNeeded/getBoxModel/setFileInputFiles/getDocument;
