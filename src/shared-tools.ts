@@ -96,8 +96,17 @@ export async function resolvePage(driver: BrowserDriver, selector?: TargetSelect
  * every branch resolves against page-type targets only EXCEPT a bare-id lookup, which (like
  * legacy resolveTarget's `targets.find`) searches the FULL unfiltered listing, so passing an
  * exact non-page targetId (a worker, an iframe) still resolves.
+ *
+ * THE GATE-FREE HALF of resolvePage, and exported for the one caller that needs
+ * resolution WITHOUT authorization: claim_page{target}. Everything else must go
+ * through resolvePage. Claiming cannot run assertLeaseOk, because under
+ * CDP_REQUIRE_LEASE the gate AUTO-ACQUIRES a lease on an unleased tab, so a
+ * claim routed through it would take the tab twice — once implicitly with an
+ * auto lease, then again explicitly, and the second claim would collide with
+ * the first. Refusing a tab another process holds is still enforced, one layer
+ * down, by claimLease's own conflict check.
  */
-async function pickPage(driver: BrowserDriver, pages: PageInfo[], selector?: TargetSelector): Promise<PageInfo> {
+export async function pickPage(driver: BrowserDriver, pages: PageInfo[], selector?: TargetSelector): Promise<PageInfo> {
   if (selector === undefined || selector === "active") {
     if (!pages.length) throw new SharedToolError("no page targets open");
     return pages[0]!;

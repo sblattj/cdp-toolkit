@@ -6,7 +6,7 @@
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage, readOrigin } from "./origins.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
-import { resolvePage } from "./shared-tools.ts";
+import { pickPage, resolvePage } from "./shared-tools.ts";
 import type { TargetSelector } from "./types.ts";
 import {
   claimLease,
@@ -37,34 +37,87 @@ export interface ClaimPageResult {
   label: string;
   ttlMs: number;
   expiresAt: number;
+  /** true when this call CREATED the tab, false when it claimed one that was
+   *  already open. The same distinction the creation ledger records, surfaced
+   *  in the answer so a caller knows without a second lookup whether
+   *  release_page will close the tab. */
+  opened: boolean;
 }
 
 /**
- * Claim a tab. With no targetId, opens a fresh tab first (optionally at `url`)
- * and claims that, so "give me my own tab" is one call. With a targetId, claims
- * an already-open tab.
+ * Claim a tab, in one of two modes.
+ *
+ * OPEN: with neither `target` nor `targetId`, opens a fresh tab (optionally at
+ * `url`) and claims that, so "give me my own tab" is one call.
+ *
+ * TAKE OVER: with `target`, claims a tab that is ALREADY OPEN — the first-class
+ * path for "work in the tab I have open", which previously had none, because
+ * `targetId` demands an exact id a human never has to hand and no id at all
+ * meant a brand new tab. `target` takes the toolkit's whole selector grammar
+ * (active | index:N | url:<substr> | title:<substr> | <targetId>).
+ *
+ * `targetId` is unchanged and still accepted; `target` is the same thing with a
+ * grammar, so exactly one of the two may be given.
+ *
+ * WHY RESOLUTION IS GATE-FREE HERE. `target` resolves through pickPage, NOT
+ * resolvePage. resolvePage runs assertLeaseOk, which under CDP_REQUIRE_LEASE
+ * auto-acquires a lease on an unleased tab: routing a claim through it would
+ * claim the tab twice and collide with itself. The protection is not lost, only
+ * moved — claimLease below still refuses a tab a live process holds.
+ *
+ * TAKEOVER IS OF UNLEASED TABS ONLY. There is deliberately no force/steal
+ * option: a tab another live agent holds stays refused with the same conflict
+ * error as before. The tab this feature exists to take over is a human's, and a
+ * human's tab carries no lease.
+ *
+ * RESOLUTION NEVER CREATES A TAB. With `target` given, the open branch is
+ * unreachable: an unmatched selector is an error, never a silently substituted
+ * new tab, because "the tab I asked for is not there" and "here is an empty one
+ * instead" are answers a caller must be able to tell apart.
  */
 export async function claimPage(
   driver: BrowserDriver,
-  args: { targetId?: string; url?: string; label?: string; ttlMs?: number } = {},
+  args: { target?: TargetSelector; targetId?: string; url?: string; label?: string; ttlMs?: number } = {},
 ): Promise<ClaimPageResult> {
+  const hasTarget = typeof args.target === "string" && args.target.length > 0;
+  const hasTargetId = typeof args.targetId === "string" && args.targetId.length > 0;
+  if (hasTarget && hasTargetId) {
+    throw new LeaseToolError(
+      "claim_page takes at most one of 'target' (any selector: active | index:N | url:<substr> | title:<substr> | <targetId>) or 'targetId' (an exact target id, kept for back-compat). Pass 'target' alone to claim an open tab, or neither to open a fresh one.",
+    );
+  }
   const backend = backendOf(driver);
   const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
   const pages = await driver.listPages();
-  let targetId = args.targetId;
-  let url = args.url ?? "about:blank";
-  if (targetId === undefined || targetId === "") {
+  let targetId: string;
+  let url: string;
+  let opened: boolean;
+  if (hasTarget) {
+    // Gate-free on purpose: see the header. No tab is created on this path,
+    // including when nothing matches.
+    const hit = await pickPage(driver, pages, args.target).catch((err: unknown) => {
+      throw new LeaseToolError(
+        `claim_page: no open tab matches target '${args.target}' (${(err as Error).message}). No tab was opened: claim_page never creates one when 'target' is given.`,
+      );
+    });
+    targetId = hit.id;
+    url = hit.url;
+    opened = false;
+  } else if (hasTargetId) {
+    const existing = pages.find((p) => p.id === args.targetId);
+    if (!existing) throw new LeaseToolError(`claim_page: no page target with id '${args.targetId}'`);
+    targetId = existing.id;
+    url = existing.url;
+    opened = false;
+  } else {
     // Creation ledger, not the lease: this record survives release_page and
     // expiry, so the tab stays attributable to `label` after the lease is gone.
-    // Claiming an EXISTING tab (the else branch) records nothing, because this
-    // toolkit did not create it and provenance is not ownership.
+    // Claiming an EXISTING tab (the branches above) records nothing, because
+    // this toolkit did not create it and provenance is not ownership.
     const page = await newTrackedPage(driver, backend, { url: args.url, label });
     targetId = page.id;
     url = page.url;
-  } else {
-    const existing = pages.find((p) => p.id === targetId);
-    if (!existing) throw new LeaseToolError(`claim_page: no page target with id '${targetId}'`);
-    url = existing.url;
+    opened = true;
   }
   const liveIds = [...pages.map((p) => p.id), targetId];
   const { record, token } = await claimLease(backend, targetId, {
@@ -79,6 +132,7 @@ export async function claimPage(
     label: record.label,
     ttlMs: record.ttlMs,
     expiresAt: record.lastUsedAt + record.ttlMs,
+    opened,
   };
 }
 
