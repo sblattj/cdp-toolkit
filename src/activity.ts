@@ -354,11 +354,17 @@ export const RENDERER_PROBE_TIMEOUT_MS = 500;
  * renderer executed this and came back with genuinely no beacon data"
  * (`[1, null]`) from a probe that never got a value back at all, which the
  * driver reports as a rejection — see probeRenderer — rather than as this
- * expression evaluating to something falsy. `window.X ?? null` is safe on a
- * document with no beacon: property access through `window` never throws for
- * an unset global, unlike a bare identifier reference.
+ * expression evaluating to something falsy.
+ *
+ * The second element is BEACON_READ_EXPRESSION verbatim, not a re-derived
+ * `window.X ?? null` — composed, not duplicated, so list_pages{probe:true}
+ * and claim_page/list_leases's own beacon reads can never drift apart on what
+ * counts as a valid timestamp. That guard matters: `?? null` alone would let
+ * a non-number value some other script wrote into the beacon global (a
+ * string, an object — anything but null/undefined) pass straight through,
+ * where BEACON_READ_EXPRESSION's `typeof ... === "number"` check does not.
  */
-export const RENDERER_PROBE_EXPRESSION = `[1, window.${BEACON_DATA_GLOBAL} ?? null]`;
+export const RENDERER_PROBE_EXPRESSION = `[1, ${BEACON_READ_EXPRESSION}]`;
 
 /**
  * Whether this backend can answer the renderer ping at all.
