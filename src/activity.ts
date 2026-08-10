@@ -186,6 +186,50 @@ export function recordDispatch(backend: LeaseBackend, targetId: string, now: num
   }
 }
 
+/** The one thing `sendInput` needs from a CDP connection. Structural on purpose: this module is
+ *  backend-neutral and must not import chrome's CdpConnection, and tools/dispatch-mouse.ts must be
+ *  able to use it without depending on the Driver-abstraction layer (see that file's header). */
+export interface InputDispatchConnection {
+  send<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>;
+}
+
+/**
+ * `Input.*` commands that change a MODE and synthesize no event in the page. Recording one would
+ * write a dispatch timestamp with no input behind it, and a dispatch we did not actually make
+ * suppresses a real human input landing inside the attribution window — the under-warning
+ * direction, which is the one this module's comments consistently refuse to trade toward.
+ *
+ * A DENYLIST rather than an allowlist of the dispatching methods, deliberately: an `Input.*` command
+ * nobody thought to classify then defaults to being LOGGED, which over-warns. A missing allowlist
+ * entry would default the other way and silently reopen the exact hole the choke point closes.
+ */
+const NON_SYNTHESIZING_INPUT_METHODS = new Set(["Input.setInterceptDrags", "Input.setIgnoreInputEvents"]);
+
+/**
+ * THE ONLY PLACE AN `Input.*` COMMAND IS WRITTEN TO A CHROME CONNECTION.
+ *
+ * cdp/driver.ts's `dispatchInput` is the driver-side choke point and delegates here; the chrome-only
+ * raw tools that live OUTSIDE the Driver abstraction (tools/dispatch-mouse.ts) call this directly,
+ * because they have a connection and a target id but no PageDriver to route through. Both paths
+ * therefore log, and the post-merge invariant is mechanically checkable: a literal
+ * `conn.send("Input.` appears NOWHERE in src/ (this comment aside) — the only send of an `Input.*`
+ * command is the parameterised one below. Firefox's twin is bidi/driver.ts's performActions.
+ *
+ * Keeping the log complete is the whole point — a synthesized input this process forgets to record
+ * reads back as a HUMAN's, which is precisely the false contention warning the beacon exists to
+ * avoid. See recordDispatch's contract above.
+ */
+export async function sendInput<T = Record<string, unknown>>(
+  conn: InputDispatchConnection,
+  backend: LeaseBackend,
+  targetId: string,
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<T> {
+  if (!NON_SYNTHESIZING_INPUT_METHODS.has(method)) recordDispatch(backend, targetId);
+  return conn.send<T>(method, params);
+}
+
 /** When this process last dispatched input into a target, or undefined if never. */
 export function lastDispatchAt(backend: LeaseBackend, targetId: string): number | undefined {
   return dispatchLog.get(dispatchKey(backend, targetId));

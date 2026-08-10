@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>scrollable</title>
+    <style>
+      /* No smooth scrolling anywhere: a scroll-behavior:smooth would make every read-back a race
+         against an animation rather than a test of whether the wheel event landed. */
+      html, body, #box { scroll-behavior: auto; }
+      body { margin: 0; }
+      /* The page itself scrolls: 3000px of content in any realistic viewport. */
+      #tall { height: 3000px; width: 100%; background: linear-gradient(#fff, #ccc); }
+      /* An independently scrollable element, for the uid/selector-anchored scroll path. */
+      #box { position: fixed; top: 20px; left: 20px; width: 300px; height: 200px; overflow: scroll; background: #eef; border: 1px solid #333; }
+      #box-inner { width: 1200px; height: 2000px; background: linear-gradient(#eef, #99f); }
+    </style>
+  </head>
+  <body>
+    <div id="box"><div id="box-inner">inner</div></div>
+    <div id="tall">tall page content</div>
+    <script>
+      // Records that a wheel event actually reached the page, separately from whether anything
+      // scrolled as a result. The two are different claims: a wheel event that lands on an
+      // unscrollable target moves no scrollTop, so a failed scroll assertion alone cannot say
+      // whether the event never arrived or arrived and did nothing.
+      window.__wheelCount = 0;
+      window.addEventListener("wheel", function () { window.__wheelCount++; }, { capture: true, passive: true });
+    </script>
+  </body>
+</html>

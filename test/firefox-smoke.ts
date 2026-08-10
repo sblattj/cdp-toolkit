@@ -194,6 +194,55 @@ try {
     `browser.downloads=${p3Caps.downloads} browser.permissions=${p3Caps.permissions}`,
   );
 
+  // --- 7d. scroll actually scrolls on Firefox (1.8.0 Track P1) ---
+  // CLOSING A REAL VERIFICATION GAP, not adding coverage for its own sake. `scroll` is registered as
+  // a UNIVERSAL tool — present in tools/list on both backends — on the strength of a BiDi wheel
+  // implementation that shipped live-unverified, under the belief that no Firefox was available.
+  // One is (this file has launched its own since 1.6.0), so "it typechecks" was the only evidence
+  // behind a tool this backend advertises as working. That is exactly the claim ADR-001 says must
+  // be true rather than plausible: a capability that is PRESENT must work.
+  //
+  // The BiDi path is genuinely different code from Chrome's, not a thin alias: input.performActions
+  // with a "wheel" source, which takes its own origin/coordinate model, so a Chrome pass says
+  // nothing about it.
+  const scrollPage = await driver.page(undefined);
+  await scrollPage.navigate({ url: `${BASE_URL}/scrollable.html` });
+  const beforeScrollY = Number(await scrollPage.evaluate("window.scrollY"));
+  await scrollPage.scroll(undefined, { deltaY: 400 });
+  const afterScrollY = Number(await scrollPage.evaluate("window.scrollY"));
+  const wheelCount = Number(await scrollPage.evaluate("window.__wheelCount"));
+  record(
+    "scroll with no anchor scrolls the Firefox viewport (BiDi wheel action)",
+    beforeScrollY === 0 && afterScrollY > 0,
+    `window.scrollY ${beforeScrollY} -> ${afterScrollY} after deltaY:400`,
+  );
+  record(
+    // The diagnostic half. If the assertion above ever fails, this says whether the wheel event
+    // never reached the page at all or reached it and moved nothing — two different bugs in two
+    // different places, and a bare "scrollY did not change" cannot tell them apart.
+    "and the page observed a real wheel event, not just a changed scroll offset",
+    wheelCount > 0,
+    `window.__wheelCount=${wheelCount}`,
+  );
+
+  // The selector-anchored path is separate code from the viewport-center one (it resolves an
+  // element and scrolls it into view first), and it is the path that scrolls a nested container
+  // rather than the document.
+  const beforeBox = (await scrollPage.evaluate(
+    "JSON.stringify({top: document.getElementById('box').scrollTop, left: document.getElementById('box').scrollLeft})",
+  )) as string;
+  await scrollPage.scroll({ css: "#box" }, { deltaX: 150, deltaY: 300 });
+  const afterBox = (await scrollPage.evaluate(
+    "JSON.stringify({top: document.getElementById('box').scrollTop, left: document.getElementById('box').scrollLeft})",
+  )) as string;
+  const boxBefore = JSON.parse(beforeBox) as { top: number; left: number };
+  const boxAfter = JSON.parse(afterBox) as { top: number; left: number };
+  record(
+    "scroll anchored to a selector scrolls THAT element on Firefox, both axes",
+    boxBefore.top === 0 && boxBefore.left === 0 && boxAfter.top > 0 && boxAfter.left > 0,
+    `#box scrollTop ${boxBefore.top} -> ${boxAfter.top}, scrollLeft ${boxBefore.left} -> ${boxAfter.left}`,
+  );
+
   // --- 8. a Chrome-only capability is reported ABSENT for the Firefox backend ---
   // heap.snapshot (V8 heap snapshots) has no BiDi/Firefox equivalent at all,
   // per bidi/driver.ts's BIDI_CAPABILITIES / footer comment.

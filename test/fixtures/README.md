@@ -12,6 +12,13 @@ opened straight from disk.
 - `contenteditable.html`: two `contenteditable` divs (prefilled and empty)
   plus `#live-mirror`, which reflects their real text content, so a test
   asserts what landed instead of reading back the node it just wrote.
+- `scrollable.html`: a 3000px-tall document plus `#box`, an independently
+  scrollable 300x200 element with 1200x2000 content, so both of `scroll`'s
+  anchor paths (viewport centre and element) have somewhere to go on both
+  axes. `scroll-behavior: auto` is set explicitly: smooth scrolling would
+  make every read-back a race against an animation. `window.__wheelCount`
+  counts wheel events so a failed scroll can be told apart from a wheel
+  event that never arrived.
 
 ## Loading rule
 

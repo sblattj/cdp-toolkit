@@ -23,6 +23,7 @@
  * `assertLeaseOk("chrome", ...)` — the same choke point click/hover/drag/scroll go through via
  * resolvePage (shared-tools.ts). No tool here bypasses it.
  */
+import { sendInput } from "../activity.ts";
 import { withPage } from "../client.ts";
 import type { TargetSelector } from "../types.ts";
 
@@ -93,10 +94,15 @@ export async function dispatchMouse(args: DispatchMouseArgs): Promise<DispatchMo
   validateDispatchMouseArgs(args);
   const button = args.button ?? "left";
   const modifiers = modifierBits(args.modifiers);
-  return withPage(args.target, async (conn) => {
+  return withPage(args.target, async (conn, target) => {
     const params: Record<string, unknown> = { type: CDP_EVENT_TYPE[args.action], x: args.x, y: args.y, button, modifiers };
     if (args.action !== "move") params.clickCount = args.clickCount ?? 1;
-    await conn.send("Input.dispatchMouseEvent", params);
+    // Through activity.ts's sendInput, NOT conn.send: this event has to land in the dispatch log or
+    // the activity beacon reads the toolkit's own mouse as a human's and warns about contention with
+    // itself. sendInput is the shared writer CdpPageDriver.dispatchInput also delegates to — the one
+    // import this module takes from outside its own raw-CDP boundary, and the reason the file header's
+    // "not a PageDriver method" argument costs nothing in bookkeeping.
+    await sendInput(conn, "chrome", target.id, "Input.dispatchMouseEvent", params);
     return { dispatched: args.action, x: args.x, y: args.y };
   });
 }
