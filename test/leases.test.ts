@@ -17,6 +17,8 @@ import { resolveTarget } from "../src/client.ts";
 import { resolveContext } from "../src/bidi/driver.ts";
 import { createCdpDriver } from "../src/cdp/driver.ts";
 import { closePage, newPage, selectPage } from "../src/shared-tools.ts";
+import { claimPage, releasePage } from "../src/leases-tools.ts";
+import { readOrigin } from "../src/origins.ts";
 import {
   assertLeaseOk,
   claimLease,
@@ -913,6 +915,127 @@ describe("new_page claims the tab it opens", () => {
     expect(await readLease("firefox", res.targetId)).toBeDefined();
     expect(await readLease("chrome", res.targetId)).toBeUndefined();
     expect(tokenParts(res.lease!)?.backend).toBe("firefox");
+  });
+});
+
+describe("claim_page takes over a tab that is already open", () => {
+  test("target and targetId together are refused, naming the rule", async () => {
+    const { driver, pages } = stubDriver({ pages: [page("TAKE-1")] });
+    await expect(claimPage(driver, { target: "TAKE-1", targetId: "TAKE-1" })).rejects.toThrow(/at most one of 'target'/);
+    // An ambiguous call must be total: nothing claimed, nothing opened.
+    expect(await readLease("chrome", "TAKE-1")).toBeUndefined();
+    expect(pages.map((p) => p.id)).toEqual(["TAKE-1"]);
+  });
+
+  test("a selector claims the existing tab and reports opened:false", async () => {
+    const { driver, pages } = stubDriver({ pages: [page("HUMAN", "https://news.test/story")] });
+    const res = await claimPage(driver, { target: "url:news.test", label: "agent-one" });
+    expect(res.opened).toBe(false);
+    expect(res.targetId).toBe("HUMAN");
+    expect(res.url).toBe("https://news.test/story");
+    // A real, readable lease on that tab, not just a shaped answer.
+    const rec = await readLease("chrome", "HUMAN");
+    expect(rec?.label).toBe("agent-one");
+    expect(tokenParts(res.lease)).toMatchObject({ backend: "chrome", targetId: "HUMAN", nonce: rec!.nonce });
+    // Taking over is not opening: no tab was added.
+    expect(pages.map((p) => p.id)).toEqual(["HUMAN"]);
+  });
+
+  test("the whole selector grammar resolves, not just a bare id", async () => {
+    const selectors = ["active", "index:1", "url:beta", "title:BETA", "BETA"];
+    for (const selector of selectors) {
+      const { driver } = stubDriver({
+        pages: [page("ALPHA", "https://alpha.test/"), { id: "BETA", url: "https://beta.test/", title: "BETA", type: "page" }],
+      });
+      const res = await claimPage(driver, { target: selector });
+      expect(res.opened, selector).toBe(false);
+      expect(res.targetId, selector).toBe(selector === "active" ? "ALPHA" : "BETA");
+      await releaseLease(res.lease);
+    }
+  });
+
+  test("a selector that matches nothing errors and opens NOTHING", async () => {
+    // The whole point of resolving gate-free against the live list: the
+    // fresh-tab branch is unreachable once target is given, so a miss can never
+    // be silently answered with a blank new tab.
+    const { driver, pages } = stubDriver({ pages: [page("ONLY")] });
+    const before = pages.length;
+    await expect(claimPage(driver, { target: "url:nope.example" })).rejects.toThrow(/no open tab matches target 'url:nope.example'/);
+    expect(pages.length).toBe(before);
+    expect(pages.map((p) => p.id)).toEqual(["ONLY"]);
+  });
+
+  test("a tab another LIVE process holds is still refused: takeover never steals", async () => {
+    // pid 1 is alive on every platform this runs on, so the record is not stale
+    // and claimLease's conflict check is the thing under test.
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "HELD", nonce: "d".repeat(24),
+      pid: 1, label: "other-agent", createdAt: Date.now(), lastUsedAt: Date.now(),
+      ttlMs: 900_000, auto: false,
+    };
+    await writeFile(leaseFile("chrome", "HELD"), JSON.stringify(rec));
+    const { driver } = stubDriver({ pages: [page("HELD", "https://held.test/")] });
+    await expect(claimPage(driver, { target: "url:held.test" })).rejects.toThrow(LeaseConflictError);
+    // The holder's lease is untouched by the refused attempt.
+    expect((await readLease("chrome", "HELD"))?.nonce).toBe("d".repeat(24));
+  });
+
+  test("an auto lease another live process holds refuses too", async () => {
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "HELD-AUTO", nonce: "e".repeat(24),
+      pid: 1, label: "other-agent", createdAt: Date.now(), lastUsedAt: Date.now(),
+      ttlMs: 900_000, auto: true,
+    };
+    await writeFile(leaseFile("chrome", "HELD-AUTO"), JSON.stringify(rec));
+    const { driver } = stubDriver({ pages: [page("HELD-AUTO")] });
+    await expect(claimPage(driver, { target: "HELD-AUTO" })).rejects.toThrow(LeaseConflictError);
+  });
+
+  test("no target and no targetId still opens a fresh tab, now reporting opened:true", async () => {
+    const { driver, pages } = stubDriver();
+    const res = await claimPage(driver, { url: "https://fresh.test/" });
+    expect(res.opened).toBe(true);
+    expect(res.targetId).toBe("NEW-1");
+    expect(pages.map((p) => p.id)).toEqual(["NEW-1"]);
+  });
+
+  test("targetId back-compat: unchanged behavior, and opened:false", async () => {
+    const { driver, pages } = stubDriver({ pages: [page("LEGACY", "https://legacy.test/")] });
+    const res = await claimPage(driver, { targetId: "LEGACY", label: "agent-legacy", ttlMs: 5_000 });
+    expect(res.opened).toBe(false);
+    expect(res).toMatchObject({ targetId: "LEGACY", url: "https://legacy.test/", label: "agent-legacy", ttlMs: 5_000 });
+    expect((await readLease("chrome", "LEGACY"))?.label).toBe("agent-legacy");
+    expect(pages.map((p) => p.id)).toEqual(["LEGACY"]);
+  });
+
+  test("a missing targetId still errors with the 1.4.0 message and opens nothing", async () => {
+    const { driver, pages } = stubDriver({ pages: [page("PRESENT")] });
+    await expect(claimPage(driver, { targetId: "ABSENT" })).rejects.toThrow(/no page target with id 'ABSENT'/);
+    expect(pages.map((p) => p.id)).toEqual(["PRESENT"]);
+  });
+
+  test("a bidi driver takes over under the firefox backend", async () => {
+    const { driver } = stubDriver({ scheme: "bidi", pages: [page("FF-TAB", "https://ffx.test/")] });
+    const res = await claimPage(driver, { target: "url:ffx.test" });
+    expect(res.opened).toBe(false);
+    expect(await readLease("firefox", "FF-TAB")).toBeDefined();
+    expect(await readLease("chrome", "FF-TAB")).toBeUndefined();
+    expect(tokenParts(res.lease)?.backend).toBe("firefox");
+  });
+
+  test("SAFETY: a tab claimed by target is released and LEFT OPEN, never closed", async () => {
+    // The existing provenance rule, now reachable through the takeover path:
+    // claim_page wrote no creation record because it did not create the tab, so
+    // release_page must leave the human's tab exactly where it found it.
+    const { driver, closed, pages } = stubDriver({ pages: [page("HUMANS-OWN", "https://mail.test/inbox")] });
+    const res = await claimPage(driver, { target: "url:mail.test", label: "agent-one" });
+    expect(res.opened).toBe(false);
+    expect(await readOrigin("chrome", "HUMANS-OWN")).toBeUndefined();
+    const rel = await releasePage(driver, { lease: res.lease });
+    expect(rel).toEqual({ released: true, closed: false, targetId: "HUMANS-OWN" });
+    expect(closed).toEqual([]);
+    expect(pages.map((p) => p.id)).toEqual(["HUMANS-OWN"]);
+    expect(await readLease("chrome", "HUMANS-OWN")).toBeUndefined();
   });
 });
 

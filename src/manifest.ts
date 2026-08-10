@@ -1369,17 +1369,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "claim_page",
-    "description": "Take exclusive ownership of a browser tab and return an opaque lease token. With no targetId, opens a fresh tab (optionally at url) and claims it, so 'give me my own tab' is one call. Any later tool call against a leased tab must carry the matching token in its 'lease' argument or it is refused, naming the holder. The lease is reclaimable once its owning process dies, its ttlMs elapses without use, or its tab is closed. Refused from the CLI: a CLI invocation is one process per call, so its lease would be reclaimable immediately.",
+    "description": "Take exclusive ownership of a browser tab and return an opaque lease token. Two modes. FRESH TAB: with no target and no targetId, opens a new tab (optionally at url) and claims it, so 'give me my own tab' is one call. TAKEOVER: with target, claims a tab that is already open — this is how you work in a tab the human already has open when they ask you to, instead of opening your own — resolving any target selector against the live page list and never creating anything. The answer's 'opened' flag says which happened (true only when this call created the tab), and that same creation record is what release_page consults, so a tab you took over is left open when you release it. Any later tool call against a leased tab must carry the matching token in its 'lease' argument or it is refused, naming the holder. The lease is reclaimable once its owning process dies, its ttlMs elapses without use, or its tab is closed. Refused from the CLI: a CLI invocation is one process per call, so its lease would be reclaimable immediately.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "target": {
+          "type": "string",
+          "description": "Take over an already-open tab, e.g. one the human has open, when asked to: pass any target selector — active | index:N | url:<substr> | title:<substr> | <targetId>. Resolved against the live page list only, so it NEVER opens a tab: a selector that matches nothing is an error, not a new blank tab. The tab is left open on release because the toolkit did not create it. Refused if another live process holds it, including a lease the gate acquired for that process automatically under CDP_REQUIRE_LEASE: this takes over unleased (human) tabs and never steals one from a live agent. Mutually exclusive with targetId."
+        },
         "targetId": {
           "type": "string",
-          "description": "Claim this already-open page target instead of opening a new tab. Must be an exact target id, not a selector."
+          "description": "Claim this already-open page target instead of opening a new tab. Must be an exact target id, not a selector. Kept for back-compat: prefer 'target', which accepts an exact id too plus every other selector form. Mutually exclusive with target."
         },
         "url": {
           "type": "string",
-          "description": "When opening a fresh tab, navigate it here. Ignored when targetId is given."
+          "description": "When opening a fresh tab, navigate it here. Ignored when target or targetId is given, since both of those claim a tab that is already open."
         },
         "label": {
           "type": "string",
