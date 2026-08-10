@@ -8,7 +8,7 @@
 import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { LeaseConflictError } from "../leases.ts";
-import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, recordDispatch } from "../activity.ts";
+import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, recordDispatch } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
@@ -780,6 +780,33 @@ async function readBeaconOver(conn: CdpConnection): Promise<number | null | unde
   }
 }
 
+/**
+ * Evaluate the renderer probe over an existing connection, bounded to
+ * `timeoutMs`.
+ *
+ * NOT three-valued like readBeaconOver: a probe's whole job is "did it answer
+ * in time", so a dead socket and a genuinely wedged renderer both collapse to
+ * the same {responsive:false} — that IS the correct answer for both, since the
+ * caller cannot drive either tab any faster than this already told it.
+ */
+async function probeOver(conn: CdpConnection, timeoutMs: number): Promise<{ responsive: boolean; beaconTs: number | null }> {
+  try {
+    const res = await conn.send<{ result: { value?: unknown } }>(
+      "Runtime.evaluate",
+      { expression: RENDERER_PROBE_EXPRESSION, returnByValue: true },
+      { timeoutMs },
+    );
+    const value = res.result?.value;
+    if (Array.isArray(value) && value[0] === 1) {
+      const ts = value[1];
+      return { responsive: true, beaconTs: typeof ts === "number" && Number.isFinite(ts) ? ts : null };
+    }
+    return { responsive: false, beaconTs: null };
+  } catch {
+    return { responsive: false, beaconTs: null };
+  }
+}
+
 /* --------------------------------- BrowserDriver --------------------------------- */
 // Runs fn on a throwaway browser-endpoint connection, always closing it.
 async function withBrowserConn<T>(fn: (conn: CdpConnection) => Promise<T>): Promise<T> {
@@ -936,6 +963,38 @@ class CdpBrowserDriver implements BrowserDriver {
     if (!conn) return null;
     try {
       return (await readBeaconOver(conn)) ?? null;
+    } finally {
+      conn.close();
+    }
+  }
+
+  /**
+   * Bounded liveness probe, gate-free like readActivityBeacon (see ../driver.ts).
+   *
+   * PREFERS THE HELD BEACON SESSION when one exists — no new socket, and it is
+   * exactly the connection the beacon's init script is already registered on.
+   * Falls back to a FRESH, throwaway connection, itself capped at `timeoutMs`,
+   * for a tab this process never beaconed.
+   *
+   * Deliberately ONE attempt, never held-then-retry the way
+   * installActivityBeacon/readActivityBeacon are: those retry because losing a
+   * held socket is a correctness problem worth routing around, but a probe
+   * that failed already IS the answer this call exists to produce — retrying
+   * would let one wedged tab cost the listing two timeouts instead of one.
+   */
+  async probeRenderer(targetId: string, timeoutMs: number = RENDERER_PROBE_TIMEOUT_MS): Promise<{ responsive: boolean; beaconTs: number | null }> {
+    const held = beaconSessions.get(targetId);
+    if (held) return probeOver(held, timeoutMs);
+    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
+    if (!wsUrl) return { responsive: false, beaconTs: null };
+    const conn = new CdpConnection(wsUrl, { timeoutMs });
+    try {
+      await conn.connect();
+    } catch {
+      return { responsive: false, beaconTs: null };
+    }
+    try {
+      return await probeOver(conn, timeoutMs);
     } finally {
       conn.close();
     }

@@ -39,13 +39,21 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 
 /* ------------------------------- safety preflight ------------------------------- */
 
+// S2's checks (reap grace, renderer ping, observability) run against the SAME
+// browser and port as S1's, in this same process. `client.ts` reads CDP_BASE
+// into a MODULE-LEVEL const at import time, so one process can only ever
+// speak to one Chrome — a genuinely separate port-9502 instance, as the spec
+// names for S2, is not reachable from inside this shared harness without a
+// second process. See test/staleness-smoke.ts's git history / the S2 FRICTION
+// note for the full reasoning; STALENESS_SMOKE_PORT still overrides the one
+// port this whole file uses, S1 and S2 sections alike.
 const PORT = Number(process.env.STALENESS_SMOKE_PORT ?? 9501);
 if (PORT === 9222) {
   console.error("FATAL: 9222 is the owner's live browser. This harness dispatches input and closes tabs; it never runs there.");
@@ -64,9 +72,16 @@ process.env.CDP_ARTIFACT_DIR = artifactDir;
 process.env.CDP_STATE_DIR = artifactDir;
 
 const { TOOLS } = await import("../src/index.ts");
-const { withLeaseScope } = await import("../src/leases.ts");
+const { leaseFile, markLongLivedProcess, withLeaseScope } = await import("../src/leases.ts");
 const { BEACON_DATA_GLOBAL, BEACON_INSTALLED_GLOBAL, CONTENTION_WINDOW_MS, DISPATCH_ATTRIBUTION_WINDOW_MS } =
   await import("../src/activity.ts");
+const { DEFAULT_REAP_GRACE_MS } = await import("../src/reap.ts");
+
+// requireLease() is gated on BOTH CDP_REQUIRE_LEASE and "this is the long-lived
+// MCP process" (leases.ts); only mcp.ts calls markLongLivedProcess() in
+// production, and this harness imports src/index.ts directly, bypassing it.
+// Without this, every S2 strict-mode check below would silently no-op.
+markLongLivedProcess();
 
 const CHROME =
   process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -229,6 +244,42 @@ interface ClaimResult {
 interface LeaseRow {
   targetId: string;
   humanActiveMs?: number;
+  idleMs?: number;
+  expiresAt?: number;
+}
+interface PageEntry {
+  id: string;
+  responsive?: boolean;
+  humanActiveMs?: number;
+  lease?: { label: string; pid: number; idleMs: number; expiresAt: number; stale: string | false };
+}
+interface ReapedTab {
+  targetId: string;
+  label: string;
+  reason: "dead-pid" | "expired";
+}
+interface ListPagesResult {
+  pages: PageEntry[];
+  reaped?: ReapedTab[];
+}
+
+/** Hand-write a lease record straight to disk, bypassing claim_page, so the
+ *  reap-grace checks below can control pid/lastUsedAt/ttlMs precisely instead
+ *  of waiting on a real TTL. Mirrors test/reap-wiring.test.ts's approach,
+ *  against the real filesystem path this harness's CDP_ARTIFACT_DIR points at. */
+async function writeLeaseRecord(targetId: string, over: { pid?: number; ttlMs: number; lastUsedAt: number }): Promise<void> {
+  const rec = {
+    backend: "chrome" as const,
+    targetId,
+    nonce: "b".repeat(24),
+    pid: over.pid ?? process.pid,
+    label: "staleness-smoke-s2",
+    createdAt: Date.now(),
+    lastUsedAt: over.lastUsedAt,
+    ttlMs: over.ttlMs,
+    auto: true,
+  };
+  await writeFile(leaseFile("chrome", targetId), JSON.stringify(rec), "utf8");
 }
 
 /** The beacon's own two globals, read straight out of the page. This is the
@@ -405,6 +456,109 @@ try {
 
   raw.close();
   await TOOLS.release_page({ lease: takeover.lease, close: false }).catch(() => undefined);
+
+  /* ==================== S2: reap grace, renderer ping, observability ==================== */
+
+  /* --- S2.1 split reap horizon --- */
+  // requireLease() gates every reap below; it is off for the S1 checks above
+  // (which never wanted reaping) and turned on for exactly this section.
+  process.env.CDP_REQUIRE_LEASE = "1";
+
+  const graceWithin = await TOOLS.new_page({ url: `${ORIGIN}/3` }) as { targetId: string };
+  openedTabs.push(graceWithin.targetId);
+  // 500ms past a 1s ttlMs: reclaimable, nowhere near the 45-minute default grace.
+  await writeLeaseRecord(graceWithin.targetId, { ttlMs: 1_000, lastUsedAt: Date.now() - 1_500 });
+  const listWithinGrace = (await TOOLS.list_pages({})) as ListPagesResult;
+  record(
+    "an expired-but-within-grace lease survives a strict-mode list_pages",
+    listWithinGrace.pages.some((p) => p.id === graceWithin.targetId) &&
+      !(listWithinGrace.reaped ?? []).some((r) => r.targetId === graceWithin.targetId),
+    `default grace=${DEFAULT_REAP_GRACE_MS}ms; pages contains tab=${listWithinGrace.pages.some((p) => p.id === graceWithin.targetId)}, reaped=${JSON.stringify(listWithinGrace.reaped)}`,
+  );
+
+  process.env.CDP_REAP_GRACE_MS = "0";
+  const graceBeyond = await TOOLS.new_page({ url: `${ORIGIN}/4` }) as { targetId: string };
+  openedTabs.push(graceBeyond.targetId);
+  await writeLeaseRecord(graceBeyond.targetId, { ttlMs: 1_000, lastUsedAt: Date.now() - 1_500 });
+  const listBeyondGrace = (await TOOLS.list_pages({})) as ListPagesResult;
+  const beyondReap = (listBeyondGrace.reaped ?? []).find((r) => r.targetId === graceBeyond.targetId);
+  record(
+    "the same lease shape IS reaped once CDP_REAP_GRACE_MS is 0",
+    beyondReap?.reason === "expired" && !listBeyondGrace.pages.some((p) => p.id === graceBeyond.targetId),
+    `reaped=${JSON.stringify(beyondReap)}`,
+  );
+  delete process.env.CDP_REAP_GRACE_MS;
+
+  const deadPidTab = await TOOLS.new_page({ url: `${ORIGIN}/5` }) as { targetId: string };
+  openedTabs.push(deadPidTab.targetId);
+  // lastUsedAt is "now" (nowhere near expired) but the pid is dead: must reap
+  // immediately, proving dead-pid genuinely ignores grace rather than merely
+  // defaulting to a short one.
+  await writeLeaseRecord(deadPidTab.targetId, { pid: 999_999, ttlMs: 900_000, lastUsedAt: Date.now() });
+  const listDeadPid = (await TOOLS.list_pages({})) as ListPagesResult;
+  const deadPidReap = (listDeadPid.reaped ?? []).find((r) => r.targetId === deadPidTab.targetId);
+  record(
+    "a dead-pid lease is reaped immediately regardless of grace",
+    deadPidReap?.reason === "dead-pid" && !listDeadPid.pages.some((p) => p.id === deadPidTab.targetId),
+    `reaped=${JSON.stringify(deadPidReap)}`,
+  );
+
+  delete process.env.CDP_REQUIRE_LEASE;
+
+  /* --- S2.2 renderer ping (list_pages{probe:true}) --- */
+  const probeClaim = (await TOOLS.claim_page({ url: `${ORIGIN}/6`, label: "s2-probe" })) as ClaimResult;
+  openedTabs.push(probeClaim.targetId);
+  const listProbe = (await TOOLS.list_pages({ probe: true })) as ListPagesResult;
+  const probeEntry = listProbe.pages.find((p) => p.id === probeClaim.targetId);
+  record(
+    "probe:true marks a live tab responsive:true",
+    probeEntry?.responsive === true,
+    `entry=${JSON.stringify(probeEntry)}`,
+  );
+  record(
+    "and list_pages also reports that tab's lease {idleMs, expiresAt}",
+    typeof probeEntry?.lease?.idleMs === "number" && typeof probeEntry?.lease?.expiresAt === "number" && probeEntry?.lease?.label === "s2-probe",
+    `lease=${JSON.stringify(probeEntry?.lease)}`,
+  );
+
+  // A tab this harness never claimed/probed before must show NO lease field.
+  const bareTab = await TOOLS.new_page({ url: `${ORIGIN}/7` }) as { targetId: string };
+  openedTabs.push(bareTab.targetId);
+  const listBare = (await TOOLS.list_pages({})) as ListPagesResult;
+  const bareEntry = listBare.pages.find((p) => p.id === bareTab.targetId);
+  record(
+    "an unleased tab's list_pages entry has no lease field",
+    bareEntry !== undefined && !("lease" in bareEntry),
+    `entry=${JSON.stringify(bareEntry)}`,
+  );
+
+  /* --- S2.3 a wedged renderer reports responsive:false without stalling the call --- */
+  const wedgeTab = await TOOLS.new_page({ url: `${ORIGIN}/8` }) as { targetId: string };
+  openedTabs.push(wedgeTab.targetId);
+  const wedgeRaw = await RawCdp.open(await wsUrlFor(wedgeTab.targetId));
+  // Fire-and-forget: this command's response never comes back (the renderer's
+  // JS thread never yields), and it must NOT be awaited or this harness would
+  // hang for its own 10s timeout instead of proving the toolkit's 500ms one.
+  wedgeRaw.send("Runtime.evaluate", { expression: "while(true){}" }).catch(() => undefined);
+  await pause(150); // let the loop actually start before probing it
+  const probeStart = Date.now();
+  const listWedged = (await TOOLS.list_pages({ probe: true })) as ListPagesResult;
+  const probeElapsedMs = Date.now() - probeStart;
+  const wedgedEntry = listWedged.pages.find((p) => p.id === wedgeTab.targetId);
+  record(
+    "a wedged renderer reports responsive:false, not an error for the whole call",
+    wedgedEntry?.responsive === false,
+    `entry=${JSON.stringify(wedgedEntry)}`,
+  );
+  record(
+    "and the wedged tab does not stall the listing beyond its own probe budget",
+    // Generous multiple of the 500ms per-tab budget: proves there is no
+    // multi-second hang, without pinning to an exact number a slow CI box
+    // could flake on.
+    probeElapsedMs < 5_000,
+    `list_pages{probe:true} took ${probeElapsedMs}ms with one wedged tab present`,
+  );
+  wedgeRaw.close();
 } catch (fatal) {
   record("FATAL", false, fatal instanceof Error ? `${fatal.name}: ${fatal.message}` : String(fatal));
 } finally {
