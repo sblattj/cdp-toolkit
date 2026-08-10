@@ -374,7 +374,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "click",
-    "description": "Click an element via a synthetic mouse press/release at the element's scrolled-into-view bounding-rect center. Target the element with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector).",
+    "description": "Click an element via a synthetic mouse press/release at the element's scrolled-into-view bounding-rect center. Target the element with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector). clickCount:3 triple-clicks (selects a paragraph/line in most editors). 'modifiers' holds Alt/Control/Meta/Shift for the press and release, like a real modifier-click; on the Firefox backend a non-empty 'modifiers' throws (not yet supported over BiDi), so a modifier click there needs --browser chrome.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -405,7 +405,20 @@ export const MANIFEST: ToolSpec[] = [
         },
         "clickCount": {
           "type": "number",
-          "description": "Number of clicks: 1 = single (default), 2 = double-click."
+          "description": "Number of clicks: 1 = single (default), 2 = double-click, 3 = triple-click."
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Alt",
+              "Control",
+              "Meta",
+              "Shift"
+            ]
+          },
+          "description": "Modifier keys held for the click's press and release, e.g. ['Shift'] for a shift-click. Not supported on the Firefox backend: passing a non-empty array there throws."
         }
       },
       "required": [],
@@ -487,6 +500,115 @@ export const MANIFEST: ToolSpec[] = [
       "required": [
         "from",
         "to"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "scroll",
+    "description": "Dispatch a wheel/scroll event at an anchor point: provide at most one of 'uid', 'selector', or 'x'+'y'; omit all three to scroll at the viewport center. An element anchor ('uid' or 'selector') is scrolled into view first, the same as click/hover. At least one of 'deltaX'/'deltaY' is required; positive 'deltaY' scrolls DOWN and positive 'deltaX' scrolls RIGHT (wheel-event convention). Chrome dispatches Input.dispatchMouseEvent{type:'mouseWheel'}; Firefox dispatches WebDriver BiDi's 'wheel' input source. Returns the resolved anchor point ({x,y}) plus the delta actually dispatched.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "uid": {
+          "type": "number",
+          "description": "CDP backendDOMNodeId of the element to scroll into view and anchor at, obtained from take_snapshot. Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector for the element to scroll into view and anchor at (resolved via document.querySelector). Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+        },
+        "x": {
+          "type": "number",
+          "description": "Absolute viewport x-coordinate to anchor the scroll at. Must be given together with 'y'. Provide at most one of uid, selector, or x+y."
+        },
+        "y": {
+          "type": "number",
+          "description": "Absolute viewport y-coordinate to anchor the scroll at. Must be given together with 'x'. Provide at most one of uid, selector, or x+y."
+        },
+        "deltaX": {
+          "type": "number",
+          "description": "Horizontal scroll delta; positive scrolls RIGHT. At least one of deltaX/deltaY is required."
+        },
+        "deltaY": {
+          "type": "number",
+          "description": "Vertical scroll delta; positive scrolls DOWN. At least one of deltaX/deltaY is required."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dispatch_mouse",
+    "description": "Dispatch exactly one raw mouse event ('move', 'down', or 'up') at absolute viewport coordinates: the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself to reach anything a physical mouse can do that click/drag's fixed sequences cannot — canvas drag-painting, marquee/rubber-band selection, a custom widget with its own hit-testing. Chrome-only (capability 'input.raw'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "move",
+            "down",
+            "up"
+          ],
+          "description": "Which raw event to dispatch: 'move' (mouseMoved), 'down' (mousePressed), or 'up' (mouseReleased)."
+        },
+        "x": {
+          "type": "number",
+          "description": "Viewport x-coordinate. Required on every call: CDP has no notion of a 'current pointer position' to default from."
+        },
+        "y": {
+          "type": "number",
+          "description": "Viewport y-coordinate. Required on every call."
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "description": "Mouse button: 'left' (default), 'right', or 'middle'."
+        },
+        "clickCount": {
+          "type": "number",
+          "description": "Click-run length for a 'down' or 'up' event (2 = the second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1."
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Alt",
+              "Control",
+              "Meta",
+              "Shift"
+            ]
+          },
+          "description": "Modifier keys held for this one event, e.g. ['Shift']."
+        }
+      },
+      "required": [
+        "action",
+        "x",
+        "y"
       ],
       "additionalProperties": false
     }

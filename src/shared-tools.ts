@@ -620,11 +620,52 @@ export async function takeSnapshot(
 
 export async function click(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number },
+  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; modifiers?: string[] },
 ): Promise<{ clicked: true; x: number; y: number }> {
   return withPage(driver, args.target, async (page) => {
-    const { x, y } = await page.click(locatorOf(args), { button: args.button ?? "left", clickCount: args.clickCount ?? 1 });
+    const { x, y } = await page.click(locatorOf(args), { button: args.button ?? "left", clickCount: args.clickCount ?? 1, modifiers: args.modifiers });
     return { clicked: true, x, y };
+  });
+}
+
+/**
+ * scroll's anchor rule: exactly one of `{uid}`, `{selector}`, or `{x,y}` — or none of the three,
+ * which means the viewport center. `x`/`y` must arrive together; one without the other is refused
+ * rather than silently treated as "half an anchor". Exported for the unit tests, which pin the
+ * rule without a browser.
+ */
+export function resolveScrollAnchor(args: { uid?: DriverUid; selector?: string; x?: number; y?: number }): ElementLocator | { x: number; y: number } | undefined {
+  const hasUid = args.uid !== undefined && args.uid !== null && args.uid !== ("" as unknown);
+  const hasSelector = typeof args.selector === "string" && args.selector.length > 0;
+  const hasX = args.x !== undefined;
+  const hasY = args.y !== undefined;
+  if (hasX !== hasY) throw new SharedToolError("scroll: 'x' and 'y' must be provided together");
+  const hasXY = hasX && hasY;
+  const anchorCount = [hasUid, hasSelector, hasXY].filter(Boolean).length;
+  if (anchorCount > 1) throw new SharedToolError("scroll: provide at most one of { uid }, { selector }, or { x, y } (omit all three to scroll at the viewport center)");
+  if (hasUid || hasSelector) return locatorOf({ uid: args.uid, selector: args.selector });
+  if (hasXY) return { x: args.x as number, y: args.y as number };
+  return undefined;
+}
+
+/** scroll's delta rule: at least one of deltaX/deltaY is required (a no-op scroll is refused
+ *  rather than silently dispatched). Exported for the unit tests. */
+export function resolveScrollDelta(args: { deltaX?: number; deltaY?: number }): { deltaX: number; deltaY: number } {
+  const deltaX = args.deltaX ?? 0;
+  const deltaY = args.deltaY ?? 0;
+  if (deltaX === 0 && deltaY === 0) throw new SharedToolError("scroll requires at least one of { deltaX } or { deltaY }");
+  return { deltaX, deltaY };
+}
+
+export async function scroll(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; x?: number; y?: number; deltaX?: number; deltaY?: number },
+): Promise<{ x: number; y: number; deltaX: number; deltaY: number; target: { id: string; url: string; title: string } }> {
+  const anchor = resolveScrollAnchor(args);
+  const { deltaX, deltaY } = resolveScrollDelta(args);
+  return withPage(driver, args.target, async (page) => {
+    const { x, y } = await page.scroll(anchor, { deltaX, deltaY });
+    return { x, y, deltaX, deltaY, target: target3(page.info) };
   });
 }
 
@@ -775,8 +816,9 @@ export async function handleDialog(
 
 /* ------------------------------------- registry ------------------------------------- */
 
-/** The 23 tools this file unifies, importable by both src/index.ts (Chrome) and
- *  src/firefox-tools.ts (Firefox). Each function is (driver, args) => Promise<result>. */
+/** The 24 tools this file unifies (23 pre-1.8.0, plus `scroll`, Track P1), importable by both
+ *  src/index.ts (Chrome) and src/firefox-tools.ts (Firefox). Each function is
+ *  (driver, args) => Promise<result>. */
 export const SHARED_TOOLS = {
   list_pages: listPages,
   new_page: newPage,
@@ -792,6 +834,7 @@ export const SHARED_TOOLS = {
   click,
   hover,
   drag,
+  scroll,
   fill,
   fill_form: fillForm,
   type_text: typeText,

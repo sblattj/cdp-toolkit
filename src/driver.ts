@@ -138,7 +138,8 @@ export type Capability =
   | "snapshot.accessibilityTree" // native a11y dump, not a DOM-walk approximation
   | "input.insertTextAtomic" // atomic value commit, not synthesized keystrokes
   | "locate.text" // find a node by visible text substring
-  | "locate.xpath"; // find a node by xpath
+  | "locate.xpath" // find a node by xpath
+  | "input.raw"; // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
@@ -157,6 +158,7 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   mock_request: ["network.intercept"],
   list_mocks: ["network.intercept"],
   clear_mocks: ["network.intercept"],
+  dispatch_mouse: ["input.raw"],
 } as const;
 
 /* --------------------------------- errors --------------------------------- */
@@ -228,6 +230,18 @@ export interface NavigateResult {
 export interface MouseButtonOptions {
   button?: "left" | "right" | "middle";
   clickCount?: number;
+  /** "Alt" | "Control" | "Meta" | "Shift", held for the press/release. CDP bits: Alt=1,
+   *  Control=2, Meta=4, Shift=8 (cdp/driver.ts's inputModifierBits). A non-empty array is
+   *  "unsupported" on the Firefox/BiDi driver today: see click()'s implementation note. */
+  modifiers?: readonly string[];
+}
+
+export interface ScrollOptions {
+  /** Positive scrolls DOWN, positive scrolls RIGHT: wheel-event convention. The tool layer
+   *  (shared-tools.ts) requires at least one of deltaX/deltaY; a driver trusts its caller and
+   *  does not re-validate. */
+  deltaX?: number;
+  deltaY?: number;
 }
 
 export interface KeyPress {
@@ -447,6 +461,12 @@ export interface PageDriver {
   click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }>;
   hover(loc: ElementLocator): Promise<{ x: number; y: number }>;
   drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }>;
+  /** Dispatch a wheel/scroll event at an anchor point. `anchor` is an ElementLocator (scrolled
+   *  into view first, exactly like click/hover), an absolute viewport point, or `undefined` for
+   *  the viewport center. Chrome: Input.dispatchMouseEvent{type:"mouseWheel"}. Firefox: BiDi's
+   *  "wheel" input source via input.performActions. Universal: both drivers must implement it
+   *  (absent from driver.ts's REQUIRED_CAPABILITIES, unlike dispatch_mouse). */
+  scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }>;
   /** Overwrite an element's value. One atomic commit under
    *  "input.insertTextAtomic", else synthesized keystrokes, so per-key handlers
    *  on the page WILL fire. Callers must not depend on either behavior. */

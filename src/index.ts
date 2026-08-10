@@ -41,6 +41,8 @@ import { takeHeapsnapshot } from "./tools/heap.ts";
 import { lighthouseAudit } from "./tools/lighthouse.ts";
 // --- network mocking (Fetch domain) : toolkit addition beyond the 29 parity tools ---
 import { mockRequest, listMocks, clearMocks } from "./tools/network_mock.ts";
+// --- raw mouse dispatch (Input.dispatchMouseEvent, one event per call) : chrome-only, capability "input.raw" ---
+import { dispatchMouse } from "./tools/dispatch-mouse.ts";
 
 /** A toolkit tool: a single typed-args function returning JSON-serializable data. */
 export type ToolFn = (args: never) => Promise<unknown>;
@@ -67,8 +69,12 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * opt-in tab ownership so many agents can share one browser), plus a 2-tool
  * screen-recording pair (start_screen_recording/stop_screen_recording : a tab
  * captured to an H.265 MP4 with per-frame durations, so a variable-rate
- * repaint stream plays back at wallclock speed).
- * 29 + 1 + 3 + 3 + 3 + 2 = 41 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * repaint stream plays back at wallclock speed), plus a 2-tool input-parity
+ * addition (1.8.0 Track P1: `scroll`, a wheel-event dispatch at an anchor
+ * point sharing click/hover's element-locator and lease-gate contract; and
+ * `dispatch_mouse`, the raw move/down/up mouse-event primitive composable
+ * into anything a physical mouse can do, chrome-only per capability "input.raw").
+ * 29 + 1 + 3 + 3 + 3 + 2 + 2 = 43 entries total. Listed explicitly so the mapping is auditable at a glance and
  * the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -93,10 +99,11 @@ export const TOOLS = {
   delete_cookies: onCdp(SHARED_TOOLS.delete_cookies),
   // snapshot (1)
   take_snapshot: onCdp(SHARED_TOOLS.take_snapshot),
-  // interaction (8)
+  // interaction (9) : scroll is 1.8.0 Track P1, a toolkit addition beyond the 29 parity tools
   click: onCdp(SHARED_TOOLS.click),
   hover: onCdp(SHARED_TOOLS.hover),
   drag: onCdp(SHARED_TOOLS.drag),
+  scroll: onCdp(SHARED_TOOLS.scroll),
   fill: onCdp(SHARED_TOOLS.fill),
   fill_form: onCdp(SHARED_TOOLS.fill_form),
   type_text: onCdp(SHARED_TOOLS.type_text),
@@ -129,6 +136,8 @@ export const TOOLS = {
   mock_request: mockRequest,
   list_mocks: listMocks,
   clear_mocks: clearMocks,
+  // raw mouse dispatch (1) : 1.8.0 Track P1 toolkit addition, chrome-only (capability "input.raw")
+  dispatch_mouse: dispatchMouse,
   // tab leases (3) : opt-in ownership so many agents can share one browser
   claim_page: onCdp(LEASE_TOOLS.claim_page),
   release_page: onCdp(LEASE_TOOLS.release_page),

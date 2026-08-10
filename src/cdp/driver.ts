@@ -14,7 +14,7 @@ import {
   LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
-  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type SnapshotNode, type UidStability,
+  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -88,6 +88,33 @@ async function centerOf(conn: CdpConnection, objectId: string): Promise<{ x: num
 async function focusElement(conn: CdpConnection, objectId: string): Promise<void> {
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){this.focus&&this.focus();}", returnByValue: true });
 }
+/**
+ * Chrome smooth-scrolls wheel-triggered scrolling by default (a genuine UX feature, not something
+ * a plain `--headless=new` launch turns off): Input.dispatchMouseEvent's mouseWheel command
+ * resolves once the event is QUEUED, not once the resulting scroll animation has settled, so a
+ * caller reading scrollTop immediately after dispatch can observe the PRE-scroll value. Verified
+ * empirically against real headless Chrome 151 (not inferred): reading scrollTop in the same tick
+ * after the command resolved showed 0; a fixed 300ms wait showed the expected value.
+ *
+ * Rather than a blind sleep (wrong for a large delta's longer animation, wasteful for a small
+ * one), arm a CAPTURE-phase 'scroll' listener on window BEFORE dispatching the wheel event.
+ * Capture-phase listeners on window see scroll events targeted at ANY descendant scrollable
+ * element, even though 'scroll' itself does not bubble — the standard scroll-event-delegation
+ * technique. The promise resolves once 60ms pass with no further scroll event (debounced, so a
+ * multi-frame animation is waited out rather than caught mid-flight), capped at 500ms so a wheel
+ * event that scrolls nothing (delta too small, target already at its scroll limit) cannot hang.
+ */
+const ARM_SCROLL_SETTLE_WATCH =
+  "(function(){window.__cdpScrollSettle=new Promise((resolve)=>{let t;const done=()=>{window.removeEventListener('scroll',on,true);resolve(true);};" +
+  "const on=()=>{clearTimeout(t);t=setTimeout(done,60);};window.addEventListener('scroll',on,true);t=setTimeout(done,60);setTimeout(done,500);});})()";
+async function armScrollSettleWatch(conn: CdpConnection): Promise<void> {
+  await conn.send("Runtime.evaluate", { expression: ARM_SCROLL_SETTLE_WATCH, returnByValue: true });
+}
+async function awaitScrollSettle(conn: CdpConnection): Promise<void> {
+  // Best-effort: a navigation racing the wheel event could tear down window.__cdpScrollSettle
+  // before this reads it, and that is not a scroll failure worth surfacing as one.
+  await conn.send("Runtime.evaluate", { expression: "window.__cdpScrollSettle", awaitPromise: true, returnByValue: true }).catch(() => undefined);
+}
 // Copied verbatim (behaviorally) from src/tools/input.ts `setValue`. CRITICAL: must stay
 // byte-identical to input.ts; see the side-by-side quote in the driver report.
 async function setValueOnObject(conn: CdpConnection, objectId: string, value: string): Promise<void> {
@@ -111,6 +138,19 @@ const NAMED_KEYS: Record<string, KeySpec> = {
   pageup: { key: "PageUp", code: "PageUp", keyCode: 33 }, pagedown: { key: "PageDown", code: "PageDown", keyCode: 34 },
 };
 const MODIFIER_BITS: Record<string, number> = { alt: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
+// The closed click/dispatch_mouse modifiers enum (exact casing, no aliases): CDP bits Alt=1,
+// Control=2, Meta=4, Shift=8, per driver.ts's MouseButtonOptions doc. Exported for the unit tests
+// and for src/tools/dispatch-mouse.ts, which needs the identical bit math for its raw primitive.
+const CLICK_MODIFIER_BITS: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+export function inputModifierBits(mods?: readonly string[]): number {
+  let bits = 0;
+  for (const m of mods ?? []) {
+    const bit = CLICK_MODIFIER_BITS[m];
+    if (bit === undefined) throw driverError("page-error", `unknown modifier '${m}' (use Alt, Control, Meta, or Shift)`);
+    bits |= bit;
+  }
+  return bits;
+}
 // Copied verbatim from src/tools/input.ts `resolveKey`.
 function resolveKey(key: string): KeySpec {
   const named = NAMED_KEYS[key.toLowerCase()];
@@ -261,13 +301,17 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * which is a real Chrome capability, not a line-budget artifact, so both ARE declared.
  * capture.screencast rides Page.startScreencast / Page.screencastFrame / Page.screencastFrameAck,
  * the streamed-repaint primitive behind start_screen_recording and stop_screen_recording.
+ * input.raw rides Input.dispatchMouseEvent dispatched one event at a time with no scroll-into-view
+ * or hover prefix (src/tools/dispatch-mouse.ts), the primitive behind dispatch_mouse; declared
+ * chrome-only per ADR-001 rather than attempted over BiDi's per-call performActions device-state
+ * model (see dispatch-mouse.ts's header for why that combination was not attempted this pass).
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
-  "capture.screencast",
+  "capture.screencast", "input.raw",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -408,13 +452,42 @@ class CdpPageDriver implements PageDriver {
     return { x, y };
   }
   // Copied dispatch sequence verbatim from src/tools/input.ts `click` (its resolve+centerOf+mouseMoved prefix IS hover, reused here).
+  // modifiers is new in 1.8.0 (Track P1): held for both press and release, same as a real chord.
   async click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }> {
     const button = opts?.button ?? "left";
     const clickCount = opts?.clickCount ?? 1;
+    const modifiers = inputModifierBits(opts?.modifiers);
     const { x, y } = await this.hover(loc);
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount });
+    await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount, modifiers });
+    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount, modifiers });
     return { x, y };
+  }
+  // 1.8.0 Track P1: scroll into view (same as click/hover) when an element anchor is given; an
+  // {x,y} anchor is already a viewport point, and no anchor scrolls at the viewport center.
+  async scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }> {
+    await this.ensureDomain("Runtime");
+    const { x, y } = await this.resolveScrollPoint(anchor);
+    // Arm the settle watch BEFORE dispatching: the wheel event's resulting scroll can start (and,
+    // for a small delta, finish) before this command's own response comes back, so arming after
+    // dispatch could miss it and wait out the full 500ms cap needlessly. See armScrollSettleWatch's
+    // doc comment for why a listener is used instead of a fixed sleep.
+    await armScrollSettleWatch(this.conn);
+    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: opts.deltaX ?? 0, deltaY: opts.deltaY ?? 0 });
+    await awaitScrollSettle(this.conn);
+    return { x, y };
+  }
+  private async resolveScrollPoint(anchor: ElementLocator | { x: number; y: number } | undefined): Promise<{ x: number; y: number }> {
+    if (anchor === undefined) {
+      await this.ensureDomain("Runtime");
+      const { result, exceptionDetails } = await this.conn.send<{ result: { value?: { x: number; y: number } }; exceptionDetails?: { text?: string } }>(
+        "Runtime.evaluate", { expression: "({x: window.innerWidth / 2, y: window.innerHeight / 2})", returnByValue: true },
+      );
+      if (exceptionDetails || !result.value) throw driverError("page-error", `could not measure viewport for scroll center: ${exceptionDetails?.text ?? "no value"}`);
+      return result.value;
+    }
+    if ("x" in anchor) return anchor;
+    const { objectId } = await resolveElementLocator(this.conn, anchor);
+    return centerOf(this.conn, objectId);
   }
   // Copied dispatch sequence verbatim from src/tools/input.ts `drag` (its "from" prefix IS hover, reused here).
   async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
