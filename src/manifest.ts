@@ -121,7 +121,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "navigate_page",
-    "description": "Navigate a target page to a URL (Page.navigate) OR reload it (reload:true) over raw CDP, then wait for the load milestone with a bounded timeout so a wedged renderer can't hang. Returns {url,frameId,waitedFor} (plus reloaded:true on a reload); waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'), and there is no auto-snapshot of the new page. Pass reload:true with ignoreCache:true for a hard reload that refetches every subresource (e.g. to pick up a freshly-deployed, non-content-hashed bundle the HTTP cache would serve stale).",
+    "description": "Navigate a target page to a URL (Page.navigate), reload it (reload:true), OR go back/forward in its session history (history:'back'|'forward'), then wait for the load milestone with a bounded timeout so a wedged renderer can't hang. Exactly one of url / reload / history per call. Returns {url,frameId,waitedFor} (plus reloaded:true on a reload, traversed:'back'|'forward' on a history move); waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'), and there is no auto-snapshot of the new page. Pass reload:true with ignoreCache:true for a hard reload that refetches every subresource (e.g. to pick up a freshly-deployed, non-content-hashed bundle the HTTP cache would serve stale).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -140,6 +140,14 @@ export const MANIFEST: ToolSpec[] = [
         "reload": {
           "type": "boolean",
           "description": "Reload the current page (Page.reload) instead of navigating to url. Default false."
+        },
+        "history": {
+          "type": "string",
+          "enum": [
+            "back",
+            "forward"
+          ],
+          "description": "Traverse this tab's session history instead of loading a url: 'back' and 'forward' are the browser's Back and Forward buttons. Mutually exclusive with 'url' and 'reload' — passing two of the three is refused by name rather than resolved by precedence. Works on BOTH backends (Chrome: Page.getNavigationHistory + Page.navigateToHistoryEntry; Firefox: browsingContext.traverseHistory) and waits for the same load milestone as an ordinary navigation. Going back from the first entry, or forward from the last, is an ERROR naming the direction — never a silent success that navigated nowhere. The result carries traversed:'back'|'forward' alongside the resulting url."
         },
         "ignoreCache": {
           "type": "boolean",
@@ -378,7 +386,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "click",
-    "description": "Click an element via a synthetic mouse press/release at the element's scrolled-into-view bounding-rect center. Target the element with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector).",
+    "description": "Click an element via a synthetic mouse press/release at the element's scrolled-into-view bounding-rect center. Target the element with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector). clickCount:3 triple-clicks (selects a paragraph/line in most editors). 'modifiers' holds Alt/Control/Meta/Shift for the press and release, like a real modifier-click; on the Firefox backend a non-empty 'modifiers' throws (not yet supported over BiDi), so a modifier click there needs --browser chrome.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -409,7 +417,20 @@ export const MANIFEST: ToolSpec[] = [
         },
         "clickCount": {
           "type": "number",
-          "description": "Number of clicks: 1 = single (default), 2 = double-click."
+          "description": "Number of clicks: 1 = single (default), 2 = double-click, 3 = triple-click."
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Alt",
+              "Control",
+              "Meta",
+              "Shift"
+            ]
+          },
+          "description": "Modifier keys held for the click's press and release, e.g. ['Shift'] for a shift-click. Not supported on the Firefox backend: passing a non-empty array there throws."
         }
       },
       "required": [],
@@ -445,7 +466,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "drag",
-    "description": "Drag from a source element to a destination element via synthetic mouse press/move/release (approximates HTML5 drag-and-drop; not guaranteed for every custom DnD library). 'from' and 'to' each take exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector.",
+    "description": "Drag from a source element to a destination. 'from' takes exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector. The destination is exactly one of 'to' (an element via uid/selector, or an absolute viewport point via x+y) or 'by' ({dx,dy} offset from the source point — sliders, map panning, resize handles). mode:'mouse' (default) dispatches synthetic mouse press/move/release: right for widgets built on raw pointer events, and Chrome does turn it into a real drag, but WHICH drag events reach the page depends on where the interpolated pointer path happens to land — measured on Chrome 151, the default steps:2 delivers ZERO dragover events, so an HTML5 drop zone written the standard way (preventDefault inside dragover) refuses the drop entirely. mode:'html5' performs the drag deterministically instead: Chrome's drag interception hands back the DragData the page's own dragstart built, and the toolkit replays it as dragEnter/dragOver/drop exactly at the destination, so a draggable=\"true\" / dataTransfer drop zone works regardless of the pointer path. mode:'html5' is CHROME-ONLY: it requires capability 'input.html5Drag' and is rejected with a clear error under the Firefox backend, where the tool itself remains available for mouse-mode drags. 'steps' (default 2) sets how many interpolated mouse-move events are dispatched between source and destination; raise it for DnD libraries with a movement threshold or per-frame sampling.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -474,7 +495,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "to": {
           "type": "object",
-          "description": "Destination element to drag to. Provide exactly one of uid or selector.",
+          "description": "Where the drag ends: exactly one of uid, selector, or x+y. Mutually exclusive with 'by'; exactly one of to/by is required.",
           "properties": {
             "uid": {
               "type": "number",
@@ -483,15 +504,219 @@ export const MANIFEST: ToolSpec[] = [
             "selector": {
               "type": "string",
               "description": "CSS selector for the destination element (resolved via document.querySelector)."
+            },
+            "x": {
+              "type": "number",
+              "description": "Absolute viewport x-coordinate to drop at. Must be given together with 'y'. Use this when there is no droppable element to name (a canvas, a slider track)."
+            },
+            "y": {
+              "type": "number",
+              "description": "Absolute viewport y-coordinate to drop at. Must be given together with 'x'."
             }
           },
           "additionalProperties": false
+        },
+        "by": {
+          "type": "object",
+          "description": "Drag by an offset from the source element's center instead of to a destination: at least one of dx/dy, the other defaults to 0. Mutually exclusive with 'to'; exactly one of to/by is required. Use for sliders (by:{dx:40}), map panning, and resize handles.",
+          "properties": {
+            "dx": {
+              "type": "number",
+              "description": "Horizontal offset in CSS pixels; positive drags RIGHT."
+            },
+            "dy": {
+              "type": "number",
+              "description": "Vertical offset in CSS pixels; positive drags DOWN."
+            }
+          },
+          "additionalProperties": false
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "mouse",
+            "html5"
+          ],
+          "description": "'mouse' (default): synthetic mouse press/move/release; works on pointer-event widgets, does nothing on HTML5 draggable elements. 'html5': real HTML5 drag-and-drop (dragstart/dragEnter/dragOver/drop with the page's own dataTransfer). 'html5' is CHROME-ONLY and is rejected with a clear error under the Firefox backend."
+        },
+        "steps": {
+          "type": "number",
+          "description": "Number of interpolated mouse-move events dispatched between the source and destination points, evenly spaced, the last landing exactly on the destination. Integer 1-500, default 2 (midpoint then destination). Raise it for DnD libraries with a movement threshold or per-frame sampling."
         }
       },
       "required": [
-        "from",
-        "to"
+        "from"
       ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "scroll",
+    "description": "Dispatch a wheel/scroll event at an anchor point: provide at most one of 'uid', 'selector', or 'x'+'y'; omit all three to scroll at the viewport center. An element anchor ('uid' or 'selector') is scrolled into view first, the same as click/hover. At least one of 'deltaX'/'deltaY' is required; positive 'deltaY' scrolls DOWN and positive 'deltaX' scrolls RIGHT (wheel-event convention). Chrome dispatches Input.dispatchMouseEvent{type:'mouseWheel'}; Firefox dispatches WebDriver BiDi's 'wheel' input source. Returns the resolved anchor point ({x,y}) plus the delta actually dispatched.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "uid": {
+          "type": "number",
+          "description": "CDP backendDOMNodeId of the element to scroll into view and anchor at, obtained from take_snapshot. Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector for the element to scroll into view and anchor at (resolved via document.querySelector). Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+        },
+        "x": {
+          "type": "number",
+          "description": "Absolute viewport x-coordinate to anchor the scroll at. Must be given together with 'y'. Provide at most one of uid, selector, or x+y."
+        },
+        "y": {
+          "type": "number",
+          "description": "Absolute viewport y-coordinate to anchor the scroll at. Must be given together with 'x'. Provide at most one of uid, selector, or x+y."
+        },
+        "deltaX": {
+          "type": "number",
+          "description": "Horizontal scroll delta; positive scrolls RIGHT. At least one of deltaX/deltaY is required."
+        },
+        "deltaY": {
+          "type": "number",
+          "description": "Vertical scroll delta; positive scrolls DOWN. At least one of deltaX/deltaY is required."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dispatch_mouse",
+    "description": "Dispatch exactly one raw mouse event ('move', 'down', or 'up') at absolute viewport coordinates: the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself to reach anything a physical mouse can do that click/drag's fixed sequences cannot — canvas drag-painting, marquee/rubber-band selection, a custom widget with its own hit-testing. Chrome-only (capability 'input.raw'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "move",
+            "down",
+            "up"
+          ],
+          "description": "Which raw event to dispatch: 'move' (mouseMoved), 'down' (mousePressed), or 'up' (mouseReleased)."
+        },
+        "x": {
+          "type": "number",
+          "description": "Viewport x-coordinate. Required on every call: CDP has no notion of a 'current pointer position' to default from."
+        },
+        "y": {
+          "type": "number",
+          "description": "Viewport y-coordinate. Required on every call."
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "description": "Mouse button: 'left' (default), 'right', or 'middle'."
+        },
+        "clickCount": {
+          "type": "number",
+          "description": "Click-run length for a 'down' or 'up' event (2 = the second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1."
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Alt",
+              "Control",
+              "Meta",
+              "Shift"
+            ]
+          },
+          "description": "Modifier keys held for this one event, e.g. ['Shift']."
+        }
+      },
+      "required": [
+        "action",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wait_for_download",
+    "description": "Wait for a file download to finish and return it as a real file on disk: {path,suggestedFilename,bytes,url,target}. The file is written under the artifact dir's downloads/ folder and renamed from Chrome's internal guid to the page's own filename, collision-suffixed (report.csv, report-1.csv, ...). ORDERING RULE, and it is not optional: download capture must be ARMED BEFORE the click that starts the download — call wait_for_download{arm:true} first (it arms and returns immediately, reporting {armed:true,downloadPath,pending}), then click, then call wait_for_download to collect the finished file. This is Chrome's behavior, not a preference: the download-behavior override is per-connection state that Chrome REVERTS the moment the arming client disconnects, and an unarmed headless Chrome denies the download outright, so a download triggered before anything armed is lost with no file anywhere. SIDE EFFECT, browser-global: arming redirects EVERY download in this browser (all tabs, all origins) into the toolkit's downloads directory for as long as this server runs, and downloads no longer land in the user's normal Downloads folder. Because the arm lives on a connection this server process holds open, this is an MCP-server capability: under the one-shot CLI the connection dies with the process and nothing is captured. Chrome-only (capability 'browser.downloads'): absent from tools/list under the Firefox backend, never present-and-throwing, because WebDriver BiDi has no command to redirect a download to a chosen directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. A download is browser-scoped, so this names the tab for the lease check and for the echoed target, not which download is returned."
+        },
+        "arm": {
+          "type": "boolean",
+          "description": "Arm download capture and return immediately instead of waiting: {armed:true,downloadPath,pending}. Call this BEFORE the click that triggers the download. 'pending' counts downloads that already completed and have not been collected yet, so an arm call doubles as a peek."
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "How long to wait for a download to complete, in milliseconds. Default 30000. Ignored with arm:true. A download that already completed and was not yet collected is returned immediately, so this only bounds the wait for a download still in flight."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "grant_permissions",
+    "description": "Grant browser permissions for an origin up front, so a page asking for geolocation / notifications / clipboard gets an answer instead of showing a prompt no agent can click. 'permissions' takes CDP PermissionType values ('geolocation', 'notifications', 'clipboardReadWrite', 'camera', 'microphone', 'midi', ...); an unknown name is refused by Chrome with the bad value in the message. Returns {granted,origin,target}, or {reset:true,target} for a reset-only call. Grants are keyed by ORIGIN, not by tab: every tab on that origin is affected, including ones opened later. reset:true clears this server's previous grants first (or instead, when no permissions are given) — note CDP's reset is not origin-scoped, so it clears them for every origin at once. The grant lives on a connection this server process holds open and Chrome DISCARDS IT when that connection closes, so this is an MCP-server capability: under the one-shot CLI the grant dies with the process. Chrome-only (capability 'browser.permissions'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. Used for the lease check and, when 'origin' is omitted, as the source of the origin to grant for."
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CDP PermissionType values to grant, e.g. ['geolocation'] or ['clipboardReadWrite','clipboardSanitizedWrite']. Required unless reset:true. An empty array is refused rather than treated as a successful no-op."
+        },
+        "origin": {
+          "type": "string",
+          "description": "Origin the grant applies to, e.g. 'https://example.com'. Defaults to the target tab's own origin. Required explicitly when that tab has no grantable origin (data:, blob:, about:blank all serialize to the opaque origin 'null'), which is refused with a message naming the tab's url."
+        },
+        "reset": {
+          "type": "boolean",
+          "description": "Clear this server's previous permission grants (Browser.resetPermissions). With 'permissions' it resets FIRST and then grants, so the result is exactly the listed permissions; on its own it is a reset-only call answering {reset:true}. Not scoped to 'origin': CDP resets every origin at once."
+        }
+      },
+      "required": [],
       "additionalProperties": false
     }
   },

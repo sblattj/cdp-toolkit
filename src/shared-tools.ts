@@ -36,7 +36,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
-  BrowserCookie, BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
+  BrowserCookie, BrowserDriver, Capability, DragDestination, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
 import {
@@ -350,23 +350,65 @@ export interface LegacyNavigateResult {
   url: string;
   frameId: string;
   reloaded?: boolean;
+  /** Present only on a history traversal, mirroring how `reloaded` is present only on a reload. */
+  traversed?: "back" | "forward";
   waitedFor: "load" | "domcontentloaded" | "frameStoppedLoading" | "navigate-only";
+}
+
+/** What a navigate_page call is actually asking for. Exactly one of the three. */
+export type NavigateMode =
+  | { mode: "url"; url: string }
+  | { mode: "reload" }
+  | { mode: "history"; history: "back" | "forward" };
+
+/**
+ * The three-way exclusivity check for navigate_page's url / reload / history, split out and
+ * exported so every refusal is pinned by a unit test without a browser (the same reason
+ * resolveScrollAnchor and resolveDragDestination live at this layer).
+ *
+ * EXCLUSIVE, NOT PRECEDENCE-ORDERED. `{url, history:"back"}` is a caller who does not know what
+ * they want; silently honoring one of them would navigate somewhere the caller did not ask for and
+ * report success. Refusing names both, so the mistake is visible in the error rather than in the
+ * page that comes back.
+ */
+export function resolveNavigateMode(args: { url?: string; reload?: boolean; history?: unknown }): NavigateMode {
+  const reload = args.reload === true;
+  const hasUrl = typeof args.url === "string" && args.url.length > 0;
+  const hasHistory = args.history !== undefined && args.history !== null;
+  const given = [hasUrl ? "url" : "", reload ? "reload" : "", hasHistory ? "history" : ""].filter(Boolean);
+  if (given.length > 1) {
+    throw new SharedToolError(`navigate_page: 'url', 'reload' and 'history' are mutually exclusive (got ${given.join(" + ")})`);
+  }
+  if (hasHistory) {
+    if (args.history !== "back" && args.history !== "forward") {
+      throw new SharedToolError(`navigate_page: 'history' must be 'back' or 'forward' (got ${JSON.stringify(args.history)})`);
+    }
+    return { mode: "history", history: args.history };
+  }
+  if (reload) return { mode: "reload" };
+  if (!hasUrl) {
+    throw new SharedToolError(
+      "navigate_page: 'url' is required (or pass reload:true to reload the current page, or history:'back'|'forward' to go back/forward in this tab's session history)",
+    );
+  }
+  return { mode: "url", url: args.url as string };
 }
 
 export async function navigatePage(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; url?: string; reload?: boolean; ignoreCache?: boolean; waitUntil?: "load" | "domcontentloaded"; timeoutMs?: number },
+  args: {
+    target?: TargetSelector; url?: string; reload?: boolean; ignoreCache?: boolean;
+    history?: "back" | "forward"; waitUntil?: "load" | "domcontentloaded"; timeoutMs?: number;
+  },
 ): Promise<LegacyNavigateResult> {
-  const reload = args.reload === true;
-  if (!reload && (!args.url || typeof args.url !== "string")) {
-    throw new SharedToolError("navigate_page: 'url' is required (or pass reload:true to reload the current page)");
-  }
+  const mode = resolveNavigateMode(args);
   return withPage(driver, args.target, async (page) => {
-    const r = await page.navigate(args);
+    const r = await page.navigate(mode.mode === "history" ? { ...args, history: mode.history } : args);
     return {
       url: r.url,
       frameId: r.contextId,
       ...(r.reloaded ? { reloaded: r.reloaded } : {}),
+      ...(r.traversed ? { traversed: r.traversed } : {}),
       waitedFor: toLegacyWaitedFor(r.waitedFor),
     };
   });
@@ -684,11 +726,52 @@ export async function takeSnapshot(
 
 export async function click(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number },
+  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; modifiers?: string[] },
 ): Promise<{ clicked: true; x: number; y: number }> {
   return withPage(driver, args.target, async (page) => {
-    const { x, y } = await page.click(locatorOf(args), { button: args.button ?? "left", clickCount: args.clickCount ?? 1 });
+    const { x, y } = await page.click(locatorOf(args), { button: args.button ?? "left", clickCount: args.clickCount ?? 1, modifiers: args.modifiers });
     return { clicked: true, x, y };
+  });
+}
+
+/**
+ * scroll's anchor rule: exactly one of `{uid}`, `{selector}`, or `{x,y}` — or none of the three,
+ * which means the viewport center. `x`/`y` must arrive together; one without the other is refused
+ * rather than silently treated as "half an anchor". Exported for the unit tests, which pin the
+ * rule without a browser.
+ */
+export function resolveScrollAnchor(args: { uid?: DriverUid; selector?: string; x?: number; y?: number }): ElementLocator | { x: number; y: number } | undefined {
+  const hasUid = args.uid !== undefined && args.uid !== null && args.uid !== ("" as unknown);
+  const hasSelector = typeof args.selector === "string" && args.selector.length > 0;
+  const hasX = args.x !== undefined;
+  const hasY = args.y !== undefined;
+  if (hasX !== hasY) throw new SharedToolError("scroll: 'x' and 'y' must be provided together");
+  const hasXY = hasX && hasY;
+  const anchorCount = [hasUid, hasSelector, hasXY].filter(Boolean).length;
+  if (anchorCount > 1) throw new SharedToolError("scroll: provide at most one of { uid }, { selector }, or { x, y } (omit all three to scroll at the viewport center)");
+  if (hasUid || hasSelector) return locatorOf({ uid: args.uid, selector: args.selector });
+  if (hasXY) return { x: args.x as number, y: args.y as number };
+  return undefined;
+}
+
+/** scroll's delta rule: at least one of deltaX/deltaY is required (a no-op scroll is refused
+ *  rather than silently dispatched). Exported for the unit tests. */
+export function resolveScrollDelta(args: { deltaX?: number; deltaY?: number }): { deltaX: number; deltaY: number } {
+  const deltaX = args.deltaX ?? 0;
+  const deltaY = args.deltaY ?? 0;
+  if (deltaX === 0 && deltaY === 0) throw new SharedToolError("scroll requires at least one of { deltaX } or { deltaY }");
+  return { deltaX, deltaY };
+}
+
+export async function scroll(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; x?: number; y?: number; deltaX?: number; deltaY?: number },
+): Promise<{ x: number; y: number; deltaX: number; deltaY: number; target: { id: string; url: string; title: string } }> {
+  const anchor = resolveScrollAnchor(args);
+  const { deltaX, deltaY } = resolveScrollDelta(args);
+  return withPage(driver, args.target, async (page) => {
+    const { x, y } = await page.scroll(anchor, { deltaX, deltaY });
+    return { x, y, deltaX, deltaY, target: target3(page.info) };
   });
 }
 
@@ -699,14 +782,106 @@ export async function hover(driver: BrowserDriver, args: { target?: TargetSelect
   });
 }
 
+/** drag's `to`: exactly one of { uid } | { selector } | { x, y }, x and y together. Exported for
+ *  the unit tests, which pin the rule without a browser. */
+export function resolveDragTo(to: { uid?: DriverUid; selector?: string; x?: number; y?: number }): DragDestination {
+  const hasUid = to.uid !== undefined && to.uid !== null && to.uid !== ("" as unknown);
+  const hasSelector = typeof to.selector === "string" && to.selector.length > 0;
+  const hasX = to.x !== undefined;
+  const hasY = to.y !== undefined;
+  if (hasX !== hasY) throw new SharedToolError("drag: 'to.x' and 'to.y' must be provided together");
+  const hasXY = hasX && hasY;
+  const count = [hasUid, hasSelector, hasXY].filter(Boolean).length;
+  if (count !== 1) throw new SharedToolError("drag: 'to' takes exactly one of { uid }, { selector }, or { x, y }");
+  if (hasXY) {
+    if (!Number.isFinite(to.x) || !Number.isFinite(to.y)) throw new SharedToolError("drag: 'to.x' and 'to.y' must be finite numbers");
+    return { x: to.x as number, y: to.y as number };
+  }
+  return locatorOf({ uid: to.uid, selector: to.selector });
+}
+
+/**
+ * drag's destination rule: EXACTLY one of `to` (where the drag ends) or `by` (how far it moves
+ * from the source point). Both is a contradiction and neither leaves nowhere to drag to, so both
+ * are refused rather than resolved by precedence — a caller who passed both meant one of them and
+ * silently picking is how the wrong widget gets dragged. `by` needs at least one of dx/dy; the
+ * other defaults to 0, so `by:{dx:40}` is a pure horizontal slider nudge. Exported for the tests.
+ */
+export function resolveDragDestination(args: {
+  to?: { uid?: DriverUid; selector?: string; x?: number; y?: number };
+  by?: { dx?: number; dy?: number };
+}): DragDestination {
+  const hasTo = args.to !== undefined && args.to !== null;
+  const hasBy = args.by !== undefined && args.by !== null;
+  if (hasTo === hasBy) throw new SharedToolError("drag requires exactly one of { to } or { by }");
+  if (hasBy) {
+    const by = args.by as { dx?: number; dy?: number };
+    const hasDx = by.dx !== undefined;
+    const hasDy = by.dy !== undefined;
+    if (!hasDx && !hasDy) throw new SharedToolError("drag: 'by' requires at least one of { dx } or { dy }");
+    const dx = by.dx ?? 0;
+    const dy = by.dy ?? 0;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new SharedToolError("drag: 'by.dx' and 'by.dy' must be finite numbers");
+    return { dx, dy };
+  }
+  return resolveDragTo(args.to as { uid?: DriverUid; selector?: string; x?: number; y?: number });
+}
+
+/** Upper bound on drag's interpolated moves. 500 already exceeds what any per-frame-sampling DnD
+ *  library needs (a 60fps drag lasting 8s), and each step is a round-tripped CDP command, so an
+ *  accidental `steps: 100000` would otherwise wedge the call for minutes. Refused, not clamped. */
+const MAX_DRAG_STEPS = 500;
+
+/** drag's `steps`: an integer in [1, MAX_DRAG_STEPS], default 2 (the pre-1.8.0 midpoint +
+ *  destination sequence). Exported for the unit tests. */
+export function resolveDragSteps(steps?: number): number {
+  if (steps === undefined) return 2;
+  if (typeof steps !== "number" || !Number.isInteger(steps) || steps < 1 || steps > MAX_DRAG_STEPS) {
+    throw new SharedToolError(`drag: 'steps' must be an integer between 1 and ${MAX_DRAG_STEPS} (default 2)`);
+  }
+  return steps;
+}
+
+/**
+ * drag's `mode`, plus the ONE backend gate in this file. mode:"html5" needs Capability
+ * "input.html5Drag", which only the Chrome driver declares (Chrome's Input.setInterceptDrags /
+ * dragIntercepted / dispatchDragEvent have no WebDriver BiDi equivalent). Per ADR-001 this is a
+ * PARAM-level gap, not a whole-tool one: `drag` stays in tools/list on Firefox because mouse mode
+ * works there, and asking for html5 on Firefox is a clear validation error — never a silent
+ * downgrade to mouse mode, which would report success for a drop that never happened.
+ * Exported for the unit tests.
+ */
+export function resolveDragMode(mode: string | undefined, capabilities: ReadonlySet<Capability>): "mouse" | "html5" {
+  if (mode === undefined || mode === "mouse") return "mouse";
+  if (mode !== "html5") throw new SharedToolError(`drag: unknown mode '${mode}' (use 'mouse' or 'html5')`);
+  if (!capabilities.has("input.html5Drag")) {
+    throw new SharedToolError(
+      "drag: mode:'html5' is not supported by this backend (WebDriver BiDi has no drag-interception primitive). " +
+        "Omit 'mode' for the synthetic-mouse drag, or use --browser chrome for real HTML5 drag events.",
+    );
+  }
+  return "html5";
+}
+
 export async function drag(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; from: { uid?: DriverUid; selector?: string }; to: { uid?: DriverUid; selector?: string } },
-): Promise<{ dragged: true; from: { x: number; y: number }; to: { x: number; y: number } }> {
-  if (!args.from || !args.to) throw new SharedToolError("drag requires { from } and { to }");
+  args: {
+    target?: TargetSelector;
+    from: { uid?: DriverUid; selector?: string };
+    to?: { uid?: DriverUid; selector?: string; x?: number; y?: number };
+    by?: { dx?: number; dy?: number };
+    mode?: "mouse" | "html5";
+    steps?: number;
+  },
+): Promise<{ dragged: true; mode: "mouse" | "html5"; steps: number; from: { x: number; y: number }; to: { x: number; y: number } }> {
+  if (!args.from) throw new SharedToolError("drag requires { from }");
+  const destination = resolveDragDestination(args);
+  const steps = resolveDragSteps(args.steps);
+  // Capability check BEFORE withPage: an unsupported mode must not claim a lease or open a socket.
+  const mode = resolveDragMode(args.mode, driver.capabilities);
   return withPage(driver, args.target, async (page) => {
-    const { from, to } = await page.drag(locatorOf(args.from), locatorOf(args.to));
-    return { dragged: true, from, to };
+    const { from, to } = await page.drag(locatorOf(args.from), destination, { mode, steps });
+    return { dragged: true, mode, steps, from, to };
   });
 }
 
@@ -839,8 +1014,9 @@ export async function handleDialog(
 
 /* ------------------------------------- registry ------------------------------------- */
 
-/** The 23 tools this file unifies, importable by both src/index.ts (Chrome) and
- *  src/firefox-tools.ts (Firefox). Each function is (driver, args) => Promise<result>. */
+/** The 24 tools this file unifies (23 pre-1.8.0, plus `scroll`, Track P1), importable by both
+ *  src/index.ts (Chrome) and src/firefox-tools.ts (Firefox). Each function is
+ *  (driver, args) => Promise<result>. */
 export const SHARED_TOOLS = {
   list_pages: listPages,
   new_page: newPage,
@@ -856,6 +1032,7 @@ export const SHARED_TOOLS = {
   click,
   hover,
   drag,
+  scroll,
   fill,
   fill_form: fillForm,
   type_text: typeText,

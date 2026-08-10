@@ -12,10 +12,11 @@ import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_E
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, interpolatePoints, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type SetCookieParams,
+  type DragDestination, type DragOptions,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
-  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type SnapshotNode, type UidStability,
+  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -89,6 +90,33 @@ async function centerOf(conn: CdpConnection, objectId: string): Promise<{ x: num
 async function focusElement(conn: CdpConnection, objectId: string): Promise<void> {
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){this.focus&&this.focus();}", returnByValue: true });
 }
+/**
+ * Chrome smooth-scrolls wheel-triggered scrolling by default (a genuine UX feature, not something
+ * a plain `--headless=new` launch turns off): Input.dispatchMouseEvent's mouseWheel command
+ * resolves once the event is QUEUED, not once the resulting scroll animation has settled, so a
+ * caller reading scrollTop immediately after dispatch can observe the PRE-scroll value. Verified
+ * empirically against real headless Chrome 151 (not inferred): reading scrollTop in the same tick
+ * after the command resolved showed 0; a fixed 300ms wait showed the expected value.
+ *
+ * Rather than a blind sleep (wrong for a large delta's longer animation, wasteful for a small
+ * one), arm a CAPTURE-phase 'scroll' listener on window BEFORE dispatching the wheel event.
+ * Capture-phase listeners on window see scroll events targeted at ANY descendant scrollable
+ * element, even though 'scroll' itself does not bubble — the standard scroll-event-delegation
+ * technique. The promise resolves once 60ms pass with no further scroll event (debounced, so a
+ * multi-frame animation is waited out rather than caught mid-flight), capped at 500ms so a wheel
+ * event that scrolls nothing (delta too small, target already at its scroll limit) cannot hang.
+ */
+const ARM_SCROLL_SETTLE_WATCH =
+  "(function(){window.__cdpScrollSettle=new Promise((resolve)=>{let t;const done=()=>{window.removeEventListener('scroll',on,true);resolve(true);};" +
+  "const on=()=>{clearTimeout(t);t=setTimeout(done,60);};window.addEventListener('scroll',on,true);t=setTimeout(done,60);setTimeout(done,500);});})()";
+async function armScrollSettleWatch(conn: CdpConnection): Promise<void> {
+  await conn.send("Runtime.evaluate", { expression: ARM_SCROLL_SETTLE_WATCH, returnByValue: true });
+}
+async function awaitScrollSettle(conn: CdpConnection): Promise<void> {
+  // Best-effort: a navigation racing the wheel event could tear down window.__cdpScrollSettle
+  // before this reads it, and that is not a scroll failure worth surfacing as one.
+  await conn.send("Runtime.evaluate", { expression: "window.__cdpScrollSettle", awaitPromise: true, returnByValue: true }).catch(() => undefined);
+}
 // Copied verbatim (behaviorally) from src/tools/input.ts `setValue`. CRITICAL: must stay
 // byte-identical to input.ts; see the side-by-side quote in the driver report.
 //
@@ -123,6 +151,24 @@ const NAMED_KEYS: Record<string, KeySpec> = {
   pageup: { key: "PageUp", code: "PageUp", keyCode: 33 }, pagedown: { key: "PageDown", code: "PageDown", keyCode: 34 },
 };
 const MODIFIER_BITS: Record<string, number> = { alt: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
+// The closed click/dispatch_mouse modifiers enum (exact casing, no aliases): CDP bits Alt=1,
+// Control=2, Meta=4, Shift=8, per driver.ts's MouseButtonOptions doc. Exported for the unit tests
+// and for src/tools/dispatch-mouse.ts, which needs the identical bit math for its raw primitive.
+const CLICK_MODIFIER_BITS: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+export function inputModifierBits(mods?: readonly string[]): number {
+  let bits = 0;
+  for (const m of mods ?? []) {
+    const bit = CLICK_MODIFIER_BITS[m];
+    if (bit === undefined) throw driverError("page-error", `unknown modifier '${m}' (use Alt, Control, Meta, or Shift)`);
+    bits |= bit;
+  }
+  return bits;
+}
+/** How long drag mode:"html5" waits for Chrome's Input.dragIntercepted before declaring the source
+ *  element undraggable. Deliberately well under the 15s default command timeout: a page that is
+ *  going to start a drag does so on the first move, so a longer wait only delays a clear error. */
+const HTML5_DRAG_INTERCEPT_TIMEOUT_MS = 5_000;
+
 // Copied verbatim from src/tools/input.ts `resolveKey`.
 function resolveKey(key: string): KeySpec {
   const named = NAMED_KEYS[key.toLowerCase()];
@@ -273,13 +319,36 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * which is a real Chrome capability, not a line-budget artifact, so both ARE declared.
  * capture.screencast rides Page.startScreencast / Page.screencastFrame / Page.screencastFrameAck,
  * the streamed-repaint primitive behind start_screen_recording and stop_screen_recording.
+ * input.raw rides Input.dispatchMouseEvent dispatched one event at a time with no scroll-into-view
+ * or hover prefix (src/tools/dispatch-mouse.ts), the primitive behind dispatch_mouse; declared
+ * chrome-only per ADR-001 rather than attempted over BiDi's per-call performActions device-state
+ * model (see dispatch-mouse.ts's header for why that combination was not attempted this pass).
+ * input.html5Drag rides Input.setInterceptDrags + Input.dragIntercepted + Input.dispatchDragEvent
+ * (drag's mode:"html5", see CdpPageDriver.html5Drag). It is a PARAM-level capability, not a
+ * whole-tool one: `drag` itself stays universal because mouse mode works on both backends, so
+ * input.html5Drag is deliberately absent from driver.ts's REQUIRED_CAPABILITIES and is instead
+ * checked by shared-tools.ts's drag() when mode:"html5" is asked for. ADR-001 governs whole tools;
+ * a param gap surfaces as a clear validation error named in the manifest description, exactly like
+ * click's modifiers-on-Firefox (Track P1). WebDriver BiDi has no drag-interception primitive at
+ * all — no equivalent of setInterceptDrags, no drag event to subscribe to — so this is a genuine
+ * protocol gap, not an unattempted port.
+ * browser.downloads (wait_for_download) rides Browser.setDownloadBehavior + Browser.downloadWillBegin
+ * + Browser.downloadProgress, and browser.permissions (grant_permissions) rides
+ * Browser.grantPermissions + Browser.resetPermissions. Both are BROWSER-endpoint commands whose
+ * effect is bound to the CDP client that issued them and is REVERTED when that client disconnects
+ * (measured, both of them — see src/tools/browser-session.ts's header for the experiment), so both
+ * tools run on the standing connection that module holds rather than on a per-call socket. Neither
+ * is declared for BiDi: Firefox's browsingContext.downloadWillBegin/downloadEnd exist but there is
+ * no BiDi command to redirect a download to a chosen directory, and BiDi has no permission-granting
+ * command at all outside the optional `permissions` module this driver does not negotiate.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
-  "capture.screencast",
+  "capture.screencast", "input.raw", "input.html5Drag",
+  "browser.downloads", "browser.permissions",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -333,10 +402,32 @@ class CdpPageDriver implements PageDriver {
     this.enabledDomains.add(name);
     await this.conn.send(`${name}.enable`).catch(() => undefined);
   }
+  /**
+   * The history entry exactly one step `direction` from the current one. Throws when there is
+   * none, naming the direction: NavigateOptions.history's contract forbids a silent no-op, and
+   * Page.navigateToHistoryEntry with a bad id would fail with a protocol message that never
+   * mentions "back" or "forward", which is not an answer a caller can act on.
+   */
+  private async historyEntry(direction: "back" | "forward"): Promise<{ id: number; url: string }> {
+    const h = await this.conn.send<{ currentIndex: number; entries: Array<{ id: number; url: string }> }>("Page.getNavigationHistory");
+    const entries = h.entries ?? [];
+    const entry = entries[h.currentIndex + (direction === "back" ? -1 : 1)];
+    if (!entry) {
+      throw driverError(
+        "page-error",
+        `navigate: no history entry to go ${direction} to (at entry ${h.currentIndex + 1} of ${entries.length})`,
+      );
+    }
+    return entry;
+  }
   async navigate(opts: NavigateOptions): Promise<NavigateResult> {
     await this.ensureDomain("Page");
     const reload = opts.reload === true;
-    if (!reload && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    const history = opts.history;
+    if (!reload && !history && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    // Resolved BEFORE the milestone waiters are armed: a refused traversal must throw without
+    // leaving two armed waitFor timers behind holding the event loop open for timeoutMs.
+    const entry = history ? await this.historyEntry(history) : undefined;
     const waitUntil = opts.waitUntil ?? "load";
     const milestoneMethod = waitUntil === "load" ? "Page.loadEventFired" : "Page.domContentEventFired";
     const milestone = this.conn.waitFor(milestoneMethod, undefined, opts.timeoutMs).then(() => waitUntil as NavigateResult["waitedFor"]).catch(() => undefined);
@@ -348,6 +439,15 @@ class CdpPageDriver implements PageDriver {
       contextId = tree?.frameTree?.frame?.id ?? "";
       url = tree?.frameTree?.frame?.url ?? opts.url ?? "";
       reloaded = true;
+    } else if (entry) {
+      await this.conn.send("Page.navigateToHistoryEntry", { entryId: entry.id }, opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
+      // Provisional: the entry we asked for. The authoritative post-traversal url is read from the
+      // frame tree AFTER the milestone race below — navigateToHistoryEntry resolves the moment the
+      // traversal is dispatched, so reading the frame tree here would still report the OUTGOING
+      // document (measured: the reload branch gets away with an immediate read only because a
+      // reload's url cannot change).
+      contextId = "";
+      url = entry.url;
     } else {
       const nav = await this.conn.send<{ frameId: string; errorText?: string }>("Page.navigate", { url: opts.url }, opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
       if (nav.errorText) throw driverError("page-error", `navigate: ${nav.errorText} (${opts.url})`);
@@ -355,12 +455,22 @@ class CdpPageDriver implements PageDriver {
       url = opts.url as string;
     }
     const settled = await Promise.race([milestone, stopped]);
+    if (entry) {
+      const tree = await this.conn.send<{ frameTree?: { frame?: { id?: string; url?: string } } }>("Page.getFrameTree").catch(() => undefined);
+      contextId = tree?.frameTree?.frame?.id ?? contextId;
+      url = tree?.frameTree?.frame?.url ?? url;
+    }
     // "timeout" here means the navigation already committed (Page.navigate/reload resolved) but
     // no load/domcontentloaded milestone arrived before opts.timeoutMs; it is NOT the navigate
     // call itself timing out. NavigateResult.waitedFor's vocabulary is BiDi-shaped (BiDi's
     // navigate takes an explicit readiness state) rather than CDP-native, so this is the
     // closest honest mapping onto CDP's milestone events.
-    return { url, contextId, ...(reloaded ? { reloaded } : {}), waitedFor: settled ?? "timeout" };
+    return {
+      url, contextId,
+      ...(reloaded ? { reloaded } : {}),
+      ...(history ? { traversed: history } : {}),
+      waitedFor: settled ?? "timeout",
+    };
   }
   async waitForText(text: string, timeoutMs = 15_000, pollMs = 250): Promise<{ found: true; elapsedMs: number }> {
     await this.ensureDomain("Runtime");
@@ -448,24 +558,130 @@ class CdpPageDriver implements PageDriver {
     return { x, y };
   }
   // Copied dispatch sequence verbatim from src/tools/input.ts `click` (its resolve+centerOf+mouseMoved prefix IS hover, reused here).
+  // modifiers is new in 1.8.0 (Track P1): held for both press and release, same as a real chord.
   async click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }> {
     const button = opts?.button ?? "left";
     const clickCount = opts?.clickCount ?? 1;
+    const modifiers = inputModifierBits(opts?.modifiers);
     const { x, y } = await this.hover(loc);
-    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
-    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount, modifiers });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount, modifiers });
     return { x, y };
   }
-  // Copied dispatch sequence verbatim from src/tools/input.ts `drag` (its "from" prefix IS hover, reused here).
-  async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+  // 1.8.0 Track P1: scroll into view (same as click/hover) when an element anchor is given; an
+  // {x,y} anchor is already a viewport point, and no anchor scrolls at the viewport center.
+  async scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }> {
+    await this.ensureDomain("Runtime");
+    const { x, y } = await this.resolveScrollPoint(anchor);
+    // Arm the settle watch BEFORE dispatching: the wheel event's resulting scroll can start (and,
+    // for a small delta, finish) before this command's own response comes back, so arming after
+    // dispatch could miss it and wait out the full 500ms cap needlessly. See armScrollSettleWatch's
+    // doc comment for why a listener is used instead of a fixed sleep.
+    await armScrollSettleWatch(this.conn);
+    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: opts.deltaX ?? 0, deltaY: opts.deltaY ?? 0 });
+    await awaitScrollSettle(this.conn);
+    return { x, y };
+  }
+  private async resolveScrollPoint(anchor: ElementLocator | { x: number; y: number } | undefined): Promise<{ x: number; y: number }> {
+    if (anchor === undefined) {
+      await this.ensureDomain("Runtime");
+      const { result, exceptionDetails } = await this.conn.send<{ result: { value?: { x: number; y: number } }; exceptionDetails?: { text?: string } }>(
+        "Runtime.evaluate", { expression: "({x: window.innerWidth / 2, y: window.innerHeight / 2})", returnByValue: true },
+      );
+      if (exceptionDetails || !result.value) throw driverError("page-error", `could not measure viewport for scroll center: ${exceptionDetails?.text ?? "no value"}`);
+      return result.value;
+    }
+    if ("x" in anchor) return anchor;
+    const { objectId } = await resolveElementLocator(this.conn, anchor);
+    return centerOf(this.conn, objectId);
+  }
+  // Dispatch sequence originally copied verbatim from src/tools/input.ts `drag` (its "from" prefix
+  // IS hover, reused here). 1.8.0 Track P2 generalised it: `to` may be an element, a viewport
+  // point, or an offset; `steps` sets the interpolation count; `mode:"html5"` swaps the tail of
+  // the sequence for real drag events. steps:2 reproduces the original midpoint+destination moves
+  // exactly, so the default path is byte-for-byte the pre-1.8.0 dispatch.
+  async drag(from: ElementLocator, to: DragDestination, opts?: DragOptions): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
     const fromPt = await this.hover(from);
-    const { objectId: dstId } = await resolveElementLocator(this.conn, to);
-    const toPt = await centerOf(this.conn, dstId);
+    const toPt = await this.resolveDragDestination(to, fromPt);
+    const steps = Math.max(1, Math.trunc(opts?.steps ?? 2));
+    if ((opts?.mode ?? "mouse") === "html5") {
+      await this.html5Drag(fromPt, toPt, steps);
+      return { from: fromPt, to: toPt };
+    }
     await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
-    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, button: "left" });
-    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: toPt.x, y: toPt.y, button: "left" });
+    for (const pt of interpolatePoints(fromPt, toPt, steps)) {
+      await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
+    }
     await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
     return { from: fromPt, to: toPt };
+  }
+  private async resolveDragDestination(to: DragDestination, fromPt: { x: number; y: number }): Promise<{ x: number; y: number }> {
+    if ("dx" in to) return { x: fromPt.x + to.dx, y: fromPt.y + to.dy };
+    if ("x" in to) return to;
+    const { objectId } = await resolveElementLocator(this.conn, to);
+    return centerOf(this.conn, objectId);
+  }
+  /**
+   * The real HTML5 drag (capability "input.html5Drag").
+   *
+   * WHY THIS EXISTS — MEASURED, NOT ASSUMED (Chrome 151.0.7922.109, macOS, --headless=new and
+   * headed alike; see test/input-smoke.ts's P2 section). The common claim that synthetic mouse
+   * events cannot drive HTML5 drag-and-drop is FALSE on modern Chrome: a plain mouse-mode drag
+   * does start a real drag and did fire dragstart and drop on a draggable source. What mouse mode
+   * cannot control is WHICH drag events the page gets, because they follow the interpolated
+   * pointer path. On the same page, the default steps:2 produced dragstart + drop but ZERO
+   * dragover, while steps:1 and steps:8 produced dragover — and a drop zone written the standard
+   * way (preventDefault inside dragover, the HTML spec's way to mark a valid drop target) refuses
+   * the drop when no dragover arrives. So mouse mode is a coin flip decided by geometry, and
+   * html5 mode is the deterministic path: dragEnter -> dragOver -> drop, dispatched explicitly at
+   * the destination, every time.
+   *
+   * Input.setInterceptDrags tells Chrome to hand the gesture BACK to the client instead of running
+   * it natively: the moment the drag would start, Chrome emits Input.dragIntercepted carrying the
+   * real DragData (items, mimeTypes, dragOperationsMask) it built from the page's own dragstart,
+   * and the client plays that data at the destination with Input.dispatchDragEvent. The data must
+   * be Chrome's — a hand-rolled DragData would drop whatever the page's dragstart handler put in
+   * the dataTransfer, which is exactly what a real DnD implementation reads in its drop handler.
+   *
+   * The event subscription is armed BEFORE the press for the same reason armScrollSettleWatch is
+   * armed before the wheel dispatch: dragIntercepted can arrive before the mouseMoved command's
+   * own ack, so subscribing afterwards is a race that loses the event and then waits out the full
+   * timeout. Sequence and the trailing mouseReleased mirror Puppeteer's Mouse.dragAndDrop.
+   *
+   * Interception is disabled in a `finally` unconditionally. Leaving it enabled would break real
+   * user dragging in that tab for as long as the browser lives — the tab would look fine and
+   * simply refuse to drag anything — and the tab may well be a human's (claim_page takeover), so
+   * this is not a tidiness nicety.
+   */
+  private async html5Drag(fromPt: { x: number; y: number }, toPt: { x: number; y: number }, steps: number): Promise<void> {
+    await this.conn.send("Input.setInterceptDrags", { enabled: true });
+    try {
+      const intercepted = this.conn
+        .waitFor<{ data: Record<string, unknown> }>("Input.dragIntercepted", undefined, HTML5_DRAG_INTERCEPT_TIMEOUT_MS)
+        .catch(() => undefined);
+      await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
+      for (const pt of interpolatePoints(fromPt, toPt, steps)) {
+        await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
+      }
+      const event = await intercepted;
+      if (!event?.data) {
+        throw driverError(
+          "page-error",
+          `drag mode:"html5": the page never started a drag (no Input.dragIntercepted within ${HTML5_DRAG_INTERCEPT_TIMEOUT_MS}ms). ` +
+            "The source element is probably not draggable — HTML5 drag-and-drop needs draggable=\"true\" (or a native draggable element) " +
+            "plus a dragstart handler. Use the default mode:\"mouse\" for widgets built on raw pointer events.",
+        );
+      }
+      const data = event.data;
+      for (const type of ["dragEnter", "dragOver", "drop"] as const) {
+        await this.conn.send("Input.dispatchDragEvent", { type, x: toPt.x, y: toPt.y, data });
+      }
+      await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
+    } finally {
+      // Never let a throw above leave this tab unable to drag. Swallowed on failure: the original
+      // error is the one worth reporting, and a dead connection cannot be un-intercepted anyway.
+      await this.conn.send("Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
+    }
   }
   async setValue(loc: ElementLocator, value: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);

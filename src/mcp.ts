@@ -19,6 +19,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
 import { resolveBrowserKind, stripBrowserFlag, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
+import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
@@ -115,6 +116,10 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   await disposeFirefoxSession();
+  // The standing browser-endpoint connection behind wait_for_download / grant_permissions (1.8.0
+  // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is
+  // closed explicitly so shutdown does not depend on that, and is a no-op when neither tool ran.
+  await disposeBrowserSession();
   process.exit(0);
 }
 process.on("SIGINT", () => void shutdown());

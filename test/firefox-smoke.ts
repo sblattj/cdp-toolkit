@@ -146,6 +146,54 @@ try {
     `result=${JSON.stringify(resultText)}`,
   );
 
+  // --- 7b. navigate history back/forward over BiDi (1.8.0 Track P3) ---
+  // navigate_page's `history` param is one of the few 1.8.0 features required on BOTH backends, so
+  // the BiDi half is proved here rather than asserted from the Chrome result. It exercises the
+  // path that has no Chrome counterpart: browsingContext.traverseHistory takes no `wait` parameter,
+  // so bidi/driver.ts owns the readiness wait itself (settleAfterTraversal).
+  await page.navigate({ url: `${BASE_URL}/form.html` });
+  await page.navigate({ url: `${BASE_URL}/contenteditable.html` });
+  const backNav = await page.navigate({ history: "back" });
+  const urlAfterBack = await page.evaluate("location.href");
+  record(
+    "navigate history:'back' traverses to the previous page (BiDi traverseHistory)",
+    backNav.traversed === "back" && String(urlAfterBack).includes("form.html") && backNav.url.includes("form.html"),
+    `result url=${backNav.url} traversed=${backNav.traversed} waitedFor=${backNav.waitedFor}; location=${String(urlAfterBack)}`,
+  );
+
+  const fwdNav = await page.navigate({ history: "forward" });
+  const urlAfterForward = await page.evaluate("location.href");
+  record(
+    "navigate history:'forward' traverses back to the later page (BiDi traverseHistory)",
+    fwdNav.traversed === "forward" && String(urlAfterForward).includes("contenteditable.html"),
+    `result url=${fwdNav.url} traversed=${fwdNav.traversed} waitedFor=${fwdNav.waitedFor}; location=${String(urlAfterForward)}`,
+  );
+
+  // The traversal we just did left this context on its NEWEST history entry, so one more 'forward'
+  // has nowhere to go. NavigateOptions.history forbids a silent no-op on every backend, and Firefox
+  // phrases its own refusal as "History entry with delta 1 not found" — a message that never names
+  // the direction the caller asked for — so bidi/driver.ts rewraps it. This pins that the Firefox
+  // error reads the same as the Chrome one rather than leaking the protocol's wording.
+  let ffBoundaryError = "";
+  try {
+    await page.navigate({ history: "forward", timeoutMs: 3000 });
+  } catch (err) {
+    ffBoundaryError = err instanceof Error ? err.message : String(err);
+  }
+  record(
+    "navigate history past the end of the stack ERRORS naming the direction, never a silent no-op",
+    /no history entry to go forward to/.test(ffBoundaryError),
+    `error=${JSON.stringify(ffBoundaryError)}`,
+  );
+
+  // --- 7c. the two Chrome-only P3 tools are ABSENT from this backend, not present-and-throwing ---
+  const p3Caps = { downloads: driver.capabilities.has("browser.downloads"), permissions: driver.capabilities.has("browser.permissions") };
+  record(
+    "wait_for_download / grant_permissions capabilities are absent on the Firefox backend (ADR-001)",
+    p3Caps.downloads === false && p3Caps.permissions === false,
+    `browser.downloads=${p3Caps.downloads} browser.permissions=${p3Caps.permissions}`,
+  );
+
   // --- 8. a Chrome-only capability is reported ABSENT for the Firefox backend ---
   // heap.snapshot (V8 heap snapshots) has no BiDi/Firefox equivalent at all,
   // per bidi/driver.ts's BIDI_CAPABILITIES / footer comment.
