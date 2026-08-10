@@ -540,10 +540,15 @@ class BidiPageDriver implements PageDriver {
   /**
    * THE INPUT DISPATCH CHOKE POINT for Firefox, and the direct counterpart of
    * cdp/driver.ts's dispatchInput. Every synthesized input this driver produces
-   * is already funnelled through this one method (hover, click, drag, setValue,
-   * typeText, pressKey all build actions and call it), so the dispatch-log write
-   * that keeps the toolkit's own input from reading as a human's needs exactly
-   * one line, here. See ../activity.ts.
+   * is already funnelled through this one method (hover, click, scroll, drag,
+   * setValue, typeText, pressKey all build actions and call it), so the
+   * dispatch-log write that keeps the toolkit's own input from reading as a
+   * human's needs exactly one line, here. See ../activity.ts.
+   *
+   * scroll and the generalised drag arrived on the OTHER 1.8.0 branch (Track P)
+   * and inherited the log for free by building on this method — which is the
+   * whole argument for a choke point, and the reason this list is worth keeping
+   * accurate rather than deleting.
    *
    * NOT routed through here: input.setFiles (upload_file). Same reasoning as the
    * CDP side — it fires none of the beacon's events, so logging it could only

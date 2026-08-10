@@ -454,6 +454,45 @@ try {
     `humanActiveMs=${rowAfterReclaim === undefined ? "NO ROW" : JSON.stringify(rowAfterReclaim.humanActiveMs)}`,
   );
 
+  /* --- 6b. THE CROSS-TRACK PROOF: a 1.8.0 input tool is in the dispatch log too --- */
+  // The regression this exists to catch is invisible to both feature branches. Track P's `scroll`
+  // was written against main, before this branch's dispatch log existed, and sent its wheel event
+  // straight down the connection. Merged naively, the result compiles, typechecks, passes both unit
+  // suites and every other assertion in this file — and then reports the TOOLKIT'S OWN scroll as a
+  // person using the tab, i.e. warns an agent about contention with itself. Only a live browser can
+  // show it: the wheel event has to actually reach the page's beacon for the misattribution to
+  // happen at all.
+  //
+  // Shaped as "take attribution BACK from a real human input" rather than "scroll a fresh tab",
+  // because a fresh tab reports humanActiveMs undefined anyway and the assertion could not fail.
+  await pause(DISPATCH_ATTRIBUTION_WINDOW_MS + 400);
+  await raw.click(120, 120);
+  await pause(150);
+  const rowBeforeScroll = await leaseRow(tab);
+  const beaconBeforeScroll = await readBeaconState(takeover.lease, tab);
+  record(
+    "a human input is attributed before the toolkit scrolls (the precondition this proof needs)",
+    rowBeforeScroll !== undefined && typeof rowBeforeScroll.humanActiveMs === "number",
+    `humanActiveMs=${JSON.stringify(rowBeforeScroll?.humanActiveMs)} before the scroll`,
+  );
+
+  await withLeaseScope(takeover.lease, () => TOOLS.scroll({ target: tab, deltaY: 240 }));
+  await pause(150);
+  const beaconAfterScroll = await readBeaconState(takeover.lease, tab);
+  const rowAfterScroll = await leaseRow(tab);
+  record(
+    // THE CONTROL, exactly as in section 3: the beacon has to have SEEN the scroll, or the
+    // attribution assertion below would pass on a page where nothing happened at all.
+    "the toolkit's own scroll moved the in-page beacon (a wheel event is one of the beacon's five)",
+    typeof beaconAfterScroll.ts === "number" && beaconAfterScroll.ts > (beaconBeforeScroll.ts ?? 0),
+    `beacon ${JSON.stringify(beaconBeforeScroll.ts)} -> ${JSON.stringify(beaconAfterScroll.ts)}`,
+  );
+  record(
+    "and the scroll is NOT attributed to a human: Track P's tool writes to Track S's dispatch log",
+    rowAfterScroll !== undefined && rowAfterScroll.humanActiveMs === undefined,
+    `list_leases row after a toolkit scroll: humanActiveMs=${rowAfterScroll === undefined ? "NO ROW" : JSON.stringify(rowAfterScroll.humanActiveMs)}`,
+  );
+
   raw.close();
   await TOOLS.release_page({ lease: takeover.lease, close: false }).catch(() => undefined);
 

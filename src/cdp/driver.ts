@@ -8,7 +8,7 @@
 import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { LeaseConflictError } from "../leases.ts";
-import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, recordDispatch } from "../activity.ts";
+import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
@@ -382,7 +382,14 @@ class CdpPageDriver implements PageDriver {
    *
    * IF YOU ARE ADDING AN INPUT TOOL (scroll, dispatch_mouse, a drag mode, ...):
    * send through `this.dispatchInput(...)`, never `this.conn.send(...)`. That is
-   * the entire integration.
+   * the entire integration. 1.8.0's scroll and html5 drag arrived on a branch
+   * written before this method existed and did exactly that at merge time.
+   *
+   * The actual write lives in ../activity.ts's `sendInput`, which this delegates
+   * to, because one chrome-only tool (tools/dispatch-mouse.ts) dispatches input
+   * with a bare connection and no PageDriver to route through. Both callers share
+   * that one writer, so `conn.send("Input.` appears nowhere in src/ and the
+   * completeness of the log is a grep, not a convention.
    *
    * Deliberately NOT routed through here: DOM.setFileInputFiles (upload_file).
    * It attaches files to an input element and fires the page's change handler;
@@ -392,8 +399,7 @@ class CdpPageDriver implements PageDriver {
    * one.
    */
   private async dispatchInput<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    recordDispatch("chrome", this.info.id);
-    return this.conn.send<T>(method, params);
+    return sendInput<T>(this.conn, "chrome", this.info.id, method, params);
   }
   /** Same as ensureDomain but tolerates the enable call itself failing (matches a legacy
    *  `.catch(() => undefined)` site); a failed enable is NOT re-attempted on the next call. */
@@ -578,7 +584,7 @@ class CdpPageDriver implements PageDriver {
     // dispatch could miss it and wait out the full 500ms cap needlessly. See armScrollSettleWatch's
     // doc comment for why a listener is used instead of a fixed sleep.
     await armScrollSettleWatch(this.conn);
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: opts.deltaX ?? 0, deltaY: opts.deltaY ?? 0 });
+    await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: opts.deltaX ?? 0, deltaY: opts.deltaY ?? 0 });
     await awaitScrollSettle(this.conn);
     return { x, y };
   }
@@ -654,14 +660,14 @@ class CdpPageDriver implements PageDriver {
    * this is not a tidiness nicety.
    */
   private async html5Drag(fromPt: { x: number; y: number }, toPt: { x: number; y: number }, steps: number): Promise<void> {
-    await this.conn.send("Input.setInterceptDrags", { enabled: true });
+    await this.dispatchInput("Input.setInterceptDrags", { enabled: true });
     try {
       const intercepted = this.conn
         .waitFor<{ data: Record<string, unknown> }>("Input.dragIntercepted", undefined, HTML5_DRAG_INTERCEPT_TIMEOUT_MS)
         .catch(() => undefined);
-      await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
+      await this.dispatchInput("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
       for (const pt of interpolatePoints(fromPt, toPt, steps)) {
-        await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
+        await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
       }
       const event = await intercepted;
       if (!event?.data) {
@@ -674,13 +680,13 @@ class CdpPageDriver implements PageDriver {
       }
       const data = event.data;
       for (const type of ["dragEnter", "dragOver", "drop"] as const) {
-        await this.conn.send("Input.dispatchDragEvent", { type, x: toPt.x, y: toPt.y, data });
+        await this.dispatchInput("Input.dispatchDragEvent", { type, x: toPt.x, y: toPt.y, data });
       }
-      await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
+      await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
     } finally {
       // Never let a throw above leave this tab unable to drag. Swallowed on failure: the original
       // error is the one worth reporting, and a dead connection cannot be un-intercepted anyway.
-      await this.conn.send("Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
+      await this.dispatchInput("Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
     }
   }
   async setValue(loc: ElementLocator, value: string): Promise<void> {
