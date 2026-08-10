@@ -378,9 +378,51 @@ class BidiPageDriver implements PageDriver {
   private bodyCollector?: string;
   constructor(private readonly conn: BidiConnection, private readonly contextId: BrowsingContextId, readonly info: PageInfo, readonly browser: BrowserDriver) {}
 
+  /** `location.href` and `document.readyState` in one round trip, NUL-joined so the result comes
+   *  back as one plain string (deserializeRemote's simplest shape). Empty strings on any failure —
+   *  a transient evaluate error during a navigation is normal and must not abort a poll. */
+  private async urlAndReadyState(): Promise<[string, string]> {
+    const raw = await this.conn.send("script.evaluate", {
+      expression: "location.href + '\\u0000' + document.readyState",
+      target: { context: this.contextId }, awaitPromise: false,
+    }).then((r) => (r.type === "success" ? String(deserializeRemote(r.result) ?? "") : "")).catch(() => "");
+    const [url = "", ready = ""] = raw.split("\u0000");
+    return [url, ready];
+  }
+
+  /**
+   * Bounded readiness wait after a history traversal.
+   *
+   * WHY THIS EXISTS AT ALL. browsingContext.navigate and .reload both take a `wait` readiness state
+   * and block server-side until it is reached, which is why the two branches below simply return
+   * `waitedFor: waitUntil`. browsingContext.traverseHistory takes NO `wait` parameter and returns
+   * as soon as the traversal is dispatched, so this driver owns the wait for that one path — the
+   * same position cdp/driver.ts is in for every navigation.
+   *
+   * Polling rather than a `browsingContext.load` subscription, matching waitForText's in-file
+   * pattern: a bfcache restore does not necessarily re-fire a load event, so an event wait could
+   * hang on a perfectly successful traversal while a poll observes the settled document directly.
+   *
+   * KNOWN LIMIT, stated rather than hidden: "we moved" is inferred from the url changing. A
+   * traversal between two history entries with the IDENTICAL url therefore cannot be confirmed and
+   * burns the whole budget before returning "timeout" — with the correct url, and after the
+   * traversal really did happen. That is the honest reading of the only signal available here.
+   */
+  private async settleAfterTraversal(beforeUrl: string, waitUntil: "load" | "domcontentloaded", timeoutMs: number): Promise<{ waitedFor: NavigateResult["waitedFor"]; url: string }> {
+    const ready = waitUntil === "domcontentloaded" ? ["interactive", "complete"] : ["complete"];
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [url, state] = await this.urlAndReadyState();
+      if (url && url !== beforeUrl && ready.includes(state)) return { waitedFor: waitUntil, url };
+      if (Date.now() >= deadline) return { waitedFor: "timeout", url: url || beforeUrl };
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
   async navigate(opts: NavigateOptions): Promise<NavigateResult> {
     const reload = opts.reload === true;
-    if (!reload && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    const history = opts.history;
+    if (!reload && !history && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
     const waitUntil = opts.waitUntil ?? "load";
     const wait: BrowsingContextReadinessState = waitUntil === "domcontentloaded" ? "interactive" : "complete";
     const sendOpts = opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {};
@@ -388,6 +430,21 @@ class BidiPageDriver implements PageDriver {
       if (reload) {
         const r = await this.conn.send("browsingContext.reload", { context: this.contextId, ignoreCache: opts.ignoreCache === true, wait }, sendOpts);
         return { url: r.url, contextId: this.contextId, reloaded: true, waitedFor: waitUntil };
+      }
+      if (history) {
+        const [beforeUrl] = await this.urlAndReadyState();
+        // NavigateOptions.history forbids a silent no-op. Firefox answers a traversal past either
+        // end of the session history with a "no such history entry" error, which mapBidiError would
+        // relay verbatim — a message that never names the direction the caller asked for. Rewrapped
+        // here so back-at-the-start and forward-at-the-end read the same on both backends.
+        await this.conn.send("browsingContext.traverseHistory", { context: this.contextId, delta: history === "back" ? -1 : 1 }, sendOpts)
+          .catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/no such history entry|history/i.test(msg)) throw driverError("page-error", `navigate: no history entry to go ${history} to (${msg})`);
+            throw e;
+          });
+        const settled = await this.settleAfterTraversal(beforeUrl, waitUntil, opts.timeoutMs ?? 15_000);
+        return { url: settled.url, contextId: this.contextId, traversed: history, waitedFor: settled.waitedFor };
       }
       const r = await this.conn.send("browsingContext.navigate", { context: this.contextId, url: opts.url as string, wait }, sendOpts);
       return { url: r.url, contextId: this.contextId, waitedFor: waitUntil };

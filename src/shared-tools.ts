@@ -286,23 +286,65 @@ export interface LegacyNavigateResult {
   url: string;
   frameId: string;
   reloaded?: boolean;
+  /** Present only on a history traversal, mirroring how `reloaded` is present only on a reload. */
+  traversed?: "back" | "forward";
   waitedFor: "load" | "domcontentloaded" | "frameStoppedLoading" | "navigate-only";
+}
+
+/** What a navigate_page call is actually asking for. Exactly one of the three. */
+export type NavigateMode =
+  | { mode: "url"; url: string }
+  | { mode: "reload" }
+  | { mode: "history"; history: "back" | "forward" };
+
+/**
+ * The three-way exclusivity check for navigate_page's url / reload / history, split out and
+ * exported so every refusal is pinned by a unit test without a browser (the same reason
+ * resolveScrollAnchor and resolveDragDestination live at this layer).
+ *
+ * EXCLUSIVE, NOT PRECEDENCE-ORDERED. `{url, history:"back"}` is a caller who does not know what
+ * they want; silently honoring one of them would navigate somewhere the caller did not ask for and
+ * report success. Refusing names both, so the mistake is visible in the error rather than in the
+ * page that comes back.
+ */
+export function resolveNavigateMode(args: { url?: string; reload?: boolean; history?: unknown }): NavigateMode {
+  const reload = args.reload === true;
+  const hasUrl = typeof args.url === "string" && args.url.length > 0;
+  const hasHistory = args.history !== undefined && args.history !== null;
+  const given = [hasUrl ? "url" : "", reload ? "reload" : "", hasHistory ? "history" : ""].filter(Boolean);
+  if (given.length > 1) {
+    throw new SharedToolError(`navigate_page: 'url', 'reload' and 'history' are mutually exclusive (got ${given.join(" + ")})`);
+  }
+  if (hasHistory) {
+    if (args.history !== "back" && args.history !== "forward") {
+      throw new SharedToolError(`navigate_page: 'history' must be 'back' or 'forward' (got ${JSON.stringify(args.history)})`);
+    }
+    return { mode: "history", history: args.history };
+  }
+  if (reload) return { mode: "reload" };
+  if (!hasUrl) {
+    throw new SharedToolError(
+      "navigate_page: 'url' is required (or pass reload:true to reload the current page, or history:'back'|'forward' to go back/forward in this tab's session history)",
+    );
+  }
+  return { mode: "url", url: args.url as string };
 }
 
 export async function navigatePage(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; url?: string; reload?: boolean; ignoreCache?: boolean; waitUntil?: "load" | "domcontentloaded"; timeoutMs?: number },
+  args: {
+    target?: TargetSelector; url?: string; reload?: boolean; ignoreCache?: boolean;
+    history?: "back" | "forward"; waitUntil?: "load" | "domcontentloaded"; timeoutMs?: number;
+  },
 ): Promise<LegacyNavigateResult> {
-  const reload = args.reload === true;
-  if (!reload && (!args.url || typeof args.url !== "string")) {
-    throw new SharedToolError("navigate_page: 'url' is required (or pass reload:true to reload the current page)");
-  }
+  const mode = resolveNavigateMode(args);
   return withPage(driver, args.target, async (page) => {
-    const r = await page.navigate(args);
+    const r = await page.navigate(mode.mode === "history" ? { ...args, history: mode.history } : args);
     return {
       url: r.url,
       frameId: r.contextId,
       ...(r.reloaded ? { reloaded: r.reloaded } : {}),
+      ...(r.traversed ? { traversed: r.traversed } : {}),
       waitedFor: toLegacyWaitedFor(r.waitedFor),
     };
   });

@@ -320,6 +320,15 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * click's modifiers-on-Firefox (Track P1). WebDriver BiDi has no drag-interception primitive at
  * all — no equivalent of setInterceptDrags, no drag event to subscribe to — so this is a genuine
  * protocol gap, not an unattempted port.
+ * browser.downloads (wait_for_download) rides Browser.setDownloadBehavior + Browser.downloadWillBegin
+ * + Browser.downloadProgress, and browser.permissions (grant_permissions) rides
+ * Browser.grantPermissions + Browser.resetPermissions. Both are BROWSER-endpoint commands whose
+ * effect is bound to the CDP client that issued them and is REVERTED when that client disconnects
+ * (measured, both of them — see src/tools/browser-session.ts's header for the experiment), so both
+ * tools run on the standing connection that module holds rather than on a per-call socket. Neither
+ * is declared for BiDi: Firefox's browsingContext.downloadWillBegin/downloadEnd exist but there is
+ * no BiDi command to redirect a download to a chosen directory, and BiDi has no permission-granting
+ * command at all outside the optional `permissions` module this driver does not negotiate.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
@@ -327,6 +336,7 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag",
+  "browser.downloads", "browser.permissions",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -352,10 +362,32 @@ class CdpPageDriver implements PageDriver {
     this.enabledDomains.add(name);
     await this.conn.send(`${name}.enable`).catch(() => undefined);
   }
+  /**
+   * The history entry exactly one step `direction` from the current one. Throws when there is
+   * none, naming the direction: NavigateOptions.history's contract forbids a silent no-op, and
+   * Page.navigateToHistoryEntry with a bad id would fail with a protocol message that never
+   * mentions "back" or "forward", which is not an answer a caller can act on.
+   */
+  private async historyEntry(direction: "back" | "forward"): Promise<{ id: number; url: string }> {
+    const h = await this.conn.send<{ currentIndex: number; entries: Array<{ id: number; url: string }> }>("Page.getNavigationHistory");
+    const entries = h.entries ?? [];
+    const entry = entries[h.currentIndex + (direction === "back" ? -1 : 1)];
+    if (!entry) {
+      throw driverError(
+        "page-error",
+        `navigate: no history entry to go ${direction} to (at entry ${h.currentIndex + 1} of ${entries.length})`,
+      );
+    }
+    return entry;
+  }
   async navigate(opts: NavigateOptions): Promise<NavigateResult> {
     await this.ensureDomain("Page");
     const reload = opts.reload === true;
-    if (!reload && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    const history = opts.history;
+    if (!reload && !history && !opts.url) throw driverError("page-error", "navigate: 'url' is required unless reload:true");
+    // Resolved BEFORE the milestone waiters are armed: a refused traversal must throw without
+    // leaving two armed waitFor timers behind holding the event loop open for timeoutMs.
+    const entry = history ? await this.historyEntry(history) : undefined;
     const waitUntil = opts.waitUntil ?? "load";
     const milestoneMethod = waitUntil === "load" ? "Page.loadEventFired" : "Page.domContentEventFired";
     const milestone = this.conn.waitFor(milestoneMethod, undefined, opts.timeoutMs).then(() => waitUntil as NavigateResult["waitedFor"]).catch(() => undefined);
@@ -367,6 +399,15 @@ class CdpPageDriver implements PageDriver {
       contextId = tree?.frameTree?.frame?.id ?? "";
       url = tree?.frameTree?.frame?.url ?? opts.url ?? "";
       reloaded = true;
+    } else if (entry) {
+      await this.conn.send("Page.navigateToHistoryEntry", { entryId: entry.id }, opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
+      // Provisional: the entry we asked for. The authoritative post-traversal url is read from the
+      // frame tree AFTER the milestone race below — navigateToHistoryEntry resolves the moment the
+      // traversal is dispatched, so reading the frame tree here would still report the OUTGOING
+      // document (measured: the reload branch gets away with an immediate read only because a
+      // reload's url cannot change).
+      contextId = "";
+      url = entry.url;
     } else {
       const nav = await this.conn.send<{ frameId: string; errorText?: string }>("Page.navigate", { url: opts.url }, opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
       if (nav.errorText) throw driverError("page-error", `navigate: ${nav.errorText} (${opts.url})`);
@@ -374,12 +415,22 @@ class CdpPageDriver implements PageDriver {
       url = opts.url as string;
     }
     const settled = await Promise.race([milestone, stopped]);
+    if (entry) {
+      const tree = await this.conn.send<{ frameTree?: { frame?: { id?: string; url?: string } } }>("Page.getFrameTree").catch(() => undefined);
+      contextId = tree?.frameTree?.frame?.id ?? contextId;
+      url = tree?.frameTree?.frame?.url ?? url;
+    }
     // "timeout" here means the navigation already committed (Page.navigate/reload resolved) but
     // no load/domcontentloaded milestone arrived before opts.timeoutMs; it is NOT the navigate
     // call itself timing out. NavigateResult.waitedFor's vocabulary is BiDi-shaped (BiDi's
     // navigate takes an explicit readiness state) rather than CDP-native, so this is the
     // closest honest mapping onto CDP's milestone events.
-    return { url, contextId, ...(reloaded ? { reloaded } : {}), waitedFor: settled ?? "timeout" };
+    return {
+      url, contextId,
+      ...(reloaded ? { reloaded } : {}),
+      ...(history ? { traversed: history } : {}),
+      waitedFor: settled ?? "timeout",
+    };
   }
   async waitForText(text: string, timeoutMs = 15_000, pollMs = 250): Promise<{ found: true; elapsedMs: number }> {
     await this.ensureDomain("Runtime");

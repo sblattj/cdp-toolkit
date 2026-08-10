@@ -140,7 +140,9 @@ export type Capability =
   | "locate.text" // find a node by visible text substring
   | "locate.xpath" // find a node by xpath
   | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
-  | "input.html5Drag"; // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
+  | "input.html5Drag" // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
+  | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
+  | "browser.permissions"; // grant/reset browser permissions for an origin (grant_permissions); Chrome only
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
@@ -160,6 +162,8 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   list_mocks: ["network.intercept"],
   clear_mocks: ["network.intercept"],
   dispatch_mouse: ["input.raw"],
+  wait_for_download: ["browser.downloads"],
+  grant_permissions: ["browser.permissions"],
 } as const;
 
 /* --------------------------------- errors --------------------------------- */
@@ -216,6 +220,19 @@ export interface NavigateOptions {
   url?: string;
   reload?: boolean;
   ignoreCache?: boolean;
+  /**
+   * Traverse the tab's session history instead of loading a URL: the browser Back / Forward
+   * buttons. Mutually exclusive with `url` and `reload` (the tool layer enforces that; a driver
+   * trusts its caller). Chrome: Page.getNavigationHistory + Page.navigateToHistoryEntry. Firefox:
+   * browsingContext.traverseHistory{delta:-1|+1}. Universal — both drivers implement it, so this is
+   * deliberately NOT a Capability.
+   *
+   * NO SILENT NO-OP. Asking to go back from the first history entry (or forward from the last) is a
+   * caller mistake, not a legal outcome: both drivers MUST throw an error naming the direction
+   * rather than return a success that navigated nowhere, because a no-op success reads as "you are
+   * on the previous page" and the caller acts on that.
+   */
+  history?: "back" | "forward";
   waitUntil?: "load" | "domcontentloaded";
   timeoutMs?: number;
 }
@@ -225,6 +242,9 @@ export interface NavigateResult {
   /** CDP frameId or BiDi context id. Opaque. */
   contextId: string;
   reloaded?: boolean;
+  /** Which direction a `history` traversal actually moved. Present only for a history navigation,
+   *  the same way `reloaded` is present only for a reload. */
+  traversed?: "back" | "forward";
   waitedFor: "load" | "domcontentloaded" | "committed" | "timeout";
 }
 
