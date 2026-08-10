@@ -5,6 +5,7 @@
  */
 import type { CdpResponse, Target, TargetSelector } from "./types.ts";
 import { assertLeaseOk } from "./leases.ts";
+import { resolveLiveLabel } from "./origins.ts";
 
 /** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
 export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
@@ -197,7 +198,7 @@ export async function browserWsUrl(): Promise<string> {
  *  the ambient lease scope instead (see leases.ts). */
 export async function resolveTarget(selector: TargetSelector, opts: { lease?: string } = {}): Promise<Target> {
   const targets = await listTargets();
-  const hit = pickTarget(targets, selector);
+  const hit = await pickTarget(targets, selector);
   // THE Chrome choke point. Every tool reaches a page through here, so a tool
   // added after this shipped is protected with no action from its author.
   //
@@ -211,7 +212,7 @@ export async function resolveTarget(selector: TargetSelector, opts: { lease?: st
   return hit;
 }
 
-function pickTarget(targets: Target[], selector: TargetSelector): Target {
+async function pickTarget(targets: Target[], selector: TargetSelector): Promise<Target> {
   const pages = targets.filter((t) => t.type === "page");
   if (!selector || selector === "active") {
     if (!pages.length) throw new CdpError("no page targets open");
@@ -233,6 +234,22 @@ function pickTarget(targets: Target[], selector: TargetSelector): Target {
     const hit = pages.find((t) => t.title.includes(needle));
     if (!hit) throw new CdpError(`no page title containing '${needle}'`);
     return hit;
+  }
+  if (selector.startsWith("label:")) {
+    const label = selector.slice(6);
+    const { matchIds, knownLabels } = await resolveLiveLabel("chrome", label, pages.map((t) => t.id));
+    if (matchIds.length > 1) {
+      throw new CdpError(`label 'label:${label}' matches more than one live target: ${matchIds.join(", ")}. Resolve by target id instead.`);
+    }
+    if (matchIds.length === 1) {
+      const hit = pages.find((t) => t.id === matchIds[0]);
+      if (hit) return hit;
+    }
+    throw new CdpError(
+      knownLabels.length
+        ? `no live target with label '${label}' (labels currently in use: ${knownLabels.join(", ")})`
+        : `no live target with label '${label}' (no labels are currently assigned to any open target)`,
+    );
   }
   // bare id
   const byId = targets.find((t) => t.id === selector);

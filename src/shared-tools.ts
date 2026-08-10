@@ -44,7 +44,7 @@ import {
   type LeaseBackend, type LeaseStaleReason, type LeaseToken,
 } from "./leases.ts";
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
-import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
+import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "./origins.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -132,12 +132,42 @@ export async function pickPage(driver: BrowserDriver, pages: PageInfo[], selecto
     if (!p) throw new SharedToolError(`no page title containing '${needle}'`);
     return p;
   }
+  if (selector.startsWith("label:")) return pickByLabel(driver, pages, selector.slice(6));
   const exactPage = pages.find((x) => x.id === selector);
   if (exactPage) return exactPage;
   const all = await driver.listPages({ all: true });
   const exact = all.find((x) => x.id === selector);
   if (exact) return exact;
   throw new SharedToolError(`no target with id '${selector}'`);
+}
+
+/**
+ * "label:<name>" resolution for pickPage. The lookup itself (both stores,
+ * live-scoped) is shared with client.ts's pickTarget and bidi/driver.ts's
+ * pickContext via origins.ts's resolveLiveLabel, so the three copies of the
+ * selector grammar cannot drift on what counts as a hit, a miss or an
+ * ambiguity. Only the error wording is local, matching this file's
+ * SharedToolError idiom.
+ *
+ * Nothing is reaped here: this is a read, not a maintenance pass, and pickPage
+ * stays gate-free and side-effect-free over its inputs.
+ */
+async function pickByLabel(driver: BrowserDriver, pages: PageInfo[], label: string): Promise<PageInfo> {
+  const { matchIds, knownLabels } = await resolveLiveLabel(backendOf(driver), label, pages.map((x) => x.id));
+  if (matchIds.length > 1) {
+    throw new SharedToolError(
+      `label 'label:${label}' matches more than one live target: ${matchIds.join(", ")}. Resolve by target id instead.`,
+    );
+  }
+  if (matchIds.length === 1) {
+    const p = pages.find((x) => x.id === matchIds[0]);
+    if (p) return p;
+  }
+  throw new SharedToolError(
+    knownLabels.length
+      ? `no live target with label '${label}' (labels currently in use: ${knownLabels.join(", ")})`
+      : `no live target with label '${label}' (no labels are currently assigned to any open target)`,
+  );
 }
 
 /* -------------------------------- element locators -------------------------------- */
@@ -476,11 +506,23 @@ function sinkRequested(savePath?: string): savePath is string {
   return savePath !== undefined && savePath !== "";
 }
 
+/** Keys a caller reaches for out of habit from other automation APIs, none of
+ *  which this tool reads: the code always goes in 'expression'. Checked in
+ *  this order so the error names one wrong key, deterministically, when a
+ *  caller happens to pass more than one. */
+const EXPRESSION_ALIAS_KEYS = ["function", "code", "js", "script", "fn", "body"] as const;
+
 export async function evaluateScript(
   driver: BrowserDriver,
   args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string },
 ): Promise<unknown> {
   if (typeof args.expression !== "string" || args.expression.length === 0) {
+    const wrongKey = EXPRESSION_ALIAS_KEYS.find((k) => (args as Record<string, unknown>)[k] !== undefined);
+    if (wrongKey !== undefined) {
+      throw new SharedToolError(
+        `evaluateScript: you passed '${wrongKey}'; the key is 'expression' — function literals go in 'expression', invoked with 'args'.`,
+      );
+    }
     throw new SharedToolError("evaluateScript: 'expression' must be a non-empty string");
   }
   return withPage(driver, args.target, async (page) => {

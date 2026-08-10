@@ -89,7 +89,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         }
       },
       "required": [
@@ -110,7 +110,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         }
       },
       "required": [
@@ -131,7 +131,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "url": {
           "type": "string",
@@ -181,7 +181,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "text": {
           "type": "string",
@@ -214,11 +214,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring."
+          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases)."
         },
         "expression": {
           "type": "string",
-          "description": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when 'args' is provided."
+          "description": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when 'args' is provided. REQUIRED — the code always goes in this key, never in 'function', 'code', 'js', 'script', 'fn' or 'body'; a call using one of those instead is rejected with an error naming the wrong key."
         },
         "awaitPromise": {
           "type": "boolean",
@@ -251,7 +251,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "domain": {
           "type": "string",
@@ -282,7 +282,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "name": {
           "type": "string",
@@ -338,7 +338,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "name": {
           "type": "string",
@@ -373,7 +373,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default, = first page-type target) | 'index:N' (Nth page-type target, 0-based) | 'url:<substring>' | 'title:<substring>' | '<32-hex targetId>' (exact target by id)."
+          "description": "Target page selector: 'active' (default, = first page-type target) | 'index:N' (Nth page-type target, 0-based) | 'url:<substring>' | 'title:<substring>' | 'label:<name>' (exact label match, origin ledger or live lease) | '<32-hex targetId>' (exact target by id)."
         },
         "interactiveOnly": {
           "type": "boolean",
@@ -396,7 +396,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -449,7 +449,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -476,7 +476,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "from": {
           "type": "object",
@@ -562,7 +562,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -605,7 +605,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "action": {
           "type": "string",
@@ -671,7 +671,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. A download is browser-scoped, so this names the tab for the lease check and for the echoed target, not which download is returned."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'. A download is browser-scoped, so this names the tab for the lease check and for the echoed target, not which download is returned."
         },
         "arm": {
           "type": "boolean",
@@ -698,7 +698,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'. Used for the lease check and, when 'origin' is omitted, as the source of the origin to grant for."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'. Used for the lease check and, when 'origin' is omitted, as the source of the origin to grant for."
         },
         "permissions": {
           "type": "array",
@@ -732,7 +732,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -765,7 +765,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "fields": {
           "type": "array",
@@ -811,7 +811,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -844,7 +844,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "key": {
           "type": "string",
@@ -876,7 +876,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "uid": {
           "type": "number",
@@ -915,7 +915,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector. undefined or 'active' -> first page target; '<32-hex targetId>' -> exact target by id; 'index:N' -> Nth page target (0-based); 'url:<substring>' -> first page whose url contains substring; 'title:<substring>' -> first page whose title contains substring."
+          "description": "Target page selector. undefined or 'active' -> first page target; '<32-hex targetId>' -> exact target by id; 'index:N' -> Nth page target (0-based); 'url:<substring>' -> first page whose url contains substring; 'title:<substring>' -> first page whose title contains substring; 'label:<name>' -> the page with exactly this label (origin ledger or live lease)."
         },
         "format": {
           "type": "string",
@@ -966,7 +966,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "width": {
           "type": "number",
@@ -1066,7 +1066,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "width": {
           "type": "number",
@@ -1104,7 +1104,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (or omitted) for the first page-type target | 'index:N' (0-based) | 'url:<substring>' | 'title:<substring>' | a 32-hex <targetId>."
+          "description": "Target page selector: 'active' (or omitted) for the first page-type target | 'index:N' (0-based) | 'url:<substring>' | 'title:<substring>' | 'label:<name>' (exact label match, origin ledger or live lease) | a 32-hex <targetId>."
         },
         "accept": {
           "type": "boolean",
@@ -1141,7 +1141,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "reload": {
           "type": "boolean",
@@ -1168,7 +1168,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "index": {
           "type": "number",
@@ -1191,7 +1191,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "reload": {
           "type": "boolean",
@@ -1222,7 +1222,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
         },
         "requestId": {
           "type": "string",
@@ -1257,7 +1257,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "categories": {
           "type": "array",
@@ -1283,7 +1283,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         }
       },
       "required": [],
@@ -1321,7 +1321,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "durationMs": {
           "type": "number",
@@ -1359,7 +1359,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "format": {
           "type": "string",
@@ -1406,7 +1406,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Which recording to stop: 'active' (default, valid only when exactly one recording is in flight) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Which recording to stop: 'active' (default, valid only when exactly one recording is in flight) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "savePath": {
           "type": "string",
@@ -1429,7 +1429,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | '<targetId>'."
+          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
         },
         "savePath": {
           "type": "string",
@@ -1496,7 +1496,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target selector: active | index:N | url:<substr> | title:<substr> | <targetId>. Defaults to the active page."
+          "description": "Target selector: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Defaults to the active page."
         },
         "urlPattern": {
           "type": "string",
@@ -1604,7 +1604,7 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "target": {
           "type": "string",
-          "description": "Take over an already-open tab, e.g. one the human has open, when asked to: pass any target selector — active | index:N | url:<substr> | title:<substr> | <targetId>. Resolved against the live page list only, so it NEVER opens a tab: a selector that matches nothing is an error, not a new blank tab. The tab is left open on release because the toolkit did not create it. Refused if another live process holds it, including a lease the gate acquired for that process automatically under CDP_REQUIRE_LEASE: this takes over unleased (human) tabs and never steals one from a live agent. Mutually exclusive with targetId."
+          "description": "Take over an already-open tab, e.g. one the human has open, when asked to: pass any target selector — active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Resolved against the live page list only, so it NEVER opens a tab: a selector that matches nothing is an error, not a new blank tab. The tab is left open on release because the toolkit did not create it. Refused if another live process holds it, including a lease the gate acquired for that process automatically under CDP_REQUIRE_LEASE: this takes over unleased (human) tabs and never steals one from a live agent. Mutually exclusive with targetId."
         },
         "targetId": {
           "type": "string",
@@ -1639,7 +1639,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target selector for a tab this process holds: active | index:N | url:<substr> | title:<substr> | <targetId>. Mutually exclusive with 'lease'. Refused if another process holds the tab."
+          "description": "Target selector for a tab this process holds: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Mutually exclusive with 'lease'. Refused if another process holds the tab."
         },
         "close": {
           "type": "boolean",

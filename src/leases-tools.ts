@@ -73,7 +73,7 @@ export interface ClaimPageResult {
  * path for "work in the tab I have open", which previously had none, because
  * `targetId` demands an exact id a human never has to hand and no id at all
  * meant a brand new tab. `target` takes the toolkit's whole selector grammar
- * (active | index:N | url:<substr> | title:<substr> | <targetId>).
+ * (active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>).
  *
  * `targetId` is unchanged and still accepted; `target` is the same thing with a
  * grammar, so exactly one of the two may be given.
@@ -123,7 +123,7 @@ export async function claimPage(
   const hasTargetId = typeof args.targetId === "string" && args.targetId.length > 0;
   if (hasTarget && hasTargetId) {
     throw new LeaseToolError(
-      "claim_page takes at most one of 'target' (any selector: active | index:N | url:<substr> | title:<substr> | <targetId>) or 'targetId' (an exact target id, kept for back-compat). Pass 'target' alone to claim an open tab, or neither to open a fresh one.",
+      "claim_page takes at most one of 'target' (any selector: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>) or 'targetId' (an exact target id, kept for back-compat). Pass 'target' alone to claim an open tab, or neither to open a fresh one.",
     );
   }
   const backend = backendOf(driver);
