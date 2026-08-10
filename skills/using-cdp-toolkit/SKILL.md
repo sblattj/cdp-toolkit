@@ -72,20 +72,44 @@ An IIFE **plus** `args` throws ("does not evaluate to a function"). Empty `args:
 
 ## Leases: opt-in ownership for parallel agents
 
-Two agents on one Chrome both resolve `active` to the human's focused tab and silently drive the wrong page. A **lease** fixes that — and it is **opt-in**:
+Two agents on one Chrome both resolve `active` to the human's focused tab and silently drive the wrong page. A **lease** fixes that — and by default it is **opt-in**:
 
 - A tab **nobody** claimed behaves exactly as before; no `lease` argument needed.
 - The lease is enforced against **other** callers, and against **yourself once you hold it**: after you claim a tab, **every** later call to that tab must pass the `lease` token, or it is refused by name — `active`, `index:N`, `url:`, `title:`, and bare targetId all hit the same check.
 
 ```
-claim_page {url?, label?}            → {lease, targetId, url, ...}   (opens+claims, or claims an existing targetId)
-new_page {url, claim:true}           → {targetId, lease}            (open+claim in one call)
+claim_page {url?, label?}            → {lease, targetId, url, opened, ...}  (opens+claims, or claims an existing targetId)
+claim_page {target, label?}          → {lease, targetId, url, opened:false} (TAKES OVER a tab already open — see below)
+new_page {url, claim:true}           → {targetId, lease}                   (open+claim in one call)
 <any tool> {target, lease}           → pass the token every time
-release_page {lease}                 → give it back (idempotent; does NOT close the tab)
+release_page {lease}                 → give it back (idempotent)
+release_page {target}                → give it back by selector, for a lease you were never handed a token for
 list_leases                          → who holds what (needs no token; never returns the nonce)
 ```
 
-**Reclamation** — a lease is reclaimable only when its owning process is gone **or** `lastUsedAt` is older than `ttlMs` (default 15 min, `CDP_LEASE_TTL_MS`). Every checked call refreshes it, so a working agent never expires. Reclaiming mints a fresh nonce, invalidating the old token, so a stalled agent can't resume driving a reclaimed tab. **The CLI can't claim** (one process per call → instantly dead-pid); it may still pass an MCP-minted token with `--lease`.
+**`release_page` closes the tab, by default, if this toolkit opened it.** A tab `claim_page` or `new_page` created is closed on release; a tab you merely claimed (`targetId` or `target`, see below) is released and left exactly as you found it. Pass `close:false` to release without closing an agent-created tab, or `close:true` to force a close either way.
+
+### Working in a tab the human already has open
+
+If the human says "use the tab I have open" / "continue in my browser" / points you at a specific tab, do **not** open a new one — take it over:
+
+```
+claim_page {target: "active", label: "continuing-agent"}     → claims whatever tab is in front of them
+claim_page {target: "url:app.example.com", label: "..."}     → claims by url/title/index, same grammar as everywhere else
+```
+
+`target` accepts the full selector grammar (`active | index:N | url:<substr> | title:<substr> | <targetId>`) and only ever resolves against a tab that already exists — it never opens one, so a selector that matches nothing is an error, not a silent new tab. The result's `opened:false` confirms it took over rather than created, and because of that, **`release_page` leaves it open when you are done, no matter what** — the toolkit did not create it, so it is not the toolkit's tab to close. It is still refused if another live agent already holds it; there is no steal.
+
+### Strict mode: `CDP_REQUIRE_LEASE`
+
+If the MCP server is running with `CDP_REQUIRE_LEASE` set, leasing stops being opt-in: any call you make against a tab nobody holds **quietly claims it for you** rather than refusing or waiting on you to call `claim_page` first, so most tool calls need no behavior change from you at all. Two things do change:
+
+- **Call `release_page` when you are done with a tab you did not explicitly claim**, so it actually closes instead of sitting open forever. You were never handed a token for it (an auto-acquired lease doesn't mint one), so release it by selector: `release_page {target: "<the tab you were using>"}`.
+- **Use an explicit `claim_page` when you need a tab protected from your own sibling subagents**, not just from other sessions. Everything auto-claimed is owned per-*process*, and a Claude Code session's subagents all share one MCP server process, so they pass each other's auto-claimed leases freely. `claim_page` (or `new_page{claim:true}`) demands its token on every later call, even from a sibling in the same process, which is what actually fences a tab off.
+
+You cannot turn strict mode on or off yourself — it is an environment setting on the MCP server. If a call you expected to succeed lease-free instead comes back refused by another holder, someone else (a sibling subagent, most likely) already has that tab; `list_leases` shows who.
+
+**Reclamation** — a lease is reclaimable only when its owning process is gone **or** `lastUsedAt` is older than `ttlMs` (default 15 min, `CDP_LEASE_TTL_MS`). Every checked call refreshes it, so a working agent never expires. Reclaiming mints a fresh nonce, invalidating the old token, so a stalled agent can't resume driving a reclaimed tab. **The CLI can't claim** (one process per call → instantly dead-pid, and strict mode never applies there either); it may still pass an MCP-minted token with `--lease`.
 
 **One browser, one writer per flow.** Don't run two seats driving the same Chrome concurrently unless each holds its own lease on its own tab.
 
