@@ -34,6 +34,7 @@ import {
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
+import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "../workers.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
@@ -401,6 +402,15 @@ async function pickContext(
         ? `no live target with label '${label}' (labels currently in use: ${knownLabels.join(", ")})`
         : `no live target with label '${label}' (no labels are currently assigned to any open target)`,
     );
+  }
+  if (isWorkerSelector(selector)) {
+    // Capability-gated, not unimplemented: "unsupported" is the DriverErrorCode
+    // that tells a caller to check the capability rather than retry. The tool
+    // itself stays available on Firefox — only this arm of the grammar is
+    // refused, exactly as drag's mode:'html5' is. Refusing loudly beats the
+    // alternative the bare-id fall-through would produce, which is a confusing
+    // "no context matching 'worker:abc'" that reads like a typo.
+    throw driverError("unsupported", WORKER_SELECTOR_UNSUPPORTED_MESSAGE);
   }
   const exact = contexts.find((c) => c.context === selector);
   if (exact) return exact;

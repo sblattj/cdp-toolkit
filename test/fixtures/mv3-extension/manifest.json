@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "cdp-toolkit MV3 harness fixture",
+  "version": "1.0.0",
+  "description": "Minimal MV3 extension with a background service worker, used by test/extension-smoke.ts. Never published; loaded unpacked from disk with --load-extension.",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

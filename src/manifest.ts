@@ -204,7 +204,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "evaluate_script",
-    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript.",
+    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript. This is also the one tool that can evaluate inside an MV3 extension's background SERVICE WORKER rather than a page: pass target 'worker:<extension-id>' (Chrome only) and read chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started for you first (see 'wake').",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -214,7 +214,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases)."
+          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases) | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js) and read chrome.storage.local from it. The worker: arm is CHROME-ONLY (Capability 'worker.targets') and is accepted by this tool only; an MV3 worker that has been idle-evicted is started automatically first, see 'wake'."
+        },
+        "wake": {
+          "type": "boolean",
+          "description": "Only valid with a 'worker:<substring>' target, and rejected on a page target rather than ignored. Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so a wake asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything; the error then says the worker may simply be asleep."
         },
         "expression": {
           "type": "string",
