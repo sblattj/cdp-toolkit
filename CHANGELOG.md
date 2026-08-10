@@ -90,16 +90,16 @@ on.
 - **A worker's target id is re-minted on every restart, never stable** — this
   is why `wake` is refused on reads and on bare ids rather than silently doing
   the wrong thing.
-- **Monkeypatching `self.fetch` via `evaluate_script` to intercept a worker's
-  requests is structurally unreliable, and the reason is ordinary JS scoping,
-  not a broken realm.** A module that captured a reference to `fetch` at
-  import time keeps calling that reference; reassigning `self.fetch`
-  afterward cannot rebind it (closure semantics — true of a page too, not
-  SW-specific folklore). `Network`-domain recording observes what the code
-  actually sends and needs neither a monkeypatch nor visibility into module
-  state. (An earlier field report of "eval realm hides module state" was a
-  misdiagnosis of an outdated loaded extension build, not a real capability
-  gap — see the stale-build tip below.)
+- **Two things a caller might reach for instead don't work, for ordinary
+  JavaScript reasons, not a service-worker-specific one.** A value bound at
+  module top level is not visible from `evaluate_script`'s global scope
+  (plain lexical scoping, identical in a page); assigning `self.fetch`
+  afterward cannot rebind a `fetch` reference the module already captured
+  (closure semantics, also identical in a page). `Network`-domain recording
+  on the worker's own session observes what the code ACTUALLY SENT and needs
+  neither. (An earlier field report attributing this to service-worker eval
+  semantics was a misdiagnosis of an outdated loaded extension build, not a
+  real capability gap — see the stale-build tip below.)
 
 ### Notes
 
