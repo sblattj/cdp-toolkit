@@ -75,16 +75,27 @@ An IIFE **plus** `args` throws ("does not evaluate to a function"). Empty `args:
 
 ## MV3 extension service workers: don't hand-roll raw CDP
 
-An MV3 extension's logic lives in a background **service worker**, not a page — `chrome.storage.local`, `chrome.runtime`, and the worker's own globals are unreachable through any page-typed `target`. Don't reach for a raw `Target.attachToTarget`/`Runtime.evaluate` script to work around this: `evaluate_script` accepts `target: "worker:<substring>"` directly (Chrome only, capability `worker.targets`), matching any substring of the worker's url — `worker:<extension-id>` or `worker:background.js` both work:
+An MV3 extension's logic lives in a background **service worker**, not a page — `chrome.storage.local`, `chrome.runtime`, and the worker's own globals are unreachable through any page-typed `target`. Don't reach for a raw `Target.attachToTarget`/`Runtime.evaluate` script to work around this: `evaluate_script`, `list_network_requests`, `get_network_request`, and `list_console_messages` all accept `target: "worker:<substring>"` directly (Chrome only, capability `worker.targets`), matching any substring of the worker's url — `worker:<extension-id>` or `worker:background.js` both work:
 
 ```
 evaluate_script {target:"worker:ekgaohljhieodkfggjkfgmmamfpngdhn", expression:"chrome.storage.local.get()", args:[]}
 ```
 
-- **An idle worker is evicted within seconds and then invisible to every target listing.** `wake` defaults to `true`: a miss is started for you and re-resolved before failing. Pass `wake:false` for a fast failure instead of a wait.
-- **A worker-selected evaluate never touches the lease system** — no `claim_page`, no strict-mode auto-acquire, nothing to `release_page` afterward. There is no tab involved.
+- **An idle worker is evicted within seconds and then invisible to every target listing.** `wake` defaults to `true` on `evaluate_script` and on a capture (`reload:true`) of the three reader tools: a miss is started for you and re-resolved before failing. Pass `wake:false` to fail fast instead. `wake` is **refused**, not merely defaulted false, on a read of the three reader tools and on a bare worker target id — see the diagnostic flow below.
+- **A worker-selected evaluate never touches the lease system** — no `claim_page`, no strict-mode auto-acquire, nothing to `release_page` afterward. There is no tab involved. Same for a worker-targeted network/console read or capture.
 - **Firefox refuses `worker:` outright** (capability gap, not a bug) — extension service workers over WebDriver BiDi aren't a thing this backend can address.
 - Testing your own unpacked extension: **`--load-extension` is a no-op on recent Chrome**, even with the unblock flag. Load it via `Extensions.loadUnpacked` over CDP instead.
+
+### Diagnostic flow: watch a worker's outbound request end-to-end
+
+Before assuming CDP "can't see" what your extension's background worker is doing, walk this order:
+
+1. **Check you're driving the build you think you are.** `evaluate_script {target:"worker:<id>", expression:"chrome.runtime.getManifest().version"}`. Chrome keeps serving a stale unpacked build's worker until you explicitly reload the extension in `chrome://extensions`, and an outdated loaded build mimics every symptom below — rule it out first, it's one call.
+2. **Don't monkeypatch `self.fetch` via `evaluate_script` to intercept the worker's requests.** It won't work, and not because of some special service-worker eval realm: a module that captured a reference to `fetch` at import time keeps calling that reference, and reassigning `self.fetch` afterward can't rebind it — ordinary JS closure semantics, true of a page too. Claim nothing about the eval realm being unreliable; the mechanism below needs neither a monkeypatch nor visibility into module state.
+3. **Capture with the Network domain instead:** `list_network_requests {target:"worker:<id>", reload:true, durationMs:5000}` (or `worker:<url-substring>` if you don't have the id), then trigger the request you want to see — a message or alarm the worker handles — *after* the capture starts. A worker capture LISTENS rather than reloading (`Page.reload` doesn't exist on a worker session), so nothing you trigger before the window opens will show up; a worker woken by the capture itself has already run its top-level code, so its own boot-time fetch can be missed the same way.
+4. **`get_network_request`/`get_console_message` filter that same capture** by id/url once you have it — same read-path resolver, same worker-keyed buffer.
+5. **Remember the capture keeps the worker alive while it runs**, and Chrome resumes evicting it the moment the capture stops — a documented side effect, not a leak.
+6. **On a read (no `reload:true`) or a bare worker id, `wake` is refused, not defaulted false.** A restarted worker gets a brand-new target id, and the buffer is keyed by the old one, so waking on a read would hand back an empty capture disguised as an answer. Re-run with `reload:true` for a fresh one instead of expecting a stale id to wake into anything.
 
 ## Scroll, raw mouse, real drag
 
@@ -185,7 +196,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | pre-answer a permission prompt | `grant_permissions` (MCP-server-only) |
 | screenshot | `take_screenshot` (`fullPage`, `uid`/`selector` clip) |
 | cookies (httpOnly incl.) | `list_cookies` / `set_cookie` / `delete_cookies` |
-| console / network | `list_console_messages` / `list_network_requests` (`reload:true` to record fresh) |
+| console / network | `list_console_messages` / `list_network_requests` (`reload:true` to record fresh; also `target:"worker:<substring>"`, chrome-only) |
 | claim / release / inspect a tab (+ is a human there?) | `claim_page` / `release_page` / `list_leases` (`humanActiveMs`/`contention`) |
 | mock a backend | `mock_request` / `list_mocks` / `clear_mocks` |
 

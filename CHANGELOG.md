@@ -5,6 +5,123 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-08-10
+
+`list_network_requests`, `get_network_request`, and `list_console_messages` now
+observe MV3 background service workers, not just pages: the outbound fetch a
+worker makes to a real backend is a first-class capture target, not something
+you have to fake with an `evaluate_script` monkeypatch. Tool count stays 45 —
+the three tools grow a `worker:` arm, no new tool. One seat (N1) landed it,
+every protocol claim below probed against a live Chrome 151 before being built
+on.
+
+### Added
+
+- **The three console/network reader tools accept `target: "worker:<substring>"`
+  or a bare worker target id**, alongside the page selectors they already took.
+  Chrome only (capability `worker.targets`) — Firefox refuses the arm from its
+  real capability set before launching a browser that could never have served
+  the call. The allowlist that grants the arm, `WORKER_CAPABLE_TOOLS` in
+  `src/workers.ts`, now names four tools (`evaluate_script` plus these three);
+  it is the single source of truth for both the refusal messages and
+  `test/manifest-grammar-drift.test.ts`'s exclusion property, so a fifth tool
+  cannot silently advertise `worker:` without a deliberate edit here.
+
+- **A worker capture LISTENS instead of reloading.** Measured on Chrome
+  151.0.7922.109: `Network.enable` and `Runtime.consoleAPICalled` work
+  identically on a direct worker session to how they work on a page — all four
+  events the recorder persists (`requestWillBeSent`, `responseReceived`,
+  `loadingFinished`, `loadingFailed`) arrive, and `Network.getResponseBody`
+  serves the body — but `Page.enable`/`Page.reload` **do not exist** on a
+  worker session (`-32601 'Page.enable' wasn't found`). A page capture is
+  reload-driven; a worker capture cannot be, so it opens the worker's own CDP
+  session and listens for `durationMs` instead. `captureWindow()`'s branch is
+  keyed off the resolved target's type, not the selector's shape, so a bare
+  worker id takes the listen path too.
+
+- **Recording a worker keeps it alive for the length of the capture — a
+  deliberate side effect, not a bug.** A held CDP session suppresses MV3 idle
+  eviction; measured in both directions with the same polling loop so
+  "stayed alive" isn't an artifact of how the poll works: with the recorder's
+  session held, the worker is still present in `/json/list` and still emits a
+  fresh `Network.requestWillBeSent` for a triggered fetch at t+60s; once the
+  session detaches, the same worker idle-evicts within ~30s. Documented in the
+  three tools' manifest descriptions and asserted in both directions by the
+  live smoke, not left implicit.
+
+- **`wake` (default `true` on a capture) is REFUSED on a read-only call and on
+  a bare target id, rather than accepted and ignored.** Measured: a worker
+  that idle-evicts and restarts comes back under a brand-new target id (probed
+  restart: `C43F0A18...` → `1F7D3C59...` for the same extension). The recorder
+  keys its buffer file by target id, so waking a worker on a *read* would hand
+  back a live worker with an empty buffer — "0 requests" for a capture that
+  really did record some, a zero shaped like an answer. A wake therefore only
+  makes sense when a capture is being started, and only from a
+  `worker:<substring>` selector, since an evicted worker's old id no longer
+  exists to name. The refusal messages (`workerWakeMisuseMessage`,
+  `workerBufferReadMissMessage` in `src/workers.ts`) teach the id-re-mint fact
+  rather than just rejecting the argument.
+
+- **Known limitation, stated rather than silently absent: a worker woken BY a
+  capture has already run its top-level code by the time the recorder
+  attaches**, so a fetch the worker makes at startup can be missed. Trigger
+  the request you want to observe (a message, an alarm) after the capture
+  starts rather than relying on the worker's own boot-time fetch. Fixing this
+  needs `Target.setAutoAttach{waitForDebuggerOnStart}` on a held browser
+  session, a different feature; the limitation is documented in
+  `recorder.ts`'s header and in the three manifest descriptions instead.
+
+- **`get_console_message` reads the same worker-keyed buffer (so its miss
+  message matches what it reads) but is deliberately NOT in
+  `WORKER_CAPABLE_TOOLS`** — it already resolved worker targets through the
+  1.9.0 arm, routing it through the read-path resolver only sharpens its miss
+  message; advertising it as worker-capable was out of scope, and the drift
+  test pins the advertised list at four.
+
+### Measured, not assumed — the protocol facts this release ships on
+
+- **`Page.enable`/`Page.reload` are `-32601` on a worker session** — the
+  single measurement that shapes the implementation: a worker window cannot
+  be reload-driven, so it listens.
+- **A held session suppresses MV3 idle eviction; detach restores it** —
+  confirmed in both directions with the same polling loop, including a
+  post-hold evaluate and a fresh `Network.requestWillBeSent` at t+60s, so
+  "alive" means genuinely live, not a stale listing entry.
+- **A worker's target id is re-minted on every restart, never stable** — this
+  is why `wake` is refused on reads and on bare ids rather than silently doing
+  the wrong thing.
+- **Monkeypatching `self.fetch` via `evaluate_script` to intercept a worker's
+  requests is structurally unreliable, and the reason is ordinary JS scoping,
+  not a broken realm.** A module that captured a reference to `fetch` at
+  import time keeps calling that reference; reassigning `self.fetch`
+  afterward cannot rebind it (closure semantics — true of a page too, not
+  SW-specific folklore). `Network`-domain recording observes what the code
+  actually sends and needs neither a monkeypatch nor visibility into module
+  state. (An earlier field report of "eval realm hides module state" was a
+  misdiagnosis of an outdated loaded extension build, not a real capability
+  gap — see the stale-build tip below.)
+
+### Notes
+
+- Tool count is unchanged at **45** — this release grew the `target` grammar
+  on three existing tools, not the tool list.
+- `docs/social-preview.html` and `docs/demo.tape` carry no version string and
+  needed no re-render for this release.
+- Before deep-debugging an extension that "the toolkit can't see": verify the
+  loaded build is current with
+  `evaluate_script {target:"worker:<id>", expression:"chrome.runtime.getManifest().version"}`.
+  An outdated unpacked build left over from a prior load mimics every symptom
+  in this release's "measured facts" section above.
+- New tests: 20 in `test/worker-capture.test.ts`, 3 more in
+  `test/manifest-grammar-drift.test.ts` (allowlist rescoped from an
+  evaluate_script-only exclusion to the four-tool `WORKER_CAPABLE_TOOLS`
+  allowlist), and new live scenarios in `test/extension-smoke.ts` covering the
+  worker fetch/console capture, the eviction pair in both directions, and the
+  capture-path wake (proven by the fixture's own start counter, `starts: 2 ->
+  3`, never by `ServiceWorker.startWorker`'s result, which reports empty
+  success even for a scope that doesn't exist) — 31/31 assertions, up from the
+  1.9.0 baseline of 20.
+
 ## [1.9.0] - 2026-08-09
 
 Four complaints from a field agent driving an MV3 extension, closed without adding
@@ -870,6 +987,7 @@ First public release.
 - Zero runtime dependencies in the CDP/CLI layer (Node's global `WebSocket` + `fetch`). The MCP server adds only `@modelcontextprotocol/sdk`; `lighthouse_audit` is the sole non-CDP tool and shells out to `npx lighthouse`.
 - Runtime: Bun ≥ 1.1 (recommended) or Node ≥ 22 (for the global `WebSocket`). Requires Chrome/Chromium started with `--remote-debugging-port=9222`.
 
+[1.9.1]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.9.1
 [1.9.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.9.0
 [1.8.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.7.0
