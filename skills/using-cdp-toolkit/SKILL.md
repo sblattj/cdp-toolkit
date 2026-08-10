@@ -1,6 +1,6 @@
 ---
 name: using-cdp-toolkit
-description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (mcp__cdp-toolkit__*) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, claiming a tab so parallel agents don't collide, mocking a backend, reading a secret without leaking it, or when a call returns empty {}, reads the page too early, or a leased-tab call is refused by name.
+description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (mcp__cdp-toolkit__*) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, scrolling or dragging (incl. real HTML5 drag-and-drop), capturing a file download, granting a permission, claiming a tab so parallel agents don't collide (and knowing whether a human is already in it), mocking a backend, reading a secret without leaking it, or when a call returns empty {}, reads the page too early, or a leased-tab call is refused by name.
 ---
 
 # Using cdp-toolkit
@@ -70,6 +70,21 @@ The param is **`expression`** (a string). With **no `args`** it's evaluated as a
 
 An IIFE **plus** `args` throws ("does not evaluate to a function"). Empty `args:[]` counts as no args. Returns must be JSON-serializable (DOM nodes come back as a description string).
 
+## Scroll, raw mouse, real drag
+
+- `scroll {uid|selector|x+y, deltaX?, deltaY?}` — dispatches a wheel event; positive `deltaY` scrolls down, positive `deltaX` scrolls right. Omit the anchor to scroll the viewport. Works on both backends.
+- `click`/`dispatch_mouse` take `modifiers: ["Alt"|"Control"|"Meta"|"Shift"]` (a shift-click, etc.) and `click` also takes `clickCount:3` for a triple-click. **`modifiers` is Chrome-only** — a non-empty array throws under `--browser firefox`.
+- `dispatch_mouse {action:"move"|"down"|"up", x, y}` is the raw primitive, Chrome-only (absent under Firefox, not throwing). Compose your own move/down/move/up sequence for anything `click`/`drag` can't do directly: canvas drag-painting, marquee selection, a custom-hit-testing widget.
+- `drag`'s default `mode:"mouse"` **can** trigger real HTML5 drag-and-drop (`draggable="true"` elements) — it is not a no-op there — but whether the drop is accepted depends on the interpolated pointer path landing on a `dragover`. If a drop you expect to work keeps failing silently (`dragstart` fires, `drop` doesn't), use `mode:"html5"` (Chrome-only): it replays the page's own drag data as `dragEnter`/`dragOver`/`drop` deterministically, independent of pointer path. `steps` (mouse mode) and `by:{dx,dy}` (offset drags: sliders, panning) are also available.
+
+## Downloads and permissions need the long-lived MCP server
+
+`wait_for_download` and `grant_permissions` are Chrome-only **and MCP-server-only** — under the one-shot CLI, the connection they need dies with the process before it could ever matter, so both throw or are absent there. Same category as `performance_start_trace`/`start_screen_recording`.
+
+- **Arm before you click, not after.** `wait_for_download{arm:true}` first (returns immediately), then the click that triggers the download, then `wait_for_download` again to collect `{path,suggestedFilename,bytes,url}`. Arming late loses the download — Chrome denies an unarmed download outright, it doesn't just misplace the file.
+- **Arming has a browser-global side effect:** every download in the browser, all tabs, gets redirected into the toolkit's downloads folder for as long as the server is armed.
+- `grant_permissions {permissions:["geolocation",...], origin?, reset?}` answers a permission prompt before the page ever shows one. Grants are keyed by **origin**, not by tab.
+
 ## Leases: opt-in ownership for parallel agents
 
 Two agents on one Chrome both resolve `active` to the human's focused tab and silently drive the wrong page. A **lease** fixes that — and by default it is **opt-in**:
@@ -100,6 +115,8 @@ claim_page {target: "url:app.example.com", label: "..."}     → claims by url/t
 
 `target` accepts the full selector grammar (`active | index:N | url:<substr> | title:<substr> | <targetId>`) and only ever resolves against a tab that already exists — it never opens one, so a selector that matches nothing is an error, not a silent new tab. The result's `opened:false` confirms it took over rather than created, and because of that, **`release_page` leaves it open when you are done, no matter what** — the toolkit did not create it, so it is not the toolkit's tab to close. It is still refused if another live agent already holds it; there is no steal.
 
+**Check `humanActiveMs`/`contention` before you drive a taken-over tab.** The claim result (and every `list_leases` row) carries `humanActiveMs`: milliseconds since input the server itself did not dispatch. **`null`/absent means no data — never "no human"** (a fresh tab, or a tab whose every input was this server's own, look identical). If the tab was used within the last 30 seconds, the result also carries a `contention` warning — the claim still succeeds and you hold the lease, but driving it now means fighting a live person for the keyboard and mouse. Prefer your own tab, or ask first, when you see it.
+
 ### Strict mode: `CDP_REQUIRE_LEASE`
 
 If the MCP server is running with `CDP_REQUIRE_LEASE` set, leasing stops being opt-in: any call you make against a tab nobody holds **quietly claims it for you** rather than refusing or waiting on you to call `claim_page` first, so most tool calls need no behavior change from you at all. Two things do change:
@@ -110,6 +127,8 @@ If the MCP server is running with `CDP_REQUIRE_LEASE` set, leasing stops being o
 You cannot turn strict mode on or off yourself — it is an environment setting on the MCP server. If a call you expected to succeed lease-free instead comes back refused by another holder, someone else (a sibling subagent, most likely) already has that tab; `list_leases` shows who.
 
 **Reclamation** — a lease is reclaimable only when its owning process is gone **or** `lastUsedAt` is older than `ttlMs` (default 15 min, `CDP_LEASE_TTL_MS`). Every checked call refreshes it, so a working agent never expires. Reclaiming mints a fresh nonce, invalidating the old token, so a stalled agent can't resume driving a reclaimed tab. **The CLI can't claim** (one process per call → instantly dead-pid, and strict mode never applies there either); it may still pass an MCP-minted token with `--lease`.
+
+**Reclaimable ≠ destroyed.** An idle-past-TTL lease is reclaimable right away, but reap only destroys that tab an additional `CDP_REAP_GRACE_MS` later (default 45 min, 60 min total after last use) — a long gap between your calls isn't a race against your own tab getting closed out from under you. A `dead-pid` tab (the owning process is gone) is the exception: reaped immediately, no grace.
 
 **One browser, one writer per flow.** Don't run two seats driving the same Chrome concurrently unless each holds its own lease on its own tab.
 
@@ -143,10 +162,14 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | read the a11y tree | `take_snapshot` |
 | run JS | `evaluate_script` |
 | click / type / key / upload | `click` `type_text` `press_key` `upload_file` |
+| scroll / raw mouse / drag | `scroll` / `dispatch_mouse` (chrome-only) / `drag` (`mode:"html5"` for real HTML5 DnD, chrome-only) |
+| back / forward in history | `navigate_page {history:"back"\|"forward"}` |
+| wait for / capture a download | `wait_for_download` (MCP-server-only, arm before you click) |
+| pre-answer a permission prompt | `grant_permissions` (MCP-server-only) |
 | screenshot | `take_screenshot` (`fullPage`, `uid`/`selector` clip) |
 | cookies (httpOnly incl.) | `list_cookies` / `set_cookie` / `delete_cookies` |
 | console / network | `list_console_messages` / `list_network_requests` (`reload:true` to record fresh) |
-| claim / release / inspect a tab | `claim_page` / `release_page` / `list_leases` |
+| claim / release / inspect a tab (+ is a human there?) | `claim_page` / `release_page` / `list_leases` (`humanActiveMs`/`contention`) |
 | mock a backend | `mock_request` / `list_mocks` / `clear_mocks` |
 
 ## Common mistakes
@@ -158,3 +181,6 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 - **Reusing a long-held targetId after a gap.** Tabs close/navigate/reorder; confirm `location.href` first, or open your own `new_page`.
 - **`list_network_requests` returning nothing.** Without `reload:true` it reads a buffer nobody recorded — pass `reload:true`.
 - **Claiming a tab then omitting the token later.** Every subsequent call to a leased tab needs `lease`, including from the same session.
+- **Calling `wait_for_download` after the click, with no `arm:true` first.** The download is denied outright, not just misfiled — there is no file to recover afterward.
+- **Assuming `drag`'s default mode never fires real HTML5 drag events.** It can and often does; the actual gap is a drop getting silently refused because of the pointer path. Reach for `mode:"html5"` when a drop keeps failing, not because mouse mode "doesn't do HTML5 DnD."
+- **Reading `humanActiveMs: null` as "nobody's here."** It means no data — verify with the plain fact that you haven't seen a `contention` warning either, not by treating null as a green light.
