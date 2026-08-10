@@ -3,6 +3,7 @@
  * ((driver, args) => Promise<result>) so ONE implementation serves Chrome and
  * Firefox, exactly as the 23 unified tools in that file do.
  */
+import { beaconSupported, contentionWarning, installBeacon, readHumanActiveMs } from "./activity.ts";
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage, readOrigin } from "./origins.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
@@ -42,6 +43,24 @@ export interface ClaimPageResult {
    *  in the answer so a caller knows without a second lookup whether
    *  release_page will close the tab. */
   opened: boolean;
+  /**
+   * Milliseconds since the last input this server cannot account for — i.e.
+   * since a HUMAN last touched this tab. See src/activity.ts for how that
+   * attribution is made and what it cannot prove.
+   *
+   * `null` means NO DATA, and never "no human": the tab carries no beacon (the
+   * usual case the first time anyone claims a person's tab), or every timestamp
+   * on it is explained by this server's own dispatches. ABSENT ENTIRELY on a
+   * backend with no beacon support, so a caller can tell "this browser cannot
+   * answer" from "this browser answered, and the answer is no data".
+   */
+  humanActiveMs?: number | null;
+  /**
+   * Present only on a TAKEOVER of a tab a human used within the last 30s. A
+   * warning, never a refusal — the claim in this same result already succeeded.
+   * See contentionWarning in src/activity.ts for why refusing would be wrong.
+   */
+  contention?: string;
 }
 
 /**
@@ -74,6 +93,27 @@ export interface ClaimPageResult {
  * unreachable: an unmatched selector is an error, never a silently substituted
  * new tab, because "the tab I asked for is not there" and "here is an empty one
  * instead" are answers a caller must be able to tell apart.
+ *
+ * THE ACTIVITY BEACON IS READ BEFORE THE CLAIM AND INSTALLED AFTER IT, and the
+ * order is not arbitrary in either half.
+ *
+ * Read first, because the read has to be GATE-FREE for exactly the reason the
+ * resolution above is: under CDP_REQUIRE_LEASE, anything that touches the tab
+ * through the lease gate auto-acquires a lease on it, and a claim that ran after
+ * that would collide with the lease taken on its own behalf. The driver members
+ * behind readHumanActiveMs bypass the gate and can do nothing but return one
+ * number (see driver.ts).
+ *
+ * Install after, because installing is a WRITE into the page, and this is the
+ * first moment we are entitled to make one: the claim has succeeded, so the tab
+ * is ours. It is also the only ordering that keeps the read honest, since
+ * installing first cannot invent a timestamp but re-arming a beacon on a tab
+ * whose claim then FAILED would leave our script running in somebody else's tab
+ * for nothing.
+ *
+ * A CLAIM IS NEVER REFUSED ON HUMAN ACTIVITY. Taking over a person's tab is the
+ * feature; a caller that asked for this tab gets this tab. Contention is
+ * reported in the result and the caller decides. See contentionWarning.
  */
 export async function claimPage(
   driver: BrowserDriver,
@@ -119,12 +159,21 @@ export async function claimPage(
     url = page.url;
     opened = true;
   }
+  // Gate-free, before the claim, and only for a takeover: a tab this call is
+  // about to CREATE cannot have a human in it, so asking would be theatre.
+  const humanMs = opened ? null : await readHumanActiveMs(driver, backend, targetId);
   const liveIds = [...pages.map((p) => p.id), targetId];
   const { record, token } = await claimLease(backend, targetId, {
     label,
     ttlMs: typeof args.ttlMs === "number" && args.ttlMs > 0 ? args.ttlMs : leaseTtlMs(),
     liveIds,
   });
+  // Best effort by construction (installBeacon never throws): a claim that
+  // succeeded must not be reported as a failure because a diagnostic script
+  // could not be injected. The cost is a tab that reports humanActiveMs null
+  // forever, which reads the same as a tab nobody has touched.
+  await installBeacon(driver, targetId);
+  const contention = contentionWarning(humanMs, { takeover: !opened });
   return {
     lease: token,
     targetId,
@@ -133,6 +182,11 @@ export async function claimPage(
     ttlMs: record.ttlMs,
     expiresAt: record.lastUsedAt + record.ttlMs,
     opened,
+    // Absent, not null, when the backend has no beacon at all: "cannot answer"
+    // and "answered, no data" are different facts (ADR-001's absent-over-
+    // throwing rule applied to a field rather than to a whole tool).
+    ...(beaconSupported(driver) ? { humanActiveMs: humanMs } : {}),
+    ...(contention !== undefined ? { contention } : {}),
   };
 }
 
@@ -202,22 +256,67 @@ export async function releasePage(
   return { released: true, closed: res.success === true, targetId };
 }
 
-/** Enumerate active leases for diagnosis. Requires no token by design. */
+/**
+ * One list_leases row: everything the lease store knows, plus what the browser
+ * can add.
+ *
+ * `humanActiveMs` lives HERE and not on LeaseSummary because leases.ts is
+ * deliberately free of any CDP or BiDi import ("it takes browser-derived input
+ * as data", see its staleReason) and answering this needs a live driver. Keeping
+ * the annotation in the tool layer is what preserves that, and it is the same
+ * split shared-tools.ts uses for ListedPage's provenance fields.
+ */
+export interface LeaseRow extends LeaseSummary {
+  /** Ms since a human last touched this tab (src/activity.ts). ABSENT — never
+   *  null — when the tab has no beacon, when every timestamp on it was this
+   *  server's own, when the row belongs to the other backend, or when the read
+   *  failed. A diagnosis tool must not fail because one page would not answer. */
+  humanActiveMs?: number;
+}
+
+/**
+ * Enumerate active leases for diagnosis. Requires no token by design.
+ *
+ * The beacon annotation is per-row, best effort, and NEVER fatal: an evaluate
+ * that throws, a tab that closed mid-listing, or a page with no beacon all leave
+ * the field off that row and change nothing else. list_leases is what an
+ * operator runs when tabs already look wrong, so it failing on a wrong-looking
+ * tab would be exactly backwards.
+ *
+ * Only rows of THIS driver's backend are annotated, mirroring the liveBackend
+ * scoping just below: a Chrome driver cannot read a Firefox context, and asking
+ * it to would either error or, worse, resolve some unrelated id.
+ */
 export async function listLeasesTool(
   driver: BrowserDriver,
   _args: Record<string, never> = {} as Record<string, never>,
-): Promise<{ leases: LeaseSummary[]; count: number; reaped?: ReapedTab[] }> {
+): Promise<{ leases: LeaseRow[]; count: number; reaped?: ReapedTab[] }> {
   const backend = backendOf(driver);
   // Same reap as list_pages, and for the same reason: this is the other tool an
   // operator runs when tabs look wrong, so it must not report a lease it is
   // about to delete. Strict mode only.
   const reaped = requireLease() ? await reapStaleAgentTabs(driver, backend) : [];
   const reapedIds = new Set(reaped.map((r) => r.targetId));
-  const liveIds = (await driver.listPages()).map((p) => p.id);
+  const livePages = await driver.listPages();
+  const liveIds = livePages.map((p) => p.id);
   // liveBackend scopes the target-gone test to the browser these ids came from,
   // so leases held on the OTHER backend are not mislabeled as reclaimable.
   const all = await listLeases({ liveIds, liveBackend: backend });
-  const leases = all.filter((l) => !(l.backend === backend && reapedIds.has(l.targetId)));
+  const kept = all.filter((l) => !(l.backend === backend && reapedIds.has(l.targetId)));
+  const liveSet = new Set(liveIds);
+  const now = Date.now();
+  const leases: LeaseRow[] = [];
+  for (const row of kept) {
+    // A row this driver cannot speak to at all: other backend, unreadable
+    // record (its targetId came from a FILENAME, not from the browser), or a
+    // tab that is simply not open any more.
+    if (row.backend !== backend || row.unreadable !== undefined || !liveSet.has(row.targetId)) {
+      leases.push(row);
+      continue;
+    }
+    const humanMs = await readHumanActiveMs(driver, backend, row.targetId, now).catch(() => null);
+    leases.push(humanMs === null ? row : { ...row, humanActiveMs: humanMs });
+  }
   return { leases, count: leases.length, ...(reaped.length ? { reaped } : {}) };
 }
 

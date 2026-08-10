@@ -40,6 +40,7 @@ import type {
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
 import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, requireLease, type LeaseBackend, type LeaseToken } from "./leases.ts";
+import { installBeacon } from "./activity.ts";
 import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
@@ -238,6 +239,12 @@ export async function newPage(
     // silently WEAKEN every existing claim:true call site to pid-only.
     auto: !explicit,
   });
+  // Install the activity beacon on the same terms claim_page does: at claim
+  // time, after the claim, best effort (installBeacon never throws). A tab
+  // beaconed now is a tab that can ANSWER later — when this agent has released
+  // it and a person has picked it up, which is the case the beacon exists for.
+  // Nothing here is read back: a tab created a moment ago has no human history.
+  await installBeacon(driver, p.id);
   return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
 }
 

@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
 import { createFirefoxDriver } from "../src/bidi/driver.ts";
+import { BEACON_INSTALLED_GLOBAL } from "../src/activity.ts";
 import type { BrowserDriver } from "../src/driver.ts";
 
 // Minimal ambient shape for the bit of the Bun global this file uses. No
@@ -154,6 +155,50 @@ try {
     hasHeapSnapshot === false,
     `capabilities=${[...driver.capabilities].sort().join(",")}`,
   );
+
+  // --- 8b. the activity beacon installs, records, and survives navigation ---
+  // Firefox gets for free the property Chrome needs a held socket for: this
+  // driver's LifetimeModel is "session", so a script.addPreloadScript
+  // registration lives as long as the memoized BiDi connection. Chrome clears
+  // its equivalent when the registering client disconnects, and this toolkit
+  // disconnects after every call, which is why cdp/driver.ts holds one socket
+  // per beaconed tab and this backend holds none. That asymmetry is the reason
+  // this assertion exists here as well as in test/staleness-smoke.ts: it is the
+  // same promise kept by a completely different mechanism.
+  const beaconPage = await driver.page(undefined);
+  const beaconContext = beaconPage.info.id;
+  await beaconPage.navigate({ url: `${BASE_URL}/form.html` });
+  const beaconInstalled = await driver.installActivityBeacon!(beaconContext);
+  record(
+    "activity beacon installs on a Firefox context",
+    beaconInstalled === true && (await beaconPage.evaluate(`window.${BEACON_INSTALLED_GLOBAL} === true`)) === true,
+    `installActivityBeacon=${beaconInstalled}, window.${BEACON_INSTALLED_GLOBAL} set in page`,
+  );
+  record(
+    "a freshly beaconed context reports no input yet",
+    (await driver.readActivityBeacon!(beaconContext)) === null,
+    "readActivityBeacon=null before anything touches the page",
+  );
+
+  await beaconPage.click({ css: "#submit-button" });
+  const beaconTs = await driver.readActivityBeacon!(beaconContext);
+  record(
+    // Firefox's synthesized input is as indistinguishable in-page as Chrome's:
+    // the beacon moves for it, which is exactly why attribution cannot be done
+    // in the page and needs the dispatch-log correlation above this layer.
+    "the beacon records synthesized input",
+    typeof beaconTs === "number",
+    `readActivityBeacon=${JSON.stringify(beaconTs)} after a driver click`,
+  );
+
+  await beaconPage.navigate({ url: `${BASE_URL}/contenteditable.html` });
+  record(
+    "the beacon survives navigation with NO held connection (BiDi preload script)",
+    (await beaconPage.evaluate(`window.${BEACON_INSTALLED_GLOBAL} === true`)) === true &&
+      (await driver.readActivityBeacon!(beaconContext)) === null,
+    "re-armed in a document nothing injected into directly; timestamp reset with the document",
+  );
+  await beaconPage.release();
 
   await page.release();
 } catch (err) {
