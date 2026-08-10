@@ -198,6 +198,7 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
 | `CDP_LEASE_TTL_MS` | `900000` | How long a tab lease survives without use before another agent can reclaim it. Refreshed on every checked call. |
+| `CDP_REQUIRE_LEASE` | off | Strict mode, MCP server only (inert under the CLI regardless of value). Turns leasing from optional into mandatory: a call against an unheld tab acquires a lease instead of driving it lease-free, and `list_pages`/`list_leases` close tabs an abandoned agent left behind. See "Parallel tabs" below. |
 
 ## Firefox (WebDriver BiDi)
 
@@ -240,8 +241,8 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 12 superset tools (`
 
 | MCP name | CDP method(s) | Parity notes / gaps |
 |---|---|---|
-| `list_pages` | `GET /json/list` | `all` flag also exposes worker/background targets; MCP lists only page tabs. Each row additionally carries `origin` (`agent` or `unknown`, never `human`) plus `label`/`createdAt` for tabs this toolkit created. |
-| `new_page` | `Target.createTarget` (+ lease file) | Returns `{targetId,url}`; does not await navigation (use `navigate_page`). `claim:true` also claims the new tab and returns a `lease` token (`label`/`ttlMs` optional). |
+| `list_pages` | `GET /json/list` | `all` flag also exposes worker/background targets; MCP lists only page tabs. Each row additionally carries `origin` (`agent` or `unknown`, never `human`) plus `label`/`createdAt` for tabs this toolkit created. Under `CDP_REQUIRE_LEASE` also reaps abandoned agent tabs first, reporting closures in an additive `reaped` array. |
+| `new_page` | `Target.createTarget` (+ lease file) | Returns `{targetId,url}`; does not await navigation (use `navigate_page`). `claim:true` also claims the new tab and returns a `lease` token (`label`/`ttlMs` optional). Under `CDP_REQUIRE_LEASE` the tab is claimed and a `lease` returned even without `claim:true`. |
 | `close_page` | `Target.closeTarget` (+ lease file) | Reports `success:true` on the empty result newer Chromium returns. A successful close also releases that tab's lease; a failed close leaves it in place. |
 | `select_page` | `Target.activateTarget` + selected-state file | Writes a flat-file selected target; `resolveTarget` does not read it, so `active` still means `index:0` unless a tool opts in. |
 | `navigate_page` | `Page.navigate` / `Page.reload` + load events | Returns `{url,frameId,waitedFor}` (no auto-snapshot). `waitUntil` supports `load`/`domcontentloaded`. `reload:true` (+ `ignoreCache:true` for a hard reload). |
@@ -278,9 +279,9 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 12 superset tools (`
 | `mock_request` *(superset)* | `Fetch.*` (+ `Page.reload`) | **A fake backend.** Registers a rule on a target's persistent session: fulfill with a canned response, fail, or continue (with optional `delayMs`/`failRate`). Persists across reloads until `clear_mocks`. Request-stage only. Cached requests aren't intercepted (use `reload:true`). |
 | `list_mocks` *(superset)* | `Runtime.evaluate` (liveness probe) | Lists active mock sessions with rules + hit counts; prunes sessions whose tab closed. |
 | `clear_mocks` *(superset)* | `Fetch.disable` | Tears down the resolved target's mock session (or all with `all:true`). |
-| `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens or claims a tab and returns an opaque lease token. MCP only; the CLI refuses it. |
-| `release_page` *(superset)* | lease file | Gives a lease back. Idempotent, and does not close the tab. |
-| `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability. Needs no token; never returns the nonce. A lease file that could not be read or parsed is reported as an `unreadable` row instead of being skipped. |
+| `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens a fresh tab and claims it (no `target`/`targetId`), or takes over a tab that is already open (`target`, any selector, or the exact-id `targetId`) and returns an opaque lease token plus `opened` (true only when this call created the tab). Never steals a tab another live process holds. MCP only; the CLI refuses it. |
+| `release_page` *(superset)* | lease file | Gives a lease back via `lease` (the token) or `target` (a selector, for a lease the gate auto-acquired and so never handed out a token for). Idempotent. Closes the tab by default when this toolkit's creation ledger says it opened it; leaves a merely-claimed tab open. Override either way with `close`. |
+| `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability. Needs no token; never returns the nonce. A lease file that could not be read or parsed is reported as an `unreadable` row instead of being skipped. Under `CDP_REQUIRE_LEASE` also reaps abandoned agent tabs, reporting closures in an additive `reaped` array. |
 
 ## Parallel tabs: many agents, one browser
 
@@ -296,17 +297,59 @@ Two agents pointed at the same Chrome both resolve `target: active` to whatever 
 {"lease": "chrome:1A2B...:0f3c...", "targetId": "1A2B...", "url": "https://example.com", "label": "checkout-agent", "ttlMs": 900000, "expiresAt": 1754400000000}
 ```
 
-Pass that token as `lease` on every later call against the tab. `new_page` with `claim: true` does the open-and-claim in one call. `release_page` gives it back, `list_leases` shows who holds what.
+Pass that token as `lease` on every later call against the tab. `new_page` with `claim: true` does the open-and-claim in one call. `release_page` gives it back and, by default, closes the tab if this toolkit opened it (see "Close on release" below). `list_leases` shows who holds what.
 
-**Opt in, and only ever a refusal.** A tab nobody claimed behaves exactly as it did before. Omitting `lease` is identical to pre-1.2 behavior in every respect: no default changed, no return shape changed, no previously legal call now needs a new argument. This is why it is 1.2 and not 2.0.
+**Opt in, and only ever a refusal — this is the default, with `CDP_REQUIRE_LEASE` unset.** A tab nobody claimed behaves exactly as it did before. Omitting `lease` is identical to pre-1.2 behavior in every respect: no default changed, no return shape changed, no previously legal call now needs a new argument. This is why it was 1.2 and not 2.0.
+
+### Strict mode: `CDP_REQUIRE_LEASE`
+
+The default above is opt-in on purpose, but opt-in means an agent that never learns the protocol never gets the protection either. `CDP_REQUIRE_LEASE=1` (also `true`/`yes`/`on`, case-insensitively), read only by a long-lived MCP server process (never the CLI, see below), turns holding a lease from optional into mandatory: any call that resolves to a tab nobody holds now **acquires** a lease on it instead of driving it lease-free, so "you cannot drive a tab you do not hold" becomes literally true rather than a convention an agent can forget. `new_page` claims the tab it just created even without `claim:true`, for the same reason: a tab nobody holds the instant it exists is a tab the very next call would have to auto-acquire anyway.
+
+That auto-acquired lease is a weaker tier than an explicit one, and the difference is what keeps strict mode ergonomic instead of a second protocol to learn:
+
+- **Auto** (acquired by the gate, or by `new_page` without `claim:true`): owned by a *process*. Any later call from the same pid passes with no `lease` argument at all; only another process is refused.
+- **Explicit** (`claim_page`, or `new_page{claim:true}`): still demands its token on every call, even from the process that claimed it. This is how one subagent fences a tab off from sibling subagents that share its pid, since a Claude Code session's subagents all run inside one MCP server process.
+
+An unleased tab under strict mode is still refused to a different process exactly as under the default: the tab's whole selector surface (`active`, no target, `index:N`, `url:`, `title:`, a bare targetId) all resolve through the same gate, so there is no selector form that quietly bypasses acquisition. Turning `CDP_REQUIRE_LEASE` off never locks a process out of leases it already holds: the pid-only check on an auto lease is not itself gated on the flag, only the *acquiring* is.
+
+**Strict mode is MCP-only, unconditionally, not by convention.** The CLI never reads `CDP_REQUIRE_LEASE` as true no matter how it is set, because a CLI invocation is one process per call: a lease it auto-acquired would be reclaimable by the dead-pid rule the instant that process exited, which is a worse position than no lease at all, and reap (below) would then read that instantly-dead-pid record as an abandoned agent tab and could close it the next time anything lists pages.
 
 **What can newly fail.** Any call that resolves to a leased tab without presenting that tab's token is refused, naming the tab, its url, and the label of whoever holds it. That is every selector form, not one of them: `active` or no target at all, `index:N`, `url:<substring>`, `title:<substring>`, and a bare targetId all reach the same check. The case worth singling out is `active` (or no target) against a leased tab index 0, because there you did not name the tab and before 1.2 the call silently succeeded against whatever tab happened to be first. That refusal is the point of the feature, and it is called out here rather than left to be discovered.
 
-**Reclamation.** A lease is reclaimable when its owning process is gone, or when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`). Those two are the whole list. A lease whose tab is no longer open is *reported* by `list_leases` as `target-gone`, which is useful to see, but that report is not what frees it: such a record is freed by the same two rules as any other, whichever lands first. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns.
+**Reclamation.** A lease is reclaimable when its owning process is gone, or when `lastUsedAt` is older than `ttlMs` (default 15 minutes, `CDP_LEASE_TTL_MS`). Those two are the whole list. A lease whose tab is no longer open is *reported* by `list_leases` as `target-gone`, which is useful to see, but that report is not what frees it: such a record is freed by the same two rules as any other, whichever lands first. Every checked call refreshes `lastUsedAt`, so an agent that is working never expires and no heartbeat is needed. Reclaiming mints a fresh nonce, which invalidates the previous owner's token: a stalled agent that comes back cannot keep driving a tab someone else now owns. This applies equally to an auto lease and an explicit one; the tier only changes who may use the lease without a token, never how or when it goes stale.
+
+### Taking over a tab that is already open
+
+`claim_page` had one mode before: open a fresh tab (or claim an exact `targetId`) and return a token for it. Neither covers "work in the tab I already have open", the ordinary shape of a human handing an agent a task in a tab that is already sitting in front of them, since a human does not have a targetId to hand over. `target` is that path — the toolkit's whole selector grammar, resolved against the tab that is actually there:
+
+```json
+{"tool": "claim_page", "arguments": {"target": "active", "label": "continuing-agent"}}
+```
+
+```json
+{"lease": "chrome:9F1A...:7b2e...", "targetId": "9F1A...", "url": "https://app.example.com/inbox", "label": "continuing-agent", "ttlMs": 900000, "expiresAt": 1754400000000, "opened": false}
+```
+
+`opened: false` says this call took over a tab rather than creating one; it is `true` only from the fresh-tab mode. That flag matters because `release_page` reads the same distinction: a tab `claim_page{target}` took over has no creation-ledger record (this toolkit did not open it), so releasing it always leaves it open, regardless of `close`. Two safety properties hold without exception: **a selector that matches nothing is an error, never a silently substituted new tab** (`target` given means the fresh-tab branch is unreachable), and **there is no force or steal** — a tab another live process holds, auto-acquired or explicit, is refused with the same conflict error `claim_page` has always thrown, naming the holder. The tab this exists to take over is a human's, and a human's tab carries no lease to begin with.
+
+### Close on release
+
+`release_page` used to only ever give the lease back. It now also closes the tab, **by default and without any flag**, when the creation ledger says this toolkit opened it — the one thing a caller sees change without setting `CDP_REQUIRE_LEASE` at all:
+
+- A tab `new_page` or `claim_page` created is closed on release.
+- A tab that was already open, and merely claimed (`claim_page{targetId}` or `claim_page{target}`), is released and left exactly alone.
+- `close: false` opts a call out of closing; `close: true` forces a close either way.
+- A release that did not actually happen — already released, reclaimed, or expired — never closes anything, because the tab may belong to a different agent by then. That is the one rule here that is a safety property, not a convenience, and it holds regardless of `close`.
+
+Under `CDP_REQUIRE_LEASE`, `release_page{target}` is how you give back a lease the gate acquired for you automatically, since that path never hands out a token to pass to `lease`.
+
+### Reap: abandoned agent tabs get closed on read
+
+`release_page` closes a tab an agent gives back; it does nothing for a tab whose agent crashed, was killed, or simply stopped calling; a timeout ending an agent is more common than a clean shutdown. Under `CDP_REQUIRE_LEASE`, `list_pages` and `list_leases` reap first: a tab is closed only when **all four** hold — its lease is for the browser being listed and is actually readable (an `unreadable` row is never touched), the lease is stale for `dead-pid` or `expired` (never `target-gone`, already closed, or a healthy lease), the target is still genuinely open, and **the toolkit both opened the tab and leased it**. That last condition is the one that matters most: an agent-created tab with no lease at all is never reaped, because that is exactly what `new_page` produces for a caller who never touches leases, and closing those would be data loss dressed as cleanup. Closed tabs are reported in an additive `reaped` array (`{targetId, label, reason}`), present only when something actually closed, so the common-case response shape is unchanged; a close that fails is silently left for the next read to retry rather than reported as done. Reap is strict-mode only, for the same reason auto-acquire is: outside a long-lived process, a dead-pid record proves nothing about abandonment.
 
 **Unreadable lease files.** A row in `list_leases` can carry `unreadable`, holding the errno (for example `EACCES`) or `"unparseable"`, when the lease file exists but could not be read or parsed. On such a row `label`, `pid`, `createdAt`, `lastUsedAt`, and `ttlMs` are zero placeholders, not real values, since they live inside the file that could not be read. `stale` is always `false` on that row, deliberately: `stale` is what a reader treats as free to take, and an unreadable lease must never read that way.
 
-**Verifying it against a real browser.** `bun run lease:smoke` (`test/lease-smoke.ts`) is the end-to-end harness for this feature. It drives a REAL browser on `CDP_BASE` (default `http://127.0.0.1:9222`) and spawns a genuine second OS process for the stranger role, because a lease records the claiming pid and a sequence of CLI calls can never collide: the first process is dead before the second starts. It asserts that the owner can act, that a tokenless stranger is refused with the `LeaseConflictError` type, `targetId` and `holder` intact and NOT coded `no-such-target`, that the refusal actually prevented the side effect (proved by reading the marker back, not by the throw), that a genuinely missing target still reports `no-such-target`, that the stranger is admitted after `release_page`, and that a lease orphaned by a real child process which exited is reclaimable with a fresh nonce. It is safe to point at a browser with real tabs open: it opens exactly one throwaway `about:blank` tab, addresses it only by its own target id, closes exactly that tab, and never closes the browser. It captures its own baseline tab listing at runtime and fails only if a tab that existed before the run went missing; tabs you open mid-run are ignored. Lease files go to a private temp dir that is removed on exit.
+**Verifying it against a real browser.** `bun run lease:smoke` (`test/lease-smoke.ts`) is the end-to-end harness for this feature, and `bun test` cannot reach any of it: a lease is keyed on the claiming pid, so only a second genuinely separate OS process can collide with the first, and reap only ever fires from a long-lived process. It drives a REAL browser on `CDP_BASE` (default `http://127.0.0.1:9222`) and spawns real child OS processes to play a tokenless stranger, a doomed child that claims a tab and exits, and a corpse that exists only to donate a genuinely dead pid. Under the default (flag off): it asserts the owner can act, a tokenless stranger is refused with the `LeaseConflictError` type, `targetId` and `holder` intact and NOT coded `no-such-target`, the refusal actually prevented the side effect (proved by reading a marker back, not by the throw), a genuinely missing target still reports `no-such-target`, the stranger is admitted after `release_page`, and an orphaned lease from a real dead child is reclaimable with a fresh nonce. It then turns `CDP_REQUIRE_LEASE` on for the rest of the run and asserts: a second strict process with no token is refused the same way; an ordinary ungated call auto-acquires a lease, marked `auto` and owned by that pid; `release_page{target}` closes a tab this toolkit opened and leaves alone one with no creation record, even when explicitly claimed; and reap closes a tab with a genuinely dead-pid lease, names it in `reaped` with `reason:"dead-pid"`, and leaves every other tab the run opened untouched. A final scenario takes over a stand-in for a human's tab (open, unleased, no creation record) via `claim_page{target}`, drives it with the returned token, releases it, and confirms it is still open, then confirms a target that matches nothing is refused and opens no tab. It is safe to point at a browser with real tabs open: every tab it touches is one it opened itself, addressed only by its own target id, and it never calls `Browser.close`. It captures its own baseline tab listing at runtime and fails only if a tab that existed before the run went missing; tabs you open mid-run are ignored. Lease and origin files go to a private temp dir that is removed on exit, and reap — the single most destructive path exercised here — only ever considers a tab with both a lease record and an origin record in that private directory, which no pre-existing tab has.
 
 ### Which tab did an agent open? (`origin`)
 
@@ -322,9 +365,9 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 - `origin: "agent"` means cdp-toolkit created the tab, via `new_page` or via `claim_page` with no `targetId`. The row then also carries the creating `label` (the same value a lease would show, defaulting to `pid-<pid>`) and `createdAt`.
 - `origin: "unknown"` means there is no creation record. **It never says `"human"`.** The toolkit cannot prove a person opened a tab: no record is equally consistent with a tab opened before the server started, a tab restored from a previous session, another tool driving the same Chrome, or a record that could not be written. `unknown` is the honest word, and reading it as "safe, a human opened this" is the one mistake this field exists to prevent.
 
-**It outlives the lease, deliberately.** `release_page`, expiry, and reclamation all leave the record alone. Only the tab going away removes it: the ledger is reaped when it is read, dropping records for targets the browser no longer has, so it stays self-cleaning with nothing scheduled.
+**It outlives the lease, deliberately.** `release_page`, expiry, and reclamation all leave the record alone. Only the tab going away removes it: the ledger is reaped when it is read, dropping records for targets the browser no longer has, so it stays self-cleaning with nothing scheduled. Under `CDP_REQUIRE_LEASE`, the record is also what authorizes a *close*: `list_pages`/`list_leases` reap an abandoned agent's tab only when it has both this origin record and a stale (`dead-pid`/`expired`) lease, never on the origin record alone, and `release_page` (or reap) consults it to decide whether closing this specific tab is this toolkit's call to make. See "Reap" above.
 
-**Claiming a tab you did not open records nothing.** `claim_page` with an explicit `targetId` takes ownership of an existing tab; that tab keeps reporting `origin: "unknown"`, because provenance is not ownership.
+**Claiming a tab you did not open records nothing.** `claim_page` with an explicit `targetId`, or with `target` (the takeover path), takes ownership of an existing tab without creating one; that tab keeps reporting `origin: "unknown"`, because provenance is not ownership. That is also why `release_page` leaves such a tab open no matter how it was claimed.
 
 **Unreadable records.** If a target has a creation record that could not be read or parsed, its row reports `origin: "unknown"` plus `originUnreadable` (the errno, for example `EACCES`, or `"unparseable"`). Same principle as `list_leases`' `unreadable` rows: a broken record must never be indistinguishable from no record at all. A missing or unreadable ledger never fails `list_pages`; every page simply reports `unknown`.
 
@@ -335,7 +378,7 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 - No fan-out. Every call still names exactly one tab. An agent that wants several drives them a call at a time and holds a separate lease per tab; a single call acting on many tabs is a different feature and is not addressed.
 - No isolation. Two leased tabs on one Chrome still share cookies, `localStorage`, and every other origin-scoped store. A lease is ownership of a tab, not isolation of the browser under it.
 - No protection from humans. The lease is enforced against cdp-toolkit's own tool calls. It cannot stop someone clicking into the tab.
-- Not for the CLI. A CLI invocation is one process per call, so a lease it claimed would be reclaimable immediately by the dead-pid rule. `claim_page` is refused there. CLI calls can still present a token minted by the MCP server with `--lease`.
+- Not for the CLI. A CLI invocation is one process per call, so a lease it claimed would be reclaimable immediately by the dead-pid rule. `claim_page` is refused there. CLI calls can still present a token minted by the MCP server with `--lease`. Strict mode (`CDP_REQUIRE_LEASE`) is likewise MCP-only and for the same underlying reason, doubled: an auto-acquired lease would be reclaimable on arrival, worse than no lease at all, and reap would then be free to read that instantly-dead-pid record as an abandoned tab and close it on the next listing.
 
 ## How it's built
 
@@ -347,9 +390,10 @@ src/
   cli.ts             # the Bun CLI
   mcp.ts             # stdio MCP server (exposes TOOLS via @modelcontextprotocol/sdk)
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)
-  leases.ts          # lease records, staleness, reclamation, assertLeaseOk
+  leases.ts          # lease records, staleness, reclamation, assertLeaseOk, CDP_REQUIRE_LEASE
   leases-tools.ts    # claim_page / release_page / list_leases
   origins.ts         # tab creation ledger: who OPENED a tab, outliving its lease
+  reap.ts            # closes abandoned agent tabs on list_pages / list_leases (strict mode)
   tools/
     pages.ts navigation.ts evaluate.ts snapshot.ts input.ts
     screenshot.ts emulation.ts dialogs.ts recorder.ts console.ts
