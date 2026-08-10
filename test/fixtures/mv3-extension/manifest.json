@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Minimal MV3 extension with a background service worker, used by test/extension-smoke.ts. Never published; loaded unpacked from disk with --load-extension.",
   "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
   "background": {
     "service_worker": "background.js"
   },

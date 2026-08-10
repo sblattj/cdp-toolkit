@@ -12,11 +12,18 @@
  *     unique per-capture file), Page.reload, capture for `durationMs` (default
  *     2500ms), stop, then read+return the console entries from that capture. The
  *     both-domains capture means a network reload never wipes console history.
+ *
+ * SERVICE WORKERS (1.9.1): list_console_messages accepts `worker:<substring>`
+ * and a bare worker target id, Chrome only (Capability "worker.targets"). A
+ * worker's console.log arrives as Runtime.consoleAPICalled on its own session
+ * (measured; `Log.entryAdded` never fires there). There is no reload to drive a
+ * worker capture, so reload:true means "listen for durationMs" — see
+ * recorder.ts's header.
  */
 import { readFile } from "node:fs/promises";
-import { CdpError, resolveTarget } from "../client.ts";
+import { CdpError } from "../client.ts";
 import type { TargetSelector } from "../types.ts";
-import { recFile, captureWindow } from "./recorder.ts";
+import { assertWakeApplies, recFile, captureWindow, resolveRecorderTarget } from "./recorder.ts";
 import type { RecLine } from "./recorder.ts";
 
 const DEFAULT_CAPTURE_MS = 2500;
@@ -44,6 +51,8 @@ export interface ListConsoleMessagesArgs {
   reload?: boolean;
   /** Capture window for reload mode (ms). Default 2500. */
   durationMs?: number;
+  /** Worker targets only, and only with reload:true — start an idle-evicted MV3 worker first (default true). */
+  wake?: boolean;
 }
 
 export interface GetConsoleMessageArgs {
@@ -144,8 +153,9 @@ export async function listConsoleMessages(args: ListConsoleMessagesArgs = {}): P
   messages: ConsoleEntry[];
   droppedWrites?: number;
 }> {
+  assertWakeApplies(args.target, args.wake, args.reload === true);
   if (args.reload) {
-    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS);
+    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS, { wake: args.wake });
     await cap.stop();
     const messages = await readConsoleEntries(cap.file);
     return {
@@ -156,7 +166,7 @@ export async function listConsoleMessages(args: ListConsoleMessagesArgs = {}): P
     };
   }
 
-  const target = await resolveTarget(args.target);
+  const target = await resolveRecorderTarget(args.target, { capture: false });
   const messages = await readConsoleEntries(recFile(target.id));
   return {
     target: { id: target.id, url: target.url, title: target.title },
@@ -170,7 +180,14 @@ export async function listConsoleMessages(args: ListConsoleMessagesArgs = {}): P
  * existing buffer for the target. Throws if the index is out of range.
  */
 export async function getConsoleMessage(args: GetConsoleMessageArgs = {}): Promise<ConsoleEntry> {
-  const target = await resolveTarget(args.target);
+  // Reads the SAME buffer list_console_messages just returned, so it resolves
+  // through the same read-path resolver: a worker target already reached this
+  // code through the 1.9.0 bare-id/`worker:` arm, and routing it here is what
+  // makes the miss message match the buffer it is actually reading. It is
+  // deliberately NOT advertised as worker-capable in the manifest (see
+  // WORKER_CAPABLE_TOOLS): index-into-a-buffer is not the worker story, and the
+  // drift test keeps the advertised list to the four tools that are.
+  const target = await resolveRecorderTarget(args.target, { capture: false });
   const messages = await readConsoleEntries(recFile(target.id));
   const index = args.index ?? 0;
   const entry = messages[index];
@@ -184,8 +201,8 @@ export async function getConsoleMessage(args: GetConsoleMessageArgs = {}): Promi
 
 /*
  * CDP methods / domains used (via recorder.ts + this module):
- *   Page.enable           (reload mode)
- *   Page.reload           (reload mode)
+ *   Page.enable           (reload mode, PAGE targets only)
+ *   Page.reload           (reload mode, PAGE targets only)
  *   Runtime.enable / Runtime.consoleAPICalled / Runtime.exceptionThrown (recorder)
  *   Log.enable / Log.entryAdded                                          (recorder)
  *

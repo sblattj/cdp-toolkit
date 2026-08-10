@@ -38,11 +38,47 @@
  * reload-driven via `captureWindow`. `startRecorder` resolves only AFTER the CDP
  * domains are enabled, so a caller can trigger navigation/reload immediately and
  * be sure events are caught.
+ *
+ * SERVICE WORKERS (1.9.1)
+ * -----------------------
+ * A `worker:<substring>` (or bare worker-id) target records the same two domains
+ * over the worker's OWN connection, which is the whole point of the feature: the
+ * outbound fetch an MV3 background worker makes is a Network event on that
+ * session and nothing else can see it reliably. Measured on Chrome 151.0.7922.109
+ * before any of this was written:
+ *
+ *   - `Network.enable` succeeds on a direct worker connection and
+ *     requestWillBeSent / responseReceived / loadingFinished all arrive for a
+ *     fetch the worker performs; `Network.getResponseBody` serves its body.
+ *   - `Runtime.consoleAPICalled` delivers the worker's console.log on the same
+ *     session. (`Log.enable` also succeeds but emits nothing there.)
+ *   - `Page.enable` and `Page.reload` DO NOT EXIST on a worker session: both
+ *     answer `-32601 ... wasn't found`. So a worker capture window cannot be
+ *     reload-driven, and this module skips both instead of catching a failure —
+ *     the window simply LISTENS for durationMs while the worker runs.
+ *   - A held session SUPPRESSES MV3 idle-eviction (measured: alive and still
+ *     emitting Network events after 60s held; evicted ~30s after the detach). A
+ *     recording therefore keeps the worker alive for exactly as long as it runs,
+ *     which is a documented side effect of these tools, not an accident.
+ *   - An evicted worker that is woken has ALREADY run its top-level code by the
+ *     time the recorder attaches, so a request the worker makes at startup can be
+ *     missed. Trigger the work you want to observe during the window.
  */
 import { mkdir, appendFile, writeFile, copyFile } from "node:fs/promises";
-import { openPage, resolveTarget } from "../client.ts";
+import { CdpError, listTargets, openPage, resolveTarget } from "../client.ts";
 import type { CdpConnection } from "../client.ts";
+import { resolveWorkerSelector } from "../cdp/workers.ts";
 import type { Target, TargetSelector } from "../types.ts";
+import {
+  isWorkerSelector,
+  isWorkerTargetType,
+  resolveWorkerTargets,
+  workerAmbiguityMessage,
+  workerBufferReadMissMessage,
+  workerNeedle,
+  workerWakeMisuseMessage,
+  WORKER_EMPTY_NEEDLE_MESSAGE,
+} from "../workers.ts";
 
 /** Artifact / buffer directory (shared with the rest of the toolkit). */
 export const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -60,6 +96,52 @@ export function captureFile(targetId: string, captureId: string): string {
 /** Sleep helper (module runtime only; not the workflow-script sandbox). */
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/* ------------------------- worker targets (1.9.1) ------------------------- */
+
+/**
+ * Resolve the target for a console/network call, which is the ONE place the
+ * three reader tools differ from every other tool: a capture may start a
+ * stopped worker, a read never may.
+ *
+ * `capture: true`  — a recording is about to be made, so a `worker:` selector
+ *   goes through the waking resolver (Chrome-only, `cdp/workers.ts`), default
+ *   wake:true, exactly like evaluate_script.
+ * `capture: false` — an existing buffer is about to be read, so the same
+ *   selector resolves against the RUNNING workers only, and a miss gets the
+ *   read-path message rather than a promise that waking would help (it would
+ *   not: the buffer is keyed by a target id the restart re-mints).
+ *
+ * Non-worker selectors are untouched: they go through client.ts's resolveTarget,
+ * lease gate and all.
+ */
+export async function resolveRecorderTarget(
+  target: TargetSelector,
+  opts: { capture: boolean; wake?: boolean },
+): Promise<Target> {
+  if (!isWorkerSelector(target)) return resolveTarget(target);
+  if (opts.capture) return resolveWorkerSelector(target, { wake: opts.wake ?? true });
+
+  const needle = workerNeedle(target);
+  if (needle === "") throw new CdpError(WORKER_EMPTY_NEEDLE_MESSAGE);
+  const { matches, liveWorkers } = resolveWorkerTargets(await listTargets(), needle);
+  if (matches.length > 1) throw new CdpError(workerAmbiguityMessage(needle, matches));
+  if (matches.length === 1) return matches[0]!;
+  throw new CdpError(workerBufferReadMissMessage(needle, liveWorkers));
+}
+
+/**
+ * Validate `wake` for the three reader tools. It is REFUSED where it would do
+ * nothing rather than accepted and ignored — the evaluate_script precedent: an
+ * accepted argument reads as "this call will wake something", and a caller who
+ * is wrong about that never finds out.
+ */
+export function assertWakeApplies(target: TargetSelector, wake: boolean | undefined, capture: boolean): void {
+  if (wake === undefined) return;
+  if (typeof wake !== "boolean") throw new CdpError("'wake' must be a boolean");
+  if (!isWorkerSelector(target)) throw new CdpError(workerWakeMisuseMessage("not-a-worker-selector"));
+  if (!capture) throw new CdpError(workerWakeMisuseMessage("read-only-call"));
 }
 
 /** Network CDP events we persist. */
@@ -186,11 +268,16 @@ export async function startRecorder(target: TargetSelector, opts: RecorderOption
 }
 
 /**
- * One-shot reload capture used by the console/network tools. Records BOTH
- * domains into a unique per-capture file, reloads the page, waits `durationMs`,
- * and (on stop) publishes the capture as the target's shared "latest" buffer.
- * The returned handle keeps the connection open until `stop()`, so a caller can
- * `flush()` then fetch response bodies before closing.
+ * One-shot capture used by the console/network tools. Records BOTH domains into
+ * a unique per-capture file, waits `durationMs`, and (on stop) publishes the
+ * capture as the target's shared "latest" buffer. The returned handle keeps the
+ * connection open until `stop()`, so a caller can `flush()` then fetch response
+ * bodies before closing.
+ *
+ * A PAGE window reloads to generate the traffic. A WORKER window does not (and
+ * cannot: `Page.*` is absent on a worker session) — it listens while the worker
+ * runs, and the session it holds keeps that worker from being idle-evicted for
+ * the length of the window.
  */
 export interface CaptureWindow {
   /** The unique per-capture buffer file (read this for isolated results). */
@@ -199,6 +286,8 @@ export interface CaptureWindow {
   conn: CdpConnection;
   /** Resolved target identity. */
   resolved: { id: string; url: string; title: string };
+  /** How the window was driven: "reload" for a page, "listen" for a worker. */
+  mode: "reload" | "listen";
   /** Buffer-write failure count. */
   droppedWrites(): number;
   /** Await in-flight appends without closing (bodies stay fetchable). */
@@ -210,9 +299,15 @@ export interface CaptureWindow {
 export async function captureWindow(
   target: TargetSelector,
   durationMs: number,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; wake?: boolean } = {},
 ): Promise<CaptureWindow> {
-  const resolved = await resolveTarget(target);
+  const resolved = await resolveRecorderTarget(target, { capture: true, wake: opts.wake });
+  // A WORKER window is "listen", not "reload": Page.enable/Page.reload answer
+  // -32601 on a worker session (measured), and there is nothing to reload
+  // anyway — the caller triggers the worker's work during the window. Keyed off
+  // the RESOLVED TYPE rather than the selector shape, so a bare worker target id
+  // takes the same branch as `worker:<substring>`.
+  const isWorker = isWorkerTargetType(resolved.type);
   const captureId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const file = captureFile(resolved.id, captureId);
   // Record both domains so neither tool clobbers the other's history.
@@ -223,13 +318,16 @@ export async function captureWindow(
     file,
     timeoutMs: opts.timeoutMs,
   });
-  await rec.conn.send("Page.enable");
-  await rec.conn.send("Page.reload", { ignoreCache: false });
+  if (!isWorker) {
+    await rec.conn.send("Page.enable");
+    await rec.conn.send("Page.reload", { ignoreCache: false });
+  }
   await delay(durationMs);
   return {
     file: rec.file,
     conn: rec.conn,
     resolved: { id: rec.target.id, url: rec.target.url, title: rec.target.title },
+    mode: isWorker ? "listen" : "reload",
     droppedWrites: rec.droppedWrites,
     flush: () => rec.flush(),
     async stop(): Promise<void> {
@@ -257,6 +355,8 @@ export async function captureWindow(
  *   Runtime.exceptionThrown (event)
  *   Log.enable
  *   Log.entryAdded (event)
+ *   Page.enable / Page.reload   (PAGE capture windows only: absent on a worker)
+ *   ServiceWorker.enable / .startWorker  (via cdp/workers.ts, worker wake only)
  *
  * Parity gaps vs chrome-devtools-mcp:
  *   - Buffering is to a per-target JSONL file on disk, not an in-memory ring; the

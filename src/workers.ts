@@ -37,6 +37,25 @@
 export const WORKER_SELECTOR_PREFIX = "worker:";
 
 /**
+ * THE ALLOWLIST. Every tool that accepts a `worker:<substring>` target, and the
+ * single source of truth for it: the refusal messages below are built from this
+ * list, and test/manifest-grammar-drift.test.ts asserts that no OTHER tool's
+ * manifest description advertises the arm. Adding a fifth tool is therefore one
+ * deliberate edit here, not a description that quietly grew the grammar.
+ *
+ * 1.9.0 shipped one entry (evaluate_script). 1.9.1 adds the three console/network
+ * readers, because the request an MV3 background worker makes to a real backend
+ * is exactly what a caller needs to see and `Runtime.evaluate`-based
+ * interception cannot reliably show them (see the tools' descriptions).
+ */
+export const WORKER_CAPABLE_TOOLS = [
+  "evaluate_script",
+  "list_network_requests",
+  "get_network_request",
+  "list_console_messages",
+] as const;
+
+/**
  * CDP target types this arm resolves. `service_worker` is the MV3 case that
  * motivated the feature; `shared_worker` is included because it presents the
  * same way (own target, own webSocketDebuggerUrl, evaluable over Runtime) and
@@ -94,21 +113,64 @@ export const WORKER_EMPTY_NEEDLE_MESSAGE =
 
 /**
  * The Firefox refusal. A PARAM-level gap, exactly like drag's mode:'html5'
- * (see resolveDragMode): evaluate_script stays in tools/list on Firefox because
- * every page selector still works there, and only this one arm is refused.
- * Naming the reason matters — WebDriver BiDi has no extension-worker target
- * concept to map onto, so this is a protocol gap, not an unimplemented to-do.
+ * (see resolveDragMode): the worker-capable tools stay in tools/list on Firefox
+ * because every page selector still works there, and only this one arm is
+ * refused. Naming the reason matters — WebDriver BiDi has no extension-worker
+ * target concept to map onto, so this is a protocol gap, not an unimplemented
+ * to-do.
  */
 export const WORKER_SELECTOR_UNSUPPORTED_MESSAGE =
   "target 'worker:<substring>' selects a service/shared worker, which this backend cannot address " +
   "(WebDriver BiDi has no extension service-worker target; Capability 'worker.targets' is Chrome-only). " +
-  "Use --browser chrome to evaluate in an extension's background worker.";
+  "Use --browser chrome to evaluate in, or record console/network from, an extension's background worker.";
 
 /** Refusal from the page-only resolvers (close_page / select_page / release_page). */
 export const WORKER_SELECTOR_PAGE_ONLY_MESSAGE =
   "target 'worker:<substring>' selects a service/shared worker, and this tool is page-only " +
-  "(closing, selecting or releasing a worker is meaningless). evaluate_script is the one tool that " +
-  "accepts a worker: target.";
+  "(closing, selecting or releasing a worker is meaningless). The tools that accept a worker: target are " +
+  `${WORKER_CAPABLE_TOOLS.join(", ")}.`;
+
+/**
+ * WHY `wake` IS REFUSED RATHER THAN IGNORED ON THE READ PATH, and why a bare id
+ * can never be woken. Measured for 1.9.1 on Chrome 151.0.7922.109: a worker that
+ * idle-evicts and is then restarted comes back under a DIFFERENT target id
+ * (probed: C43F0A18... -> 1F7D3C59... for the same extension). The recorder keys
+ * its buffer file by target id, so waking a worker on a read gives you a live
+ * worker whose buffer is empty — "0 requests" for a capture that really did
+ * record some, which is a lie shaped like an answer. A wake therefore only makes
+ * sense when a capture is being STARTED, and only from a `worker:<substring>`
+ * selector, since the id of an evicted worker no longer exists to name.
+ */
+export function workerWakeMisuseMessage(kind: "not-a-worker-selector" | "read-only-call"): string {
+  if (kind === "not-a-worker-selector") {
+    return (
+      "'wake' only applies to a target of the form 'worker:<substring>'. A page is never asleep, and a bare " +
+      "worker target id cannot be woken either: Chrome destroys the target when an MV3 worker is evicted and " +
+      "mints a NEW id when it restarts, so only the url-substring form can name a worker that is not running."
+    );
+  }
+  return (
+    "'wake' only applies when a capture is being started (reload:true, or includeBody with url). Reading an " +
+    "existing buffer cannot use a woken worker: a restarted MV3 worker gets a NEW target id, and the buffer is " +
+    "keyed by id, so the wake would hand back an empty capture. Re-run with reload:true to record a fresh one."
+  );
+}
+
+/**
+ * The read-path miss. Deliberately NOT workerMissMessage's wake:false text,
+ * which promises that "wake:true (the default)" would fix it — true for
+ * evaluate_script and for a capture, false here (see workerWakeMisuseMessage).
+ */
+export function workerBufferReadMissMessage(needle: string, liveWorkers: readonly WorkerTargetLike[]): string {
+  const running = liveWorkers.length ? ` (running workers: ${urlList(liveWorkers)})` : " (no workers are running)";
+  return (
+    `no running worker whose url contains '${needle}'${running}. ` +
+    "An MV3 extension service worker is idle-evicted after seconds of inactivity and then appears in NO target " +
+    "listing, so this is usually a sleeping worker rather than a wrong substring. This call only READS a buffer " +
+    "recorded earlier, and that buffer is keyed by the worker's target id, which Chrome re-mints on restart — so " +
+    "re-run with reload:true, which starts the worker and records a fresh capture window."
+  );
+}
 
 function urlList(workers: readonly WorkerTargetLike[]): string {
   return workers.map((w) => w.url).join(", ");

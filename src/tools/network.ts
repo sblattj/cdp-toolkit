@@ -16,11 +16,19 @@
  * and calls Network.getResponseBody before closing. Because a reload re-mints
  * requestIds, body fetch is matched by `url` (stable), not by a carried-over
  * requestId; see getNetworkRequest for the exact contract.
+ *
+ * SERVICE WORKERS (1.9.1): both tools accept `worker:<substring>` and a bare
+ * worker target id, Chrome only (Capability "worker.targets"). The capture is
+ * the same recorder, over the worker's own connection; what differs is that
+ * there is no reload to drive it (see recorder.ts's header for the measurements)
+ * — the window listens while the worker works, so the traffic has to be
+ * triggered during it. `wake` starts an idle-evicted worker first, and is
+ * accepted only where it can actually do something.
  */
 import { readFile } from "node:fs/promises";
-import { CdpError, resolveTarget } from "../client.ts";
+import { CdpError } from "../client.ts";
 import type { TargetSelector } from "../types.ts";
-import { recFile, captureWindow } from "./recorder.ts";
+import { assertWakeApplies, recFile, captureWindow, resolveRecorderTarget } from "./recorder.ts";
 import type { RecLine } from "./recorder.ts";
 
 const DEFAULT_CAPTURE_MS = 2500;
@@ -55,6 +63,8 @@ export interface ListNetworkRequestsArgs {
   durationMs?: number;
   /** Only return requests whose URL contains this substring. */
   filterUrl?: string;
+  /** Worker targets only, and only with reload:true — start an idle-evicted MV3 worker first (default true). */
+  wake?: boolean;
 }
 
 export interface GetNetworkRequestArgs {
@@ -66,6 +76,8 @@ export interface GetNetworkRequestArgs {
   /** Fetch the response body too (drives a fresh reload capture; use with `url`). */
   includeBody?: boolean;
   durationMs?: number;
+  /** Worker targets only, and only with includeBody+url — start an idle-evicted MV3 worker first (default true). */
+  wake?: boolean;
 }
 
 /** Coerce a CDP headers object to a string-keyed/string-valued record. */
@@ -166,14 +178,15 @@ export async function listNetworkRequests(args: ListNetworkRequestsArgs = {}): P
   let resolved: { id: string; url: string; title: string };
   let droppedWrites: number | undefined;
 
+  assertWakeApplies(args.target, args.wake, args.reload === true);
   if (args.reload) {
-    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS);
+    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS, { wake: args.wake });
     await cap.stop();
     file = cap.file;
     resolved = cap.resolved;
     droppedWrites = cap.droppedWrites();
   } else {
-    const target = await resolveTarget(args.target);
+    const target = await resolveRecorderTarget(args.target, { capture: false });
     file = recFile(target.id);
     resolved = { id: target.id, url: target.url, title: target.title };
   }
@@ -214,9 +227,10 @@ export async function getNetworkRequest(args: GetNetworkRequestArgs = {}): Promi
   const describeSelector = (): string =>
     args.requestId ? `requestId ${args.requestId}` : `url ~ '${args.url}'`;
 
+  assertWakeApplies(args.target, args.wake, Boolean(args.includeBody && args.url));
   // Body fetch by URL: a fresh reload capture (url is stable across reload).
   if (args.includeBody && args.url) {
-    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS);
+    const cap = await captureWindow(args.target, args.durationMs ?? DEFAULT_CAPTURE_MS, { wake: args.wake });
     try {
       await cap.flush(); // ensure the buffer is complete; conn stays open for the body fetch
       const match = (await readNetworkRequests(cap.file)).find((r) => r.url.includes(args.url!));
@@ -239,7 +253,7 @@ export async function getNetworkRequest(args: GetNetworkRequestArgs = {}): Promi
   }
 
   // Metadata path: read the target's existing buffer (also the requestId+includeBody case).
-  const target = await resolveTarget(args.target);
+  const target = await resolveRecorderTarget(args.target, { capture: false });
   const match = pick(await readNetworkRequests(recFile(target.id)));
   if (!match) {
     throw new CdpError(
@@ -264,7 +278,7 @@ export async function getNetworkRequest(args: GetNetworkRequestArgs = {}): Promi
  *   Network.requestWillBeSent / .responseReceived / .loadingFinished /
  *     .loadingFailed (events)                                       (recorder)
  *   Network.getResponseBody                                         (includeBody mode)
- *   Page.enable / Page.reload                                       (reload mode)
+ *   Page.enable / Page.reload                          (reload mode, PAGE targets only)
  *
  * Parity gaps vs chrome-devtools-mcp:
  *   - Response bodies require a fresh reload capture (CDP serves bodies only from

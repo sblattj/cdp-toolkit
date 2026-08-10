@@ -204,7 +204,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "evaluate_script",
-    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript. This is also the one tool that can evaluate inside an MV3 extension's background SERVICE WORKER rather than a page: pass target 'worker:<extension-id>' (Chrome only) and read chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started for you first (see 'wake').",
+    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript. This is the one tool that can EVALUATE inside an MV3 extension's background SERVICE WORKER rather than a page (list_network_requests/get_network_request/list_console_messages OBSERVE one): pass target 'worker:<extension-id>' (Chrome only) and read chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started for you first (see 'wake').",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -214,7 +214,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases) | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js) and read chrome.storage.local from it. The worker: arm is CHROME-ONLY (Capability 'worker.targets') and is accepted by this tool only; an MV3 worker that has been idle-evicted is started automatically first, see 'wake'."
+          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases) | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js) and read chrome.storage.local from it. The worker: arm is CHROME-ONLY (Capability 'worker.targets') and is accepted by four tools only — evaluate_script, list_network_requests, get_network_request and list_console_messages — never as universal grammar; an MV3 worker that has been idle-evicted is started automatically first, see 'wake'."
         },
         "wake": {
           "type": "boolean",
@@ -1135,7 +1135,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_console_messages",
-    "description": "Read console output (logs, warnings, exceptions) captured for the target page. By default reads the target's existing shared buffer and returns parsed console entries (empty if no capture has run); with reload:true it reloads the page and records a fresh capture window (both console+network) so a network reload never wipes console history.",
+    "description": "Read console output (logs, warnings, exceptions) captured for the target page. By default reads the target's existing shared buffer and returns parsed console entries (empty if no capture has run); with reload:true it reloads the page and records a fresh capture window (both console+network) so a network reload never wipes console history. SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is visible here, and this is the reliable way to see it: do NOT try to intercept it by monkeypatching fetch through evaluate_script, which is structurally unreliable in a service-worker realm (the evaluation runs in a realm where the module's captured fetch reference is unaffected, and the patch does not survive the worker's next restart). A worker's console.log arrives as Runtime.consoleAPICalled on its own session. A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1145,15 +1145,19 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
         },
         "reload": {
           "type": "boolean",
-          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer)."
+          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer). With a worker: target there is nothing to reload: the window records for durationMs while the worker runs, and the session it holds keeps that worker from being idle-evicted until the capture stops."
         },
         "durationMs": {
           "type": "number",
           "description": "Capture window for reload mode, in milliseconds. Default 2500."
+        },
+        "wake": {
+          "type": "boolean",
+          "description": "Worker targets only, and only when a capture is being started (reload:true). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
         }
       },
       "required": [],
@@ -1185,7 +1189,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_network_requests",
-    "description": "Return correlated network request rows (one per requestId, with status/headers/state) for the target page. By default reads the target's existing buffer; with reload:true it reloads and records a fresh both-domains capture window. Use filterUrl to keep only requests whose URL contains a substring.",
+    "description": "Return correlated network request rows (one per requestId, with status/headers/state) for the target page. By default reads the target's existing buffer; with reload:true it reloads and records a fresh both-domains capture window. Use filterUrl to keep only requests whose URL contains a substring. SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is visible here, and this is the reliable way to see it: do NOT try to intercept it by monkeypatching fetch through evaluate_script, which is structurally unreliable in a service-worker realm (the evaluation runs in a realm where the module's captured fetch reference is unaffected, and the patch does not survive the worker's next restart). A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1195,11 +1199,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
         },
         "reload": {
           "type": "boolean",
-          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer)."
+          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer). With a worker: target there is nothing to reload: the window records for durationMs while the worker runs, and the session it holds keeps that worker from being idle-evicted until the capture stops."
         },
         "durationMs": {
           "type": "number",
@@ -1208,6 +1212,10 @@ export const MANIFEST: ToolSpec[] = [
         "filterUrl": {
           "type": "string",
           "description": "Only return requests whose URL contains this substring."
+        },
+        "wake": {
+          "type": "boolean",
+          "description": "Worker targets only, and only when a capture is being started (reload:true). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
         }
       },
       "required": [],
@@ -1216,7 +1224,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "get_network_request",
-    "description": "Return one network request (matched by exact requestId, else by url substring) including status/headers. Requires at least one of requestId or url (throws otherwise). With includeBody:true the body fetch drives a fresh reload capture and is matched by url ONLY (reload re-mints requestIds, so a carried-over requestId cannot fetch a body, so it returns metadata plus bodyUnavailableReason).",
+    "description": "Return one network request (matched by exact requestId, else by url substring) including status/headers. Requires at least one of requestId or url (throws otherwise). With includeBody:true the body fetch drives a fresh capture (a reload for a page, a listen window for a worker) and is matched by url ONLY (a fresh capture re-mints requestIds, so a carried-over requestId cannot fetch a body, so it returns metadata plus bodyUnavailableReason). SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is visible here, and this is the reliable way to see it: do NOT try to intercept it by monkeypatching fetch through evaluate_script, which is structurally unreliable in a service-worker realm (the evaluation runs in a realm where the module's captured fetch reference is unaffected, and the patch does not survive the worker's next restart). A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1226,7 +1234,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
         },
         "requestId": {
           "type": "string",
@@ -1243,6 +1251,10 @@ export const MANIFEST: ToolSpec[] = [
         "durationMs": {
           "type": "number",
           "description": "Capture window for the reload-driven body fetch, in milliseconds. Default 2500."
+        },
+        "wake": {
+          "type": "boolean",
+          "description": "Worker targets only, and only when a capture is being started (includeBody together with url). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
         }
       },
       "required": [],
