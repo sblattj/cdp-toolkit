@@ -78,7 +78,8 @@
     "screencast:smoke": "bun run ./test/screencast-smoke.ts",
     "mcp:smoke": "bun run ./test/mcp-smoke.ts",
     "firefox:smoke": "bun run ./test/firefox-smoke.ts",
-    "lease:smoke": "bun run ./test/lease-smoke.ts"
+    "lease:smoke": "bun run ./test/lease-smoke.ts",
+    "input:smoke": "bun run ./test/input-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "22.10.10",

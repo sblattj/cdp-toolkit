@@ -29,7 +29,7 @@ import {
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
-  type ScreenshotOptions, type SnapshotNode, type UidStability,
+  type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
 import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
@@ -39,7 +39,7 @@ import type {
   BrowsingContextId, BrowsingContextInfo, BrowsingContextLocator, BrowsingContextReadinessState,
   BrowsingContextCaptureScreenshotParameters, ScriptSharedReference, ScriptRemoteValue, ScriptLocalValue,
   ScriptNodeRemoteValue, ScriptExceptionDetails, InputSourceActions, InputPointerSourceAction, InputKeySourceAction,
-  NetworkCookie,
+  InputWheelSourceAction, NetworkCookie,
 } from "./protocol.ts";
 
 /* ---------------------------------- cookies ---------------------------------- */
@@ -255,6 +255,14 @@ const KEY_VALUES: Record<string, string> = {
 };
 const MODIFIER_VALUES: Record<string, string> = { shift: "\uE008", control: "\uE009", ctrl: "\uE009", alt: "\uE00A", meta: "\uE03D", cmd: "\uE03D", command: "\uE03D" };
 const BUTTON_CODES: Record<"left" | "right" | "middle", number> = { left: 0, middle: 1, right: 2 };
+
+/** Same scroll-settle technique as cdp/driver.ts's ARM_SCROLL_SETTLE_WATCH / awaitScrollSettle,
+ *  see that file's doc comment for the full rationale: a capture-phase 'scroll' listener on
+ *  window, debounced 60ms with a 500ms cap, so scroll()'s caller observes the settled position. */
+const ARM_SCROLL_SETTLE_WATCH_SOURCE =
+  "function(){window.__cdpScrollSettle=new Promise((resolve)=>{let t;const done=()=>{window.removeEventListener('scroll',on,true);resolve(true);};" +
+  "const on=()=>{clearTimeout(t);t=setTimeout(done,60);};window.addEventListener('scroll',on,true);t=setTimeout(done,60);setTimeout(done,500);});}";
+const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}";
 
 /**
  * Firefox 153 capabilities. Only what was empirically verified is declared: emulate.deviceMetrics
@@ -474,7 +482,18 @@ class BidiPageDriver implements PageDriver {
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions: [{ type: "pointerMove", x, y, duration: 0 }] }]);
     return { x, y };
   }
+  // modifiers is new in 1.8.0 (Track P1). Chrome expresses it as a bitmask on the same
+  // mousePressed/mouseReleased events (cdp/driver.ts's inputModifierBits); WebDriver BiDi has no
+  // equivalent field on a pointerDown/pointerUp action; a modifier chord instead requires a SECOND
+  // "key" input source ticked in lockstep with the pointer source across the same performActions
+  // call, which the spec explicitly permits skipping ("throw a clear error when modifiers are
+  // passed on firefox" — see cdp-toolkit's 1.8.0 spec, Track P1 §3) and this driver was not
+  // verified against real Firefox for this pass, so it throws "unsupported" rather than guess at
+  // untested tick-synchronization semantics.
   async click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }> {
+    if (opts?.modifiers && opts.modifiers.length > 0) {
+      throw driverError("unsupported", "click: 'modifiers' is not supported by the Firefox/BiDi driver; omit 'modifiers' or use --browser chrome for a modifier click.");
+    }
     const ref = await resolveElementLocator(this.conn, this.contextId, loc);
     const { x, y } = await this.centerOf(ref);
     const button = BUTTON_CODES[opts?.button ?? "left"];
@@ -482,6 +501,33 @@ class BidiPageDriver implements PageDriver {
     for (let i = 0; i < (opts?.clickCount ?? 1); i++) actions.push({ type: "pointerDown", button }, { type: "pointerUp", button });
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions }]);
     return { x, y };
+  }
+  // 1.8.0 Track P1: BiDi's "wheel" input source (a distinct source type from "pointer"/"key")
+  // carries x/y/deltaX/deltaY directly on its one "scroll" action — no tick synchronization with
+  // another source needed, unlike click's modifiers above, which is what makes this tractable.
+  // Same settle-wait rationale as cdp/driver.ts's armScrollSettleWatch: a wheel-triggered scroll
+  // is a browser-animated effect, not a synchronous DOM mutation, so a caller reading scroll
+  // position immediately after performActions resolves risks the pre-scroll value. Not empirically
+  // verified against real Firefox this pass (no Firefox available in this environment), but applied
+  // for consistency with the verified Chrome behavior rather than left as a known, unfixed gap.
+  async scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }> {
+    const { x, y } = await this.resolveScrollPoint(anchor);
+    const deltaX = Math.round(opts.deltaX ?? 0);
+    const deltaY = Math.round(opts.deltaY ?? 0);
+    await this.callFunctionValue(ARM_SCROLL_SETTLE_WATCH_SOURCE, []);
+    const actions: InputWheelSourceAction[] = [{ type: "scroll", x: Math.round(x), y: Math.round(y), deltaX, deltaY }];
+    await this.performActions([{ type: "wheel", id: "cdp-wheel", actions }]);
+    await this.callFunctionValue(AWAIT_SCROLL_SETTLE_SOURCE, []).catch(() => undefined);
+    return { x, y };
+  }
+  private async resolveScrollPoint(anchor: ElementLocator | { x: number; y: number } | undefined): Promise<{ x: number; y: number }> {
+    if (anchor === undefined) {
+      const v = await this.callFunctionValue("function(){return {x: window.innerWidth / 2, y: window.innerHeight / 2};}", []);
+      if (!v || typeof v !== "object") throw driverError("page-error", "could not measure viewport for scroll center");
+      return v as { x: number; y: number };
+    }
+    if ("x" in anchor) return anchor;
+    return this.centerOf(await resolveElementLocator(this.conn, this.contextId, anchor));
   }
   async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
     const fromPt = await this.centerOf(await resolveElementLocator(this.conn, this.contextId, from));
