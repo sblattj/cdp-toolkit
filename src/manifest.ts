@@ -454,7 +454,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "drag",
-    "description": "Drag from a source element to a destination element via synthetic mouse press/move/release (approximates HTML5 drag-and-drop; not guaranteed for every custom DnD library). 'from' and 'to' each take exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector.",
+    "description": "Drag from a source element to a destination. 'from' takes exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector. The destination is exactly one of 'to' (an element via uid/selector, or an absolute viewport point via x+y) or 'by' ({dx,dy} offset from the source point — sliders, map panning, resize handles). mode:'mouse' (default) dispatches synthetic mouse press/move/release: right for widgets built on raw pointer events, and Chrome does turn it into a real drag, but WHICH drag events reach the page depends on where the interpolated pointer path happens to land — measured on Chrome 151, the default steps:2 delivers ZERO dragover events, so an HTML5 drop zone written the standard way (preventDefault inside dragover) refuses the drop entirely. mode:'html5' performs the drag deterministically instead: Chrome's drag interception hands back the DragData the page's own dragstart built, and the toolkit replays it as dragEnter/dragOver/drop exactly at the destination, so a draggable=\"true\" / dataTransfer drop zone works regardless of the pointer path. mode:'html5' is CHROME-ONLY: it requires capability 'input.html5Drag' and is rejected with a clear error under the Firefox backend, where the tool itself remains available for mouse-mode drags. 'steps' (default 2) sets how many interpolated mouse-move events are dispatched between source and destination; raise it for DnD libraries with a movement threshold or per-frame sampling.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -483,7 +483,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "to": {
           "type": "object",
-          "description": "Destination element to drag to. Provide exactly one of uid or selector.",
+          "description": "Where the drag ends: exactly one of uid, selector, or x+y. Mutually exclusive with 'by'; exactly one of to/by is required.",
           "properties": {
             "uid": {
               "type": "number",
@@ -492,14 +492,48 @@ export const MANIFEST: ToolSpec[] = [
             "selector": {
               "type": "string",
               "description": "CSS selector for the destination element (resolved via document.querySelector)."
+            },
+            "x": {
+              "type": "number",
+              "description": "Absolute viewport x-coordinate to drop at. Must be given together with 'y'. Use this when there is no droppable element to name (a canvas, a slider track)."
+            },
+            "y": {
+              "type": "number",
+              "description": "Absolute viewport y-coordinate to drop at. Must be given together with 'x'."
             }
           },
           "additionalProperties": false
+        },
+        "by": {
+          "type": "object",
+          "description": "Drag by an offset from the source element's center instead of to a destination: at least one of dx/dy, the other defaults to 0. Mutually exclusive with 'to'; exactly one of to/by is required. Use for sliders (by:{dx:40}), map panning, and resize handles.",
+          "properties": {
+            "dx": {
+              "type": "number",
+              "description": "Horizontal offset in CSS pixels; positive drags RIGHT."
+            },
+            "dy": {
+              "type": "number",
+              "description": "Vertical offset in CSS pixels; positive drags DOWN."
+            }
+          },
+          "additionalProperties": false
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "mouse",
+            "html5"
+          ],
+          "description": "'mouse' (default): synthetic mouse press/move/release; works on pointer-event widgets, does nothing on HTML5 draggable elements. 'html5': real HTML5 drag-and-drop (dragstart/dragEnter/dragOver/drop with the page's own dataTransfer). 'html5' is CHROME-ONLY and is rejected with a clear error under the Firefox backend."
+        },
+        "steps": {
+          "type": "number",
+          "description": "Number of interpolated mouse-move events dispatched between the source and destination points, evenly spaced, the last landing exactly on the destination. Integer 1-500, default 2 (midpoint then destination). Raise it for DnD libraries with a movement threshold or per-frame sampling."
         }
       },
       "required": [
-        "from",
-        "to"
+        "from"
       ],
       "additionalProperties": false
     }

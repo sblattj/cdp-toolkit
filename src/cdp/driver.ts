@@ -11,8 +11,9 @@ import { LeaseConflictError } from "../leases.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, interpolatePoints, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type SetCookieParams,
+  type DragDestination, type DragOptions,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
   type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
@@ -151,6 +152,11 @@ export function inputModifierBits(mods?: readonly string[]): number {
   }
   return bits;
 }
+/** How long drag mode:"html5" waits for Chrome's Input.dragIntercepted before declaring the source
+ *  element undraggable. Deliberately well under the 15s default command timeout: a page that is
+ *  going to start a drag does so on the first move, so a longer wait only delays a clear error. */
+const HTML5_DRAG_INTERCEPT_TIMEOUT_MS = 5_000;
+
 // Copied verbatim from src/tools/input.ts `resolveKey`.
 function resolveKey(key: string): KeySpec {
   const named = NAMED_KEYS[key.toLowerCase()];
@@ -305,13 +311,22 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * or hover prefix (src/tools/dispatch-mouse.ts), the primitive behind dispatch_mouse; declared
  * chrome-only per ADR-001 rather than attempted over BiDi's per-call performActions device-state
  * model (see dispatch-mouse.ts's header for why that combination was not attempted this pass).
+ * input.html5Drag rides Input.setInterceptDrags + Input.dragIntercepted + Input.dispatchDragEvent
+ * (drag's mode:"html5", see CdpPageDriver.html5Drag). It is a PARAM-level capability, not a
+ * whole-tool one: `drag` itself stays universal because mouse mode works on both backends, so
+ * input.html5Drag is deliberately absent from driver.ts's REQUIRED_CAPABILITIES and is instead
+ * checked by shared-tools.ts's drag() when mode:"html5" is asked for. ADR-001 governs whole tools;
+ * a param gap surfaces as a clear validation error named in the manifest description, exactly like
+ * click's modifiers-on-Firefox (Track P1). WebDriver BiDi has no drag-interception primitive at
+ * all — no equivalent of setInterceptDrags, no drag event to subscribe to — so this is a genuine
+ * protocol gap, not an unattempted port.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
-  "capture.screencast", "input.raw",
+  "capture.screencast", "input.raw", "input.html5Drag",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -489,16 +504,93 @@ class CdpPageDriver implements PageDriver {
     const { objectId } = await resolveElementLocator(this.conn, anchor);
     return centerOf(this.conn, objectId);
   }
-  // Copied dispatch sequence verbatim from src/tools/input.ts `drag` (its "from" prefix IS hover, reused here).
-  async drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+  // Dispatch sequence originally copied verbatim from src/tools/input.ts `drag` (its "from" prefix
+  // IS hover, reused here). 1.8.0 Track P2 generalised it: `to` may be an element, a viewport
+  // point, or an offset; `steps` sets the interpolation count; `mode:"html5"` swaps the tail of
+  // the sequence for real drag events. steps:2 reproduces the original midpoint+destination moves
+  // exactly, so the default path is byte-for-byte the pre-1.8.0 dispatch.
+  async drag(from: ElementLocator, to: DragDestination, opts?: DragOptions): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
     const fromPt = await this.hover(from);
-    const { objectId: dstId } = await resolveElementLocator(this.conn, to);
-    const toPt = await centerOf(this.conn, dstId);
+    const toPt = await this.resolveDragDestination(to, fromPt);
+    const steps = Math.max(1, Math.trunc(opts?.steps ?? 2));
+    if ((opts?.mode ?? "mouse") === "html5") {
+      await this.html5Drag(fromPt, toPt, steps);
+      return { from: fromPt, to: toPt };
+    }
     await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromPt.x + toPt.x) / 2, y: (fromPt.y + toPt.y) / 2, button: "left" });
-    await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: toPt.x, y: toPt.y, button: "left" });
+    for (const pt of interpolatePoints(fromPt, toPt, steps)) {
+      await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
+    }
     await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
     return { from: fromPt, to: toPt };
+  }
+  private async resolveDragDestination(to: DragDestination, fromPt: { x: number; y: number }): Promise<{ x: number; y: number }> {
+    if ("dx" in to) return { x: fromPt.x + to.dx, y: fromPt.y + to.dy };
+    if ("x" in to) return to;
+    const { objectId } = await resolveElementLocator(this.conn, to);
+    return centerOf(this.conn, objectId);
+  }
+  /**
+   * The real HTML5 drag (capability "input.html5Drag").
+   *
+   * WHY THIS EXISTS — MEASURED, NOT ASSUMED (Chrome 151.0.7922.109, macOS, --headless=new and
+   * headed alike; see test/input-smoke.ts's P2 section). The common claim that synthetic mouse
+   * events cannot drive HTML5 drag-and-drop is FALSE on modern Chrome: a plain mouse-mode drag
+   * does start a real drag and did fire dragstart and drop on a draggable source. What mouse mode
+   * cannot control is WHICH drag events the page gets, because they follow the interpolated
+   * pointer path. On the same page, the default steps:2 produced dragstart + drop but ZERO
+   * dragover, while steps:1 and steps:8 produced dragover — and a drop zone written the standard
+   * way (preventDefault inside dragover, the HTML spec's way to mark a valid drop target) refuses
+   * the drop when no dragover arrives. So mouse mode is a coin flip decided by geometry, and
+   * html5 mode is the deterministic path: dragEnter -> dragOver -> drop, dispatched explicitly at
+   * the destination, every time.
+   *
+   * Input.setInterceptDrags tells Chrome to hand the gesture BACK to the client instead of running
+   * it natively: the moment the drag would start, Chrome emits Input.dragIntercepted carrying the
+   * real DragData (items, mimeTypes, dragOperationsMask) it built from the page's own dragstart,
+   * and the client plays that data at the destination with Input.dispatchDragEvent. The data must
+   * be Chrome's — a hand-rolled DragData would drop whatever the page's dragstart handler put in
+   * the dataTransfer, which is exactly what a real DnD implementation reads in its drop handler.
+   *
+   * The event subscription is armed BEFORE the press for the same reason armScrollSettleWatch is
+   * armed before the wheel dispatch: dragIntercepted can arrive before the mouseMoved command's
+   * own ack, so subscribing afterwards is a race that loses the event and then waits out the full
+   * timeout. Sequence and the trailing mouseReleased mirror Puppeteer's Mouse.dragAndDrop.
+   *
+   * Interception is disabled in a `finally` unconditionally. Leaving it enabled would break real
+   * user dragging in that tab for as long as the browser lives — the tab would look fine and
+   * simply refuse to drag anything — and the tab may well be a human's (claim_page takeover), so
+   * this is not a tidiness nicety.
+   */
+  private async html5Drag(fromPt: { x: number; y: number }, toPt: { x: number; y: number }, steps: number): Promise<void> {
+    await this.conn.send("Input.setInterceptDrags", { enabled: true });
+    try {
+      const intercepted = this.conn
+        .waitFor<{ data: Record<string, unknown> }>("Input.dragIntercepted", undefined, HTML5_DRAG_INTERCEPT_TIMEOUT_MS)
+        .catch(() => undefined);
+      await this.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x: fromPt.x, y: fromPt.y, button: "left", clickCount: 1 });
+      for (const pt of interpolatePoints(fromPt, toPt, steps)) {
+        await this.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, button: "left" });
+      }
+      const event = await intercepted;
+      if (!event?.data) {
+        throw driverError(
+          "page-error",
+          `drag mode:"html5": the page never started a drag (no Input.dragIntercepted within ${HTML5_DRAG_INTERCEPT_TIMEOUT_MS}ms). ` +
+            "The source element is probably not draggable — HTML5 drag-and-drop needs draggable=\"true\" (or a native draggable element) " +
+            "plus a dragstart handler. Use the default mode:\"mouse\" for widgets built on raw pointer events.",
+        );
+      }
+      const data = event.data;
+      for (const type of ["dragEnter", "dragOver", "drop"] as const) {
+        await this.conn.send("Input.dispatchDragEvent", { type, x: toPt.x, y: toPt.y, data });
+      }
+      await this.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: toPt.x, y: toPt.y, button: "left", clickCount: 1 });
+    } finally {
+      // Never let a throw above leave this tab unable to drag. Swallowed on failure: the original
+      // error is the one worth reporting, and a dead connection cannot be un-intercepted anyway.
+      await this.conn.send("Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
+    }
   }
   async setValue(loc: ElementLocator, value: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);

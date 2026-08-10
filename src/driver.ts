@@ -139,7 +139,8 @@ export type Capability =
   | "input.insertTextAtomic" // atomic value commit, not synthesized keystrokes
   | "locate.text" // find a node by visible text substring
   | "locate.xpath" // find a node by xpath
-  | "input.raw"; // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
+  | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
+  | "input.html5Drag"; // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
@@ -234,6 +235,72 @@ export interface MouseButtonOptions {
    *  Control=2, Meta=4, Shift=8 (cdp/driver.ts's inputModifierBits). A non-empty array is
    *  "unsupported" on the Firefox/BiDi driver today: see click()'s implementation note. */
   modifiers?: readonly string[];
+}
+
+/**
+ * Where a drag ends. 1.8.0 Track P2 widened this past "an element": an absolute viewport point
+ * ({x,y}) and an offset from the source point ({dx,dy}) are both real destinations for widgets
+ * that have no droppable element to name — a range slider's track, a map canvas, a resize gutter.
+ * The three branches are discriminated structurally ("dx" in / "x" in), the same way
+ * PageDriver.scroll's anchor already discriminates an ElementLocator from a viewport point; no
+ * ElementLocator variant carries an `x` or `dx` field, so the check is exact and not a heuristic.
+ */
+export type DragDestination = ElementLocator | { x: number; y: number } | { dx: number; dy: number };
+
+export interface DragOptions {
+  /**
+   * "mouse" (default): synthetic mousePressed/mouseMoved…/mouseReleased. Fine for widgets built on
+   * raw pointer events, and it is what `drag` has always done.
+   *
+   * "html5": a REAL HTML5 drag — Input.setInterceptDrags(true), the same press/move sequence, then
+   * the intercepted DragData replayed as Input.dispatchDragEvent dragEnter/dragOver/drop at the
+   * destination.
+   *
+   * WHAT THE DIFFERENCE ACTUALLY IS (measured on Chrome 151.0.7922.109, macOS, both --headless=new
+   * and headed — NOT assumed). Synthetic mouse events DO start a real drag in modern Chrome, so
+   * mouse mode is not inert on HTML5 drop zones the way the folklore says. What mouse mode does
+   * not control is WHICH drag events the page receives: that follows the interpolated pointer
+   * path, and at the default steps:2 a source-to-zone drag delivered dragstart and drop but ZERO
+   * dragover. A drop zone written the standard way — preventDefault inside dragover, which is how
+   * the HTML spec says you mark a valid drop target — therefore refused the drop outright, while
+   * steps:1 and steps:8 on the very same page happened to work. html5 mode removes the luck: the
+   * dragEnter/dragOver/drop triple is dispatched explicitly at the destination every time.
+   *
+   * Requires Capability "input.html5Drag" — Chrome only. A driver without that capability MUST
+   * throw "unsupported"; it must never silently downgrade to mouse mode, because a caller who
+   * asked for html5 asked precisely because mouse mode was not delivering the drop.
+   */
+  mode?: "mouse" | "html5";
+  /** Interpolated mouseMoved events dispatched between the source and destination points, evenly
+   *  spaced, the last one landing exactly on the destination. Default 2 (the pre-1.8.0 hardcoded
+   *  behavior: midpoint, then destination). DnD libraries with a movement threshold or per-frame
+   *  sampling need more. The tool layer validates the range; a driver trusts its caller. */
+  steps?: number;
+}
+
+/**
+ * The `steps` evenly-spaced points between `from` (exclusive) and `to` (inclusive), for a drag's
+ * interpolated move sequence. The last point is EXACTLY `to`, emitted as `to` itself rather than
+ * computed, so float error can never leave the pointer a fraction of a pixel short of the
+ * destination element. steps:1 is a single jump to the destination; steps:2 is
+ * midpoint-then-destination, the pre-1.8.0 hardcoded behavior.
+ *
+ * Lives here, in the backend-neutral module, because BOTH drivers need the identical geometry:
+ * the CDP driver turns each point into an Input.dispatchMouseEvent{mouseMoved} and the BiDi driver
+ * into a performActions pointerMove, but "where the pointer goes" must not differ by backend.
+ * Callers pass an already-validated integer >= 1 (the tool layer validates; a driver trusts it).
+ */
+export function interpolatePoints(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  steps: number,
+): Array<{ x: number; y: number }> {
+  const out: Array<{ x: number; y: number }> = [];
+  for (let i = 1; i < steps; i++) {
+    out.push({ x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps });
+  }
+  out.push({ x: to.x, y: to.y });
+  return out;
 }
 
 export interface ScrollOptions {
@@ -460,7 +527,10 @@ export interface PageDriver {
   /* input */
   click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }>;
   hover(loc: ElementLocator): Promise<{ x: number; y: number }>;
-  drag(from: ElementLocator, to: ElementLocator): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }>;
+  /** Press at `from`, move to `to`, release. `to` is an element, an absolute viewport point, or an
+   *  offset from the resolved source point (DragDestination). opts.mode picks synthetic-mouse vs.
+   *  real HTML5 drag events; opts.steps sets how many interpolated moves are dispatched. */
+  drag(from: ElementLocator, to: DragDestination, opts?: DragOptions): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }>;
   /** Dispatch a wheel/scroll event at an anchor point. `anchor` is an ElementLocator (scrolled
    *  into view first, exactly like click/hover), an absolute viewport point, or `undefined` for
    *  the viewport center. Chrome: Input.dispatchMouseEvent{type:"mouseWheel"}. Firefox: BiDi's
