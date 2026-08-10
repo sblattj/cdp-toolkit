@@ -75,14 +75,13 @@ describe("manifest grammar drift", () => {
   });
 
   /**
-   * The three recorder-backed tools have to teach three things a caller cannot
+   * The three recorder-backed tools have to teach things a caller cannot
    * discover by trying: that the arm is Chrome-only, that recording a worker
-   * KEEPS IT ALIVE (a side effect on the thing being observed), and that the
-   * fetch-monkeypatch approach they would otherwise reach for does not work in
-   * a service-worker realm. Each is asserted separately so a description that
-   * drops one fails on that one.
+   * KEEPS IT ALIVE (a side effect on the thing being observed), and why the two
+   * tricks they would otherwise reach for do not work. Each is asserted
+   * separately so a description that drops one fails on that one.
    */
-  test("each recorder-backed worker tool documents the arm, the chrome-only gate, the keep-alive side effect and the monkeypatch trap", () => {
+  test("each recorder-backed worker tool documents the arm, the chrome-only gate and the keep-alive side effect", () => {
     for (const name of ["list_network_requests", "get_network_request", "list_console_messages"]) {
       const tool = MANIFEST.find((t) => t.name === name);
       expect(tool).toBeDefined();
@@ -91,11 +90,38 @@ describe("manifest grammar drift", () => {
       expect(props.target?.description ?? "").toMatch(/CHROME-ONLY|Chrome only/);
       expect(tool!.description).toMatch(/worker\.targets/);
       expect(tool!.description).toMatch(/KEEPS\s+THE\s+WORKER\s+ALIVE/);
-      expect(tool!.description).toMatch(/monkeypatch/);
       // wake is a real, documented argument on all three, and it names the
       // eviction fact it exists for.
       expect(props.wake?.type).toBe("boolean");
       expect(props.wake?.description ?? "").toMatch(/idle-evicted/);
+    }
+  });
+
+  /**
+   * THE MISDIAGNOSIS GUARD (owner correction, 2026-08-10).
+   *
+   * The field report that motivated this feature blamed service-worker realm
+   * semantics — "evaluate can't see module state, a self.fetch patch doesn't
+   * stick, so eval-based interception is structurally unreliable in a SW". That
+   * diagnosis was WRONG: the real cause was an outdated extension build loaded
+   * in the browser, and W1's probes read chrome.storage out of a SW eval
+   * perfectly well. What survives it is narrower and is ordinary JavaScript,
+   * true in a page just as much as in a worker: a module-scoped binding is not
+   * on the global object evaluate_script sees, and assigning self.fetch cannot
+   * rebind a reference some module already captured.
+   *
+   * So this pins BOTH halves. The two real reasons must be stated, and the realm
+   * story must not come back on the next docs sweep — a wrong explanation in a
+   * tool description is worse than none, because the caller acts on it.
+   */
+  test("the worker descriptions give the MEASURED reason, and never the service-worker-realm misdiagnosis", () => {
+    for (const name of ["list_network_requests", "get_network_request", "list_console_messages"]) {
+      const desc = MANIFEST.find((t) => t.name === name)!.description ?? "";
+      expect(desc).toMatch(/Network domain/);
+      expect(desc).toMatch(/global scope/);
+      expect(desc).toMatch(/self\.fetch/);
+      expect(desc).not.toMatch(/structurally unreliable/i);
+      expect(desc).not.toMatch(/realm/i);
     }
   });
 
