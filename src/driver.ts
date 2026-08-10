@@ -142,7 +142,8 @@ export type Capability =
   | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
   | "input.html5Drag" // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
   | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
-  | "browser.permissions"; // grant/reset browser permissions for an origin (grant_permissions); Chrome only
+  | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome only
+  | "worker.targets"; // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
@@ -562,6 +563,31 @@ export interface BrowserDriver {
    * this is an absent method producing an absent field.
    */
   probeRenderer?(targetId: string, timeoutMs?: number): Promise<{ responsive: boolean; beaconTs: number | null }>;
+
+  /**
+   * Resolve a "worker:<substring>" selector to a concrete service/shared-worker
+   * target, STARTING an idle-evicted MV3 service worker first when `wake` is
+   * true. The returned PageInfo's id is a plain target id, so the caller then
+   * acquires it through the ordinary page() path.
+   *
+   * OPTIONAL **and** gated by Capability "worker.targets", unlike
+   * installActivityBeacon / readActivityBeacon / probeRenderer, which are
+   * optional but deliberately NOT capabilities. The difference is what a caller
+   * can observe: those three produce an absent FIELD on a result that is
+   * otherwise complete, so silence is the honest answer. This one decides
+   * whether an argument the caller explicitly wrote is honoured, and silently
+   * resolving `worker:...` to something else — or to nothing — would be a wrong
+   * answer rather than a missing annotation. So it refuses out loud, exactly as
+   * drag's mode:'html5' does behind "input.html5Drag" (see resolveDragMode).
+   * No tool is gated out of tools/list: evaluate_script is universal, only this
+   * one arm of its `target` grammar is Chrome-only.
+   *
+   * MUST NOT report a wake it cannot see: an implementation is required to
+   * confirm the worker is back in the target listing rather than trusting the
+   * start command's own result. See cdp/workers.ts for why that is not
+   * paranoia.
+   */
+  resolveWorkerTarget?(selector: string, opts: { wake: boolean }): Promise<PageInfo>;
 
   /** Tear down the transport: process exit (CLI) or shutdown (MCP server).
    *  Idempotent. MUST NOT be called by a tool. */

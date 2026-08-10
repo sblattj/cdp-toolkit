@@ -45,6 +45,7 @@ import {
 } from "./leases.ts";
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
 import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "./origins.ts";
+import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -133,6 +134,20 @@ export async function pickPage(driver: BrowserDriver, pages: PageInfo[], selecto
     return p;
   }
   if (selector.startsWith("label:")) return pickByLabel(driver, pages, selector.slice(6));
+  if (isWorkerSelector(selector)) {
+    // THE PAGE-ONLY CONTRACT, STATED OUT LOUD. Every caller of pickPage
+    // (resolvePage -> close_page / select_page / release_page, claim_page's
+    // takeover) acts on a TAB, and the 1.9.0 "worker:" arm is deliberately NOT
+    // implemented here: it resolves against the page-only listing these callers
+    // pass, which by construction never contains a worker, so the arm could
+    // only ever miss. Refusing with the reason beats falling through to the
+    // bare-id lookup, whose "no target with id 'worker:foo'" reads as a typo.
+    // The arm lives in client.ts's pickTarget (Chrome's all-targets resolver),
+    // and only evaluate_script routes to it.
+    throw new SharedToolError(
+      backendOf(driver) === "firefox" ? WORKER_SELECTOR_UNSUPPORTED_MESSAGE : WORKER_SELECTOR_PAGE_ONLY_MESSAGE,
+    );
+  }
   const exactPage = pages.find((x) => x.id === selector);
   if (exactPage) return exactPage;
   const all = await driver.listPages({ all: true });
@@ -512,9 +527,37 @@ function sinkRequested(savePath?: string): savePath is string {
  *  caller happens to pass more than one. */
 const EXPRESSION_ALIAS_KEYS = ["function", "code", "js", "script", "fn", "body"] as const;
 
+/**
+ * Turn a `worker:<substring>` target into a concrete target id, waking an
+ * idle-evicted MV3 service worker on the way when `wake` is not false.
+ *
+ * WHY THIS RETURNS AN ID RATHER THAN DRIVING THE WORKER ITSELF. Once resolved,
+ * a worker is just a target with its own webSocketDebuggerUrl, and a DIRECT
+ * connection to it evaluates exactly like a page does — `Runtime.evaluate` with
+ * `awaitPromise` returns real awaited values there (measured on Chrome 151;
+ * `chrome.storage.local.get(null)` comes back as an object, not undefined). So
+ * the worker rides the ordinary page() acquisition path from here, and every
+ * behavior around it — the args/function form, exception reporting, and above
+ * all savePath's no-value-in-the-response secret hygiene — is the SAME CODE,
+ * not a parallel copy that could quietly diverge on the leak-shaped edge.
+ *
+ * Exported for the unit tests, which need to reach the capability refusal
+ * without a browser.
+ */
+export async function resolveWorkerSelectorFor(
+  driver: BrowserDriver,
+  selector: string,
+  wake: boolean,
+): Promise<PageInfo> {
+  if (!driver.capabilities.has("worker.targets") || typeof driver.resolveWorkerTarget !== "function") {
+    throw new SharedToolError(`evaluateScript: ${WORKER_SELECTOR_UNSUPPORTED_MESSAGE}`);
+  }
+  return driver.resolveWorkerTarget(selector, { wake });
+}
+
 export async function evaluateScript(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string },
+  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string; wake?: boolean },
 ): Promise<unknown> {
   if (typeof args.expression !== "string" || args.expression.length === 0) {
     const wrongKey = EXPRESSION_ALIAS_KEYS.find((k) => (args as Record<string, unknown>)[k] !== undefined);
@@ -525,7 +568,23 @@ export async function evaluateScript(
     }
     throw new SharedToolError("evaluateScript: 'expression' must be a non-empty string");
   }
-  return withPage(driver, args.target, async (page) => {
+  if (args.wake !== undefined && typeof args.wake !== "boolean") {
+    throw new SharedToolError("evaluateScript: 'wake' must be a boolean");
+  }
+  // `wake` is REFUSED on a page selector rather than ignored. Accepting it there
+  // would read as "this call will wake something", and the caller would never
+  // learn that the argument did nothing at all.
+  if (args.wake !== undefined && !isWorkerSelector(args.target)) {
+    throw new SharedToolError(
+      "evaluateScript: 'wake' only applies to a target of the form 'worker:<substring>'; a page target is never asleep.",
+    );
+  }
+  // Resolved to a bare target id BEFORE acquisition, so the page() call below is
+  // the same one every other selector makes.
+  const target = isWorkerSelector(args.target)
+    ? (await resolveWorkerSelectorFor(driver, args.target, args.wake ?? true)).id
+    : args.target;
+  return withPage(driver, target, async (page) => {
     const value = await page.evaluate(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true });
     // No savePath: byte-identical to the pre-sink behavior, the value itself.
     // A thrown page-side exception never reaches here, so it still surfaces as

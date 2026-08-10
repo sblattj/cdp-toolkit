@@ -10,6 +10,7 @@ import type { Target, TargetSelector } from "../types.ts";
 import { LeaseConflictError } from "../leases.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
+import { resolveWorkerSelector } from "./workers.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
   LEGACY_NUMERIC_UID, interpolatePoints, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
@@ -348,7 +349,7 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "screenshot.fullPage", "screenshot.element", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag",
-  "browser.downloads", "browser.permissions",
+  "browser.downloads", "browser.permissions", "worker.targets",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -1105,6 +1106,20 @@ class CdpBrowserDriver implements BrowserDriver {
     const target = await resolveTarget(id).catch(noSuchTarget);
     await withBrowserConn((conn) => conn.send("Target.activateTarget", { targetId: target.id }));
     return { id: target.id, url: target.url, title: target.title };
+  }
+  /**
+   * Capability "worker.targets". Resolution and the wake live in ./workers.ts;
+   * this is the driver-shaped door onto them.
+   *
+   * The catch is noSuchTarget for the same reason page() uses it: a genuine
+   * "nothing matched" is a CdpError (numeric code) and must surface as a
+   * `no-such-target` DriverError, while a typed error from underneath — a lease
+   * conflict, an fs errno — passes through with its class intact. The teaching
+   * text in the miss message is the CdpError's message and survives relabeling.
+   */
+  async resolveWorkerTarget(selector: string, opts: { wake: boolean }): Promise<PageInfo> {
+    const target = await resolveWorkerSelector(selector, opts).catch(noSuchTarget);
+    return { id: target.id, url: target.url, title: target.title, type: target.type };
   }
   async page(selector: TargetSelector): Promise<PageDriver> {
     const { conn, target } = await openPage(selector).catch(noSuchTarget);

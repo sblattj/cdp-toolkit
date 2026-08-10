@@ -6,6 +6,15 @@
 import type { CdpResponse, Target, TargetSelector } from "./types.ts";
 import { assertLeaseOk } from "./leases.ts";
 import { resolveLiveLabel } from "./origins.ts";
+import {
+  isWorkerSelector,
+  isWorkerTargetType,
+  resolveWorkerTargets,
+  workerAmbiguityMessage,
+  workerMissMessage,
+  workerNeedle,
+  WORKER_EMPTY_NEEDLE_MESSAGE,
+} from "./workers.ts";
 
 /** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
 export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
@@ -199,6 +208,18 @@ export async function browserWsUrl(): Promise<string> {
 export async function resolveTarget(selector: TargetSelector, opts: { lease?: string } = {}): Promise<Target> {
   const targets = await listTargets();
   const hit = await pickTarget(targets, selector);
+  // WORKER TARGETS BYPASS THE LEASE GATE ENTIRELY, and that is a decision, not
+  // an omission. A lease answers "who is driving this TAB", and every
+  // consequence of holding one is a tab consequence: reap CLOSES an abandoned
+  // leased tab, and "close the stale tab" is meaningless for a service worker
+  // that Chrome starts and stops on its own schedule (see ReapInput.livePageIds,
+  // which is deliberately fed the page-only listing for exactly this reason).
+  // Letting strict mode auto-acquire here would mint a lease file per worker
+  // evaluate, keyed on an id that vanishes the moment the worker idles out —
+  // garbage that the page-only reap set can never collect. It also cannot be
+  // used to sneak past a lease: a worker is not a tab, so there is no tab
+  // someone else holds that this could reach.
+  if (isWorkerTargetType(hit.type)) return hit;
   // THE Chrome choke point. Every tool reaches a page through here, so a tool
   // added after this shipped is protected with no action from its author.
   //
@@ -250,6 +271,18 @@ async function pickTarget(targets: Target[], selector: TargetSelector): Promise<
         ? `no live target with label '${label}' (labels currently in use: ${knownLabels.join(", ")})`
         : `no live target with label '${label}' (no labels are currently assigned to any open target)`,
     );
+  }
+  if (isWorkerSelector(selector)) {
+    // Resolved against the UNFILTERED listing, never `pages`: a worker is not a
+    // page target and would not be in it. Waking an evicted worker is NOT done
+    // here — this stays a pure pick over what the browser already reports, and
+    // the wake path lives in cdp/workers.ts, reached only from evaluate_script.
+    const needle = workerNeedle(selector);
+    if (needle === "") throw new CdpError(WORKER_EMPTY_NEEDLE_MESSAGE);
+    const { matches, liveWorkers } = resolveWorkerTargets(targets, needle);
+    if (matches.length > 1) throw new CdpError(workerAmbiguityMessage(needle, matches));
+    if (matches.length === 1) return matches[0]!;
+    throw new CdpError(workerMissMessage(needle, { wakeAttempted: false, liveWorkers }));
   }
   // bare id
   const byId = targets.find((t) => t.id === selector);
