@@ -20,6 +20,32 @@ chrome.storage.local.get({ starts: 0 }).then(({ starts }) => {
   chrome.storage.local.set({ probe: "mv3-fixture-ok", starts: starts + 1 });
 });
 
+/**
+ * THE OUTBOUND REQUEST. `__cdpToolkitFetch` is the fixture's triggerable fetch:
+ * the 1.9.1 network/console feature exists so that the request an MV3 background
+ * worker makes to a real backend is observable, and this is the stand-in for it.
+ * It is a function rather than a top-level fetch on purpose — a startup fetch
+ * would race the recorder's attach, and the whole point is to observe a request
+ * the worker makes WHILE something is watching.
+ *
+ * Host permission for http://127.0.0.1/* is in the manifest: without it the
+ * worker's cross-origin fetch is blocked before a single Network event fires,
+ * which looks exactly like "CDP does not see worker traffic".
+ */
+globalThis.__cdpToolkitFetch = async (url) => {
+  const res = await fetch(url);
+  const text = await res.text();
+  // Logged so ONE trigger exercises both domains the recorder enables.
+  console.log("mv3-fixture fetched", url, res.status, text.length);
+  return { status: res.status, bytes: text.length };
+};
+
+/** Emit a console line on demand (console capture without any network traffic). */
+globalThis.__cdpToolkitLog = (message) => {
+  console.log("mv3-fixture says:", message);
+  return "logged";
+};
+
 // A trivial message endpoint: gives a test a way to wake the worker through
 // ordinary extension machinery rather than through CDP, if it ever needs one.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

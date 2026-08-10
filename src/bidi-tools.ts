@@ -10,6 +10,7 @@
 import type { BrowserDriver, InterceptRule, PageDriver, PageInfo } from "./driver.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "./tools/network_mock.ts";
 import type { TargetSelector } from "./types.ts";
+import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 
 class BidiToolError extends Error {}
 
@@ -32,6 +33,22 @@ async function withPage<T>(driver: BrowserDriver, target: TargetSelector | undef
 
 const consoleBuffers = new Map<string, Array<Record<string, unknown>>>();
 const networkBuffers = new Map<string, Array<Record<string, unknown>>>();
+
+/**
+ * Refuse the Chrome-only `worker:<substring>` arm BEFORE a browser is launched.
+ *
+ * pickContext already refuses it (bidi/driver.ts), but only after driver.page()
+ * has dialed — and on Firefox that means LAUNCHING a browser for a call that
+ * cannot possibly succeed. The gate is written as a capability check rather than
+ * "this file is the BiDi one" so it stays true if a future BiDi driver ever
+ * gains the capability, and the message is the shared one, so the teaching does
+ * not fork.
+ */
+function refuseWorkerSelector(driver: BrowserDriver, target: TargetSelector): void {
+  if (isWorkerSelector(target) && !driver.capabilities.has("worker.targets")) {
+    throw new BidiToolError(WORKER_SELECTOR_UNSUPPORTED_MESSAGE);
+  }
+}
 
 function bufferFor(map: Map<string, Array<Record<string, unknown>>>, id: string): Array<Record<string, unknown>> {
   let b = map.get(id);
@@ -59,6 +76,7 @@ export async function listConsoleMessages(
   driver: BrowserDriver,
   args: { target?: TargetSelector; reload?: boolean; durationMs?: number } = {},
 ): Promise<{ messages: Array<Record<string, unknown>>; count: number }> {
+  refuseWorkerSelector(driver, args.target);
   return withPage(driver, args.target, async (page) => {
     if (args.reload) await captureFresh(page, args.durationMs ?? 2500);
     const buf = bufferFor(consoleBuffers, page.info.id);
@@ -70,6 +88,7 @@ export async function getConsoleMessage(
   driver: BrowserDriver,
   args: { target?: TargetSelector; index?: number } = {},
 ): Promise<Record<string, unknown>> {
+  refuseWorkerSelector(driver, args.target);
   return withPage(driver, args.target, async (page) => {
     const buf = bufferFor(consoleBuffers, page.info.id);
     const idx = args.index ?? 0;
@@ -83,6 +102,7 @@ export async function listNetworkRequests(
   driver: BrowserDriver,
   args: { target?: TargetSelector; reload?: boolean; durationMs?: number; filterUrl?: string } = {},
 ): Promise<{ requests: Array<Record<string, unknown>>; count: number }> {
+  refuseWorkerSelector(driver, args.target);
   return withPage(driver, args.target, async (page) => {
     if (args.reload) await captureFresh(page, args.durationMs ?? 2500);
     let buf = bufferFor(networkBuffers, page.info.id);
@@ -95,6 +115,7 @@ export async function getNetworkRequest(
   driver: BrowserDriver,
   args: { target?: TargetSelector; requestId?: string; url?: string } = {},
 ): Promise<Record<string, unknown>> {
+  refuseWorkerSelector(driver, args.target);
   if (!args.requestId && !args.url) throw new BidiToolError("get_network_request requires requestId or url");
   return withPage(driver, args.target, async (page) => {
     const buf = bufferFor(networkBuffers, page.info.id);

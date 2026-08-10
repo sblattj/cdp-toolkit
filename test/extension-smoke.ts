@@ -24,6 +24,14 @@
  *      therefore holds no connection, and would hang forever if the toolkit's
  *      per-call connection model ever regressed to a held one.
  *
+ * 1.9.1 ADDS the console/network readers against the same worker, and the same
+ * rule applies to every claim: this file runs a REAL local backend, has the
+ * fixture's worker fetch it, and then asserts the request through the tool
+ * surface. Fact 4 becomes a two-directional measurement here rather than a
+ * caveat — a capture in flight must SUPPRESS eviction, and eviction must resume
+ * once that capture detaches. Both are asserted, because "the worker stayed
+ * alive" is only meaningful against a run where it demonstrably dies.
+ *
  * ============================ SAFETY RULES ============================
  *   - This harness LAUNCHES ITS OWN Chrome, headless, on a scratch port
  *     (EXTENSION_SMOKE_PORT, default 9517) with a throwaway --user-data-dir,
@@ -41,6 +49,8 @@
  * assertion and exits non-zero naming every failure.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -137,6 +147,28 @@ async function waitForBrowser(child: ChildProcess): Promise<void> {
 /** The fixture's worker target, or undefined when Chrome has it stopped. */
 async function fixtureWorker(): Promise<{ id: string; url: string } | undefined> {
   return (await listTargets()).find((t) => t.type === "service_worker" && t.url.includes(EXT_ID));
+}
+
+/**
+ * A real local backend for the worker to call — the stand-in for the field
+ * agent's Lambda. Port 0 so the OS assigns one: this process already owns a
+ * fixed CDP port, and a second fixed port is a collision waiting to happen.
+ * The extension's manifest grants http://127.0.0.1/* , which is port-agnostic.
+ */
+const backend = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json", "x-cdp-probe": "extension-smoke" });
+  res.end(JSON.stringify({ probe: "sw-net-ok", path: req.url ?? "/" }));
+});
+await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+const backendPort = (backend.address() as AddressInfo).port;
+const backendUrl = (path: string): string => `http://127.0.0.1:${backendPort}${path}`;
+
+/** Make the fixture's worker fetch `path` from the local backend, through the tool surface. */
+async function triggerWorkerFetch(path: string): Promise<void> {
+  await TOOLS.evaluate_script({
+    target: WORKER_SELECTOR,
+    expression: `self.__cdpToolkitFetch(${JSON.stringify(backendUrl(path))})`,
+  });
 }
 
 /** Lease files only — origin records live in the same directory. */
@@ -283,6 +315,106 @@ try {
     `result=${JSON.stringify(saved)} file=${savedJson.replace(/\s+/g, " ")}`,
   );
 
+  /* ================================================================
+   * 6b. THE 1.9.1 FEATURE: the worker's OUTBOUND REQUEST is observable
+   *
+   * One 40s capture window does double duty. It proves the feature (a fetch the
+   * service worker performs shows up in list_network_requests), and it proves
+   * the eviction interplay's FIRST direction: while the recorder holds the
+   * worker's session the worker cannot be idle-evicted, which the poll below
+   * checks at four points spread across the window. The SECOND direction —
+   * eviction resumes once the recorder detaches — is step 7, which runs right
+   * after this capture closes its connection.
+   * ================================================================ */
+  const LIST_PATH = "/sw-probe-list";
+  const captureMs = 40_000;
+  const capturing = TOOLS.list_network_requests({
+    target: WORKER_SELECTOR,
+    reload: true, // for a worker this means "listen for durationMs"; there is no reload
+    durationMs: captureMs,
+    filterUrl: LIST_PATH,
+  });
+  await pause(1_500); // the recorder has enabled its domains by the time the tool call returns from startRecorder
+  await triggerWorkerFetch(LIST_PATH);
+  const presence: boolean[] = [];
+  for (let i = 0; i < 4; i++) {
+    await pause(8_000);
+    presence.push((await fixtureWorker()) !== undefined);
+  }
+  const listed = await capturing;
+  const listedRow = listed.requests[0];
+  record(
+    "list_network_requests{target:'worker:<ext-id>'} sees the fetch the SERVICE WORKER performed",
+    listed.count === 1 && listedRow?.url === backendUrl(LIST_PATH) && listedRow?.status === 200 && listedRow?.state === "finished",
+    `count=${listed.count} row=${JSON.stringify(listedRow)}`,
+  );
+  record(
+    "EVICTION INTERPLAY (1/2): while the recorder holds the worker's session it is NOT idle-evicted",
+    presence.every(Boolean) && presence.length === 4,
+    `present at +8/+16/+24/+32s of a ${captureMs / 1000}s capture: ${JSON.stringify(presence)} (idle eviction is ~30s)`,
+  );
+
+  // The read path (no reload) reads the buffer this capture published. It must
+  // resolve the worker WITHOUT waking: a woken worker has a NEW target id and
+  // therefore an empty buffer, which would be a zero shaped like an answer.
+  const reread = await TOOLS.list_network_requests({ target: WORKER_SELECTOR, filterUrl: LIST_PATH });
+  record(
+    "the same request is readable again from the worker's published buffer (reload:false)",
+    reread.count === 1 && reread.requests[0]?.url === backendUrl(LIST_PATH),
+    `count=${reread.count} target=${reread.target.id}`,
+  );
+
+  /* --- 6c. get_network_request returns the worker request's detail AND body --- */
+  const BODY_PATH = "/sw-probe-body";
+  const bodyCall = TOOLS.get_network_request({
+    target: WORKER_SELECTOR,
+    url: BODY_PATH,
+    includeBody: true,
+    durationMs: 8_000,
+  });
+  await pause(1_500);
+  await triggerWorkerFetch(BODY_PATH);
+  const detail = await bodyCall;
+  record(
+    "get_network_request returns the worker request's status, headers and BODY",
+    detail.url === backendUrl(BODY_PATH) &&
+      detail.status === 200 &&
+      detail.responseHeaders?.["x-cdp-probe"] === "extension-smoke" &&
+      typeof detail.body === "string" &&
+      detail.body.includes("sw-net-ok"),
+    `status=${detail.status} x-cdp-probe=${detail.responseHeaders?.["x-cdp-probe"]} body=${JSON.stringify(detail.body)}`,
+  );
+
+  /* --- 6d. the worker's console.log --- */
+  const consoleCall = TOOLS.list_console_messages({ target: WORKER_SELECTOR, reload: true, durationMs: 8_000 });
+  await pause(1_500);
+  await TOOLS.evaluate_script({ target: WORKER_SELECTOR, expression: "self.__cdpToolkitLog('hello-from-the-worker')" });
+  const consoleRes = await consoleCall;
+  record(
+    "list_console_messages shows the SERVICE WORKER's console.log (Runtime.consoleAPICalled on its own session)",
+    consoleRes.messages.some((m) => m.text.includes("hello-from-the-worker")),
+    `count=${consoleRes.count} texts=${JSON.stringify(consoleRes.messages.map((m) => m.text))}`,
+  );
+
+  /* --- 6e. wake is refused where it would do nothing, never ignored --- */
+  const wakeOnRead = await TOOLS.list_network_requests({ target: WORKER_SELECTOR, wake: true })
+    .then(() => "resolved (WRONG)")
+    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  record(
+    "wake on a READ-ONLY call is refused, and says why a woken worker's buffer would be empty",
+    /only applies when a capture is being started/.test(wakeOnRead) && /NEW target id/.test(wakeOnRead),
+    `error=${wakeOnRead}`,
+  );
+  const pageTargets0 = (await listTargets()).filter((t) => t.type === "page");
+  const wakeOnPage = await TOOLS.list_console_messages({ target: pageTargets0[0]!.id, reload: true, wake: true })
+    .then(() => "resolved (WRONG)")
+    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  record(
+    "wake on a PAGE target is refused rather than silently ignored",
+    /only applies to a target of the form 'worker:/.test(wakeOnPage),
+    `error=${wakeOnPage}`,
+  );
+
   /* --- 7. GENUINE EVICTION, asserted before any wake --- */
   const startsBefore = await readStarts();
   record("read the fixture's restart counter before eviction", startsBefore > 0, `starts=${startsBefore}`);
@@ -297,7 +429,7 @@ try {
   }
   const evictSecs = Math.round((Date.now() - evictT0) / 1000);
   record(
-    "the MV3 worker is GENUINELY idle-evicted: it vanishes from the target listing",
+    "EVICTION INTERPLAY (2/2): once the recorder has detached, the MV3 worker is GENUINELY idle-evicted again",
     evicted,
     evicted ? `absent from /json/list after ~${evictSecs}s idle` : `STILL RUNNING after ${evictSecs}s — nothing below proves a wake`,
   );
@@ -319,6 +451,28 @@ try {
     "and wake:false really started nothing (the worker is still absent)",
     (await fixtureWorker()) === undefined,
     "no service_worker target for the fixture after the refusal",
+  );
+
+  // The same refusal on a CAPTURE call. Ordered here deliberately: it must not
+  // start anything, or step 9's "wake starts the evicted worker" below would be
+  // measuring a worker this call had already woken.
+  const captureRefusal = await TOOLS.list_network_requests({
+    target: WORKER_SELECTOR,
+    reload: true,
+    durationMs: 1_000,
+    wake: false,
+  })
+    .then(() => "resolved (WRONG: wake:false must not start anything)")
+    .catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  record(
+    "a CAPTURE with wake:false refuses an evicted worker and teaches the eviction fact",
+    /idle-evicted/.test(captureRefusal) && /wake:true/.test(captureRefusal),
+    `error=${captureRefusal}`,
+  );
+  record(
+    "and that capture started nothing either",
+    (await fixtureWorker()) === undefined,
+    "no service_worker target for the fixture after the capture refusal",
   );
 
   /* --- 9. THE WAKE: proven by a restart counter, never by the protocol --- */
@@ -380,10 +534,41 @@ try {
     /page-only/.test(pageOnly) && /evaluate_script/.test(pageOnly),
     `error=${pageOnly}`,
   );
+
+  /* --- 13. THE CAPTURE PATH ITSELF WAKES A STOPPED WORKER ---
+   * A second genuine eviction, because the only honest way to show that a
+   * recording starts a stopped worker is to record against one that is really
+   * stopped. The restart is proven by the fixture's own counter, never by the
+   * protocol (ServiceWorker.startWorker reports success for a scope that does
+   * not exist), and the worker's absence is asserted before the capture runs.
+   */
+  const startsBeforeSecond = await readStarts();
+  let evictedAgain = false;
+  const evict2T0 = Date.now();
+  for (let i = 0; i < 120 && !evictedAgain; i++) {
+    await pause(1_000);
+    evictedAgain = (await fixtureWorker()) === undefined;
+  }
+  record(
+    "the worker idle-evicts a second time, so the capture below runs against a genuinely stopped worker",
+    evictedAgain,
+    evictedAgain
+      ? `absent from /json/list after ~${Math.round((Date.now() - evict2T0) / 1000)}s idle (starts=${startsBeforeSecond} before)`
+      : `STILL RUNNING after ${Math.round((Date.now() - evict2T0) / 1000)}s — the wake assertion below would prove nothing`,
+  );
+  const wokenCapture = await TOOLS.list_console_messages({ target: WORKER_SELECTOR, reload: true, durationMs: 1_500 });
+  const startsAfterSecond = await readStarts();
+  record(
+    "a capture with the default wake STARTS the evicted worker and records against the restarted instance",
+    evictedAgain && startsAfterSecond === startsBeforeSecond + 1 && wokenCapture.target.url.includes(EXT_ID),
+    `starts ${startsBeforeSecond} -> ${startsAfterSecond} (a worker that never died would report ${startsBeforeSecond}), captured target=${wokenCapture.target.url}`,
+  );
 } catch (fatal) {
   record("FATAL", false, fatal instanceof Error ? `${fatal.name}: ${fatal.message}` : String(fatal));
 } finally {
   chrome?.kill("SIGKILL");
+  // Dispose the local backend too, or the process never exits.
+  backend.close();
   await rm(artifactDir, { recursive: true, force: true }).catch(() => undefined);
   await rm(profileDir, { recursive: true, force: true }).catch(() => undefined);
 }

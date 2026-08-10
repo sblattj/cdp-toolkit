@@ -49,8 +49,10 @@ zero behavior change for existing users). Firefox is LAUNCHED per invocation (it
 to), used for exactly one tool call, then disposed before the process exits.
 
 Target selector grammar: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>
-  plus worker:<substr> for evaluate_script ONLY (Chrome only): an MV3 extension's background service
-  worker, e.g. worker:<extension-id>. An idle-evicted worker is started first unless wake:false.
+  plus worker:<substr> (Chrome only) for evaluate_script, list_network_requests, get_network_request
+  and list_console_messages ONLY: an MV3 extension's background service worker, e.g.
+  worker:<extension-id>. An idle-evicted worker is started first unless wake:false. Recording a
+  worker keeps it alive for the length of the capture.
 Leases: pass --lease <token> to act on a tab another agent claimed with claim_page (MCP only).
 Run list_leases to see who holds what; release_page --lease <token> gives a lease back.
 Run with --list to print every tool name available under the selected backend.

@@ -55,12 +55,14 @@ export interface CdpEvent<P = Record<string, unknown>> {
  *     URL contains the substring (an MV3 extension's background worker is
  *     `chrome-extension://<id>/<script>`, so both the extension id and the
  *     script name match). NOT UNIVERSAL, unlike every arm above it: resolved
- *     only by Chrome's pickTarget (this file's resolveTarget), accepted only by
- *     evaluate_script, refused with a capability error on Firefox and by the
- *     page-only resolvers. It reads the UNFILTERED target listing, because a
- *     worker is not a page target — and a worker that is idle-evicted is in no
- *     listing at all, which is what evaluate_script's `wake` exists for. See
- *     src/workers.ts and src/cdp/workers.ts.
+ *     only by Chrome's pickTarget (client.ts's resolveTarget), accepted by the
+ *     four tools in WORKER_CAPABLE_TOOLS (evaluate_script, which evaluates in a
+ *     worker, plus list_network_requests / get_network_request /
+ *     list_console_messages, which record one), refused with a capability error
+ *     on Firefox and by the page-only resolvers. It reads the UNFILTERED target
+ *     listing, because a worker is not a page target — and a worker that is
+ *     idle-evicted is in no listing at all, which is what `wake` exists for.
+ *     See src/workers.ts and src/cdp/workers.ts.
  */
 export type TargetSelector = string | undefined;
 
