@@ -5,6 +5,124 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-08-09
+
+Four complaints from a field agent driving an MV3 extension, closed without adding
+a tool: the surface grows inside `evaluate_script`, the `target` selector
+grammar, and error DX. Tool count stays 45. Two seats landed sequentially —
+W2 (`label:` + key-echo) first, W1 (worker targets + idle-wake) on top of it —
+and every protocol assertion below was probed against a live Chrome 151 before
+being built on, because five 1.8.0 premises were folklore that measured false.
+
+### Added
+
+- **`label:<name>` in the target-selector grammar, universal across every
+  page-taking tool.** Resolves an exact label match against BOTH the origin
+  ledger (tabs this toolkit created) and live lease records (a tab taken over
+  and claimed with a label, which has no origin record) — so a tab you named
+  is findable by that name regardless of which path put you in it. A miss
+  enumerates the labels that DO exist, deduped across both sources; an
+  ambiguity (the same label on two live targets) names both ids rather than
+  silently picking the first. **The grammar turned out to have three
+  independent copies** — `pickPage` (`src/shared-tools.ts`), `pickTarget`
+  (`src/client.ts`, the one `evaluate_script`/`click`/`hover`/… actually call),
+  and `pickContext` (`src/bidi/driver.ts`, Firefox) — a fact the live smoke
+  caught immediately when `label:` worked in `claim_page` but not in
+  `evaluate_script`. The lookup core is now one function, `resolveLiveLabel`
+  in `src/origins.ts`, wired into all three call sites, each keeping its own
+  error class. A new structural test, `test/manifest-grammar-drift.test.ts`,
+  asserts every manifest description that names `title:` also names `label:`,
+  so a fourth resolver copy (or a stale description) can't slip past review
+  silently again.
+
+- **Key-echo validation on `evaluate_script`.** When `expression` is missing
+  or empty and the call instead carries `function`, `code`, `js`, `script`,
+  `fn`, or `body`, the error names the wrong key by value and says the right
+  one is `expression` — and, when the value looks like a function literal,
+  that function literals go in `expression` with `args`. One line, saving the
+  round trip the field complaint measured.
+
+- **`evaluate_script` can now evaluate inside an MV3 extension's background
+  SERVICE WORKER, not just a page — no raw-CDP escape hatch needed.** Pass
+  `target: "worker:<extension-id>"` (or any substring of the worker's url,
+  e.g. `worker:background.js`) and read `chrome.storage.local`,
+  `chrome.runtime`, and the worker's own globals directly. Chrome-only
+  (capability `worker.targets`) and accepted by `evaluate_script` alone —
+  `worker:` is deliberately absent from `pickPage`'s page-only grammar
+  (closing/selecting/releasing a worker is meaningless) and refused there by
+  name, and a new drift-test arm asserts no OTHER tool's manifest description
+  ever names `worker:<`, so a later sweep can't advertise a Chrome-only,
+  one-tool selector as universal grammar. Firefox refuses the arm with a
+  capability-gap error naming `worker.targets`, per ADR-001 — WebDriver BiDi
+  has no extension-service-worker target concept to map onto.
+  **`wake` (default `true`)** asks Chrome to start the worker first when the
+  selector matches nothing or a known-but-stopped worker, then re-resolves;
+  `wake:false` fails fast with an error that teaches the MV3 eviction fact
+  instead of a bare "not found". Worker targets bypass the lease gate
+  entirely (`assertLeaseOk` is skipped for a worker-typed resolution in
+  `client.ts`): reap's "close the stale tab" is meaningless for a target
+  Chrome starts and stops on its own, and strict mode auto-acquiring a lease
+  per evaluate would mint a file keyed on an id that vanishes at the next
+  idle — garbage the page-only reap set can never collect. The page-only id
+  set reap and leases already keep (`ReapInput.livePageIds`) was left
+  unmerged on purpose.
+
+### Measured, not assumed — the protocol facts this release ships on
+
+Every one of these was a hypothesis in the spec and a measurement against a
+live Chrome 151.0.7922.109 before any line of feature code was written:
+
+- **`evaluate_script` against a worker never needs a flattened browser
+  session.** `/json/list` exposes a running service worker with its own
+  `webSocketDebuggerUrl`, and a direct WebSocket connect + `Runtime.evaluate`
+  with `awaitPromise` works there exactly as it does against a page — proven
+  by `self.constructor.name === "ServiceWorkerGlobalScope"` in the same
+  round trip. The feature rides the existing per-target connect path with no
+  new connection model.
+- **The "awaited value is lost over a flattened session" folklore is false on
+  Chrome 151, measured anyway even though it turned out not to matter.**
+  `Target.attachToTarget{flatten:true}` against the same worker returns the
+  real awaited value too. **No warning was shipped for a loss that cannot be
+  triggered.**
+- **A stopped MV3 worker is invisible to every target listing — `/json/list`
+  and `Target.getTargets` under any filter — so "no such worker" almost
+  always means "idle-evicted," not "wrong id."** The only place a stopped
+  worker is visible at all is the registration inventory
+  `ServiceWorker.enable` pushes as events, which is why the miss/wake error
+  text says so explicitly.
+- **`ServiceWorker.enable`/`startWorker` do not exist on the browser
+  endpoint** (`-32601 wasn't found`) — **they work on a flattened session over
+  any page**, including a plain `about:blank` tab with no relationship to the
+  extension. That's the wake mechanism: attach to whichever page target
+  happens to be open, enable the domain there, start the matched scope.
+- **`startWorker` reports empty success for a scope that does not exist at
+  all** — its return value is worthless as proof a worker woke. A wake is
+  therefore verified only by re-reading the target list until the worker
+  reappears (bounded, 30 × 300ms), never by the command's own result.
+- **`--load-extension` is inert on Chrome 151**, even with the documented
+  `--disable-features=DisableLoadExtensionCommandLineSwitch` unblock flag —
+  confirmed by checking the ServiceWorker registration inventory, which would
+  show a stopped-but-installed extension even if nothing were running, and
+  showed nothing at all. `Extensions.loadUnpacked` over CDP is the install
+  path that actually works, and is what the new extension smoke and any
+  future extension testing with this toolkit should use. `--headless=new` is
+  fine for driving an extension; no headed instance is required.
+
+### Notes
+
+- Tool count is unchanged at **45** — this release grew `evaluate_script` and
+  the target-selector grammar, not the tool list.
+- `docs/social-preview.html` and `docs/demo.tape` carry no version string and
+  needed no re-render for this release.
+- New tests: `test/label-selector.test.ts`, `test/worker-selector.test.ts`,
+  two new arms in `test/manifest-grammar-drift.test.ts` (inclusion for
+  `label:`, exclusion for `worker:`), and a new live smoke,
+  `test/extension-smoke.ts`, against a fixture MV3 extension in
+  `test/fixtures/mv3-extension/` — 20/20 assertions, including a genuine idle
+  eviction (worker absence from `/json/list` asserted before waking) and a
+  strict-mode check that a worker evaluate mints zero lease files while a
+  page evaluate in the same run still mints one.
+
 ## [1.8.0] - 2026-08-09
 
 Two tracks land together, merged onto one integration branch. Track S closes the
@@ -752,6 +870,7 @@ First public release.
 - Zero runtime dependencies in the CDP/CLI layer (Node's global `WebSocket` + `fetch`). The MCP server adds only `@modelcontextprotocol/sdk`; `lighthouse_audit` is the sole non-CDP tool and shells out to `npx lighthouse`.
 - Runtime: Bun ≥ 1.1 (recommended) or Node ≥ 22 (for the global `WebSocket`). Requires Chrome/Chromium started with `--remote-debugging-port=9222`.
 
+[1.9.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.9.0
 [1.8.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.7.0
 [1.6.0]: https://github.com/sblattj/cdp-toolkit/releases/tag/v1.6.0

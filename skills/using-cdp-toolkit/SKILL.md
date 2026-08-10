@@ -35,9 +35,10 @@ Every page-scoped tool takes `target`:
 | `index:N` | Nth page target, 0-based |
 | `url:<substr>` | first tab whose URL contains substr |
 | `title:<substr>` | first tab whose title contains substr |
+| `label:<name>` | the tab with exactly this label — checked against both tabs this toolkit opened and tabs claimed under that label, so it works even for a takeover with no creation record |
 | `<32-hex targetId>` | that exact tab |
 
-**Resolve by a `targetId` you created, never by `title:`/`url:` on a busy or shared browser** — a lookalike tab (staging copy, the human's own tab) matches with no error and plausible output. See "Parallel agents."
+**Resolve by a `targetId` you created, or by the `label:` you gave it, never by `title:`/`url:` on a busy or shared browser** — a lookalike tab (staging copy, the human's own tab) matches `title:`/`url:` with no error and plausible output; `label:` is an exact match against a name only you assigned, so it can't collide with someone else's tab the way a substring can. See "Parallel agents."
 
 ## The core loop: act, then wait on a sentinel
 
@@ -70,6 +71,21 @@ The param is **`expression`** (a string). With **no `args`** it's evaluated as a
 
 An IIFE **plus** `args` throws ("does not evaluate to a function"). Empty `args:[]` counts as no args. Returns must be JSON-serializable (DOM nodes come back as a description string).
 
+**Wrong key name → the error names it.** If you pass `function`/`code`/`js`/`script`/`fn`/`body` instead of `expression`, the error says which of those you used and that the right key is `expression`.
+
+## MV3 extension service workers: don't hand-roll raw CDP
+
+An MV3 extension's logic lives in a background **service worker**, not a page — `chrome.storage.local`, `chrome.runtime`, and the worker's own globals are unreachable through any page-typed `target`. Don't reach for a raw `Target.attachToTarget`/`Runtime.evaluate` script to work around this: `evaluate_script` accepts `target: "worker:<substring>"` directly (Chrome only, capability `worker.targets`), matching any substring of the worker's url — `worker:<extension-id>` or `worker:background.js` both work:
+
+```
+evaluate_script {target:"worker:ekgaohljhieodkfggjkfgmmamfpngdhn", expression:"chrome.storage.local.get()", args:[]}
+```
+
+- **An idle worker is evicted within seconds and then invisible to every target listing.** `wake` defaults to `true`: a miss is started for you and re-resolved before failing. Pass `wake:false` for a fast failure instead of a wait.
+- **A worker-selected evaluate never touches the lease system** — no `claim_page`, no strict-mode auto-acquire, nothing to `release_page` afterward. There is no tab involved.
+- **Firefox refuses `worker:` outright** (capability gap, not a bug) — extension service workers over WebDriver BiDi aren't a thing this backend can address.
+- Testing your own unpacked extension: **`--load-extension` is a no-op on recent Chrome**, even with the unblock flag. Load it via `Extensions.loadUnpacked` over CDP instead.
+
 ## Scroll, raw mouse, real drag
 
 - `scroll {uid|selector|x+y, deltaX?, deltaY?}` — dispatches a wheel event; positive `deltaY` scrolls down, positive `deltaX` scrolls right. Omit the anchor to scroll the viewport. Works on both backends.
@@ -90,7 +106,7 @@ An IIFE **plus** `args` throws ("does not evaluate to a function"). Empty `args:
 Two agents on one Chrome both resolve `active` to the human's focused tab and silently drive the wrong page. A **lease** fixes that — and by default it is **opt-in**:
 
 - A tab **nobody** claimed behaves exactly as before; no `lease` argument needed.
-- The lease is enforced against **other** callers, and against **yourself once you hold it**: after you claim a tab, **every** later call to that tab must pass the `lease` token, or it is refused by name — `active`, `index:N`, `url:`, `title:`, and bare targetId all hit the same check.
+- The lease is enforced against **other** callers, and against **yourself once you hold it**: after you claim a tab, **every** later call to that tab must pass the `lease` token, or it is refused by name — `active`, `index:N`, `url:`, `title:`, `label:`, and bare targetId all hit the same check.
 
 ```
 claim_page {url?, label?}            → {lease, targetId, url, opened, ...}  (opens+claims, or claims an existing targetId)
@@ -113,7 +129,7 @@ claim_page {target: "active", label: "continuing-agent"}     → claims whatever
 claim_page {target: "url:app.example.com", label: "..."}     → claims by url/title/index, same grammar as everywhere else
 ```
 
-`target` accepts the full selector grammar (`active | index:N | url:<substr> | title:<substr> | <targetId>`) and only ever resolves against a tab that already exists — it never opens one, so a selector that matches nothing is an error, not a silent new tab. The result's `opened:false` confirms it took over rather than created, and because of that, **`release_page` leaves it open when you are done, no matter what** — the toolkit did not create it, so it is not the toolkit's tab to close. It is still refused if another live agent already holds it; there is no steal.
+`target` accepts the full selector grammar (`active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>`) and only ever resolves against a tab that already exists — it never opens one, so a selector that matches nothing is an error, not a silent new tab. The result's `opened:false` confirms it took over rather than created, and because of that, **`release_page` leaves it open when you are done, no matter what** — the toolkit did not create it, so it is not the toolkit's tab to close. It is still refused if another live agent already holds it; there is no steal.
 
 **Check `humanActiveMs`/`contention` before you drive a taken-over tab.** The claim result (and every `list_leases` row) carries `humanActiveMs`: milliseconds since input the server itself did not dispatch. **`null`/absent means no data — never "no human"** (a fresh tab, or a tab whose every input was this server's own, look identical). If the tab was used within the last 30 seconds, the result also carries a `contention` warning — the claim still succeeds and you hold the lease, but driving it now means fighting a live person for the keyboard and mouse. Prefer your own tab, or ask first, when you see it.
 
@@ -161,6 +177,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | wait for text | `wait_for` |
 | read the a11y tree | `take_snapshot` |
 | run JS | `evaluate_script` |
+| run JS in an MV3 extension's service worker | `evaluate_script {target:"worker:<ext-id>"}` (chrome-only) |
 | click / type / key / upload | `click` `type_text` `press_key` `upload_file` |
 | scroll / raw mouse / drag | `scroll` / `dispatch_mouse` (chrome-only) / `drag` (`mode:"html5"` for real HTML5 DnD, chrome-only) |
 | back / forward in history | `navigate_page {history:"back"\|"forward"}` |
@@ -177,7 +194,8 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 - **Reading in the call right after a navigation/reload.** Race. Wait on a sentinel first.
 - **Trusting `clicked:true` / `filled:true` / a returned value as proof.** It only means the command dispatched. Verify the outcome.
 - **A bare arrow in `evaluate_script` returning `{}`.** You defined a function and never called it — use the IIFE form.
-- **`title:`/`url:` to *find* a tab on a shared browser.** Matches a lookalike silently. Use a targetId you created.
+- **`title:`/`url:` to *find* a tab on a shared browser.** Matches a lookalike silently. Use a targetId you created, or `label:` a tab you claimed.
+- **Hand-rolling raw CDP (`Target.attachToTarget` + `Runtime.evaluate`) to reach an MV3 extension's service worker.** Use `evaluate_script {target:"worker:<substring>"}` instead — it also handles idle-wake and lease-fencing for you.
 - **Reusing a long-held targetId after a gap.** Tabs close/navigate/reorder; confirm `location.href` first, or open your own `new_page`.
 - **`list_network_requests` returning nothing.** Without `reload:true` it reads a buffer nobody recorded — pass `reload:true`.
 - **Claiming a tab then omitting the token later.** Every subsequent call to a leased tab needs `lease`, including from the same session.
