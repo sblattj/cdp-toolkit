@@ -39,7 +39,11 @@ import type {
   BrowserCookie, BrowserDriver, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
 import type { TargetSelector } from "./types.ts";
-import { assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, releaseLeaseFor, requireLease, type LeaseBackend, type LeaseToken } from "./leases.ts";
+import {
+  assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, listLeases, releaseLeaseFor, requireLease,
+  type LeaseBackend, type LeaseStaleReason, type LeaseToken,
+} from "./leases.ts";
+import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
 import { newTrackedPage, originIndex, type PageOrigin } from "./origins.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
@@ -166,6 +170,31 @@ export interface ListedPage extends PageInfo {
    *  genuinely unknown, but this field is what keeps an unreadable record from
    *  being reported as a clean "nothing was ever recorded". */
   originUnreadable?: string;
+  /**
+   * Present only for a tab under an active, READABLE lease of THIS backend.
+   * idleMs and expiresAt are computed fresh on every call (now-lastUsedAt and
+   * lastUsedAt+ttlMs), never read off disk — same rule as list_leases' own
+   * LeaseRow, and unconditional on `probe`: a lease can exist whether or not a
+   * caller ever passes probe:true, and this costs nothing beyond a lease-dir
+   * read this call already pays for under strict mode.
+   */
+  lease?: { label: string; pid: number; idleMs: number; expiresAt: number; stale: LeaseStaleReason | false };
+  /**
+   * Present only when { probe: true } was passed AND this backend can answer
+   * it (see rendererProbeSupported in src/activity.ts) AND this entry is a
+   * page-type target — a worker or iframe has no `window` to carry the beacon
+   * global, so probing one would be a guaranteed false negative rather than a
+   * genuine liveness answer. true when a bounded Runtime.evaluate answered
+   * within budget; false on a timeout, a thrown page-side exception, or a
+   * target the driver could not reach at all — the wedged-tab case this field
+   * exists to surface, reported as data rather than failing the whole call.
+   */
+  responsive?: boolean;
+  /** Ms since a human last touched this tab, present only where probe:true
+   *  answered AND the same round trip found human-attributed beacon data.
+   *  Same rule as claim_page/list_leases: absence is "no answer", never "no
+   *  human". */
+  humanActiveMs?: number;
 }
 
 /**
@@ -190,23 +219,52 @@ async function reapSet(driver: BrowserDriver, pages: PageInfo[], all?: boolean):
 
 export async function listPages(
   driver: BrowserDriver,
-  args: { all?: boolean } = {},
+  args: { all?: boolean; probe?: boolean } = {},
 ): Promise<{ pages: ListedPage[]; count: number; reaped?: ReapedTab[] }> {
   // Reap FIRST, so a tab this call is about to close never appears in the
-  // listing it returns. Under strict mode only: see requireLease.
-  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backendOf(driver)) : [];
+  // listing it returns, and so the lease read just below never reports a lease
+  // this same call is in the middle of deleting. Under strict mode only: see
+  // requireLease.
+  const backend = backendOf(driver);
+  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backend) : [];
   const reapedIds = new Set(reaped.map((r) => r.targetId));
   const pages = (await driver.listPages({ all: args.all })).filter((p) => !reapedIds.has(p.id));
   // Never let provenance break the listing: originIndex does not throw, and a
   // missing or unreadable ledger yields an empty map, so every page falls back
   // to origin "unknown" exactly as a pre-ledger consumer always saw.
-  const ledger = await originIndex(backendOf(driver), await reapSet(driver, pages, args.all));
-  const annotated: ListedPage[] = pages.map((p) => {
-    const rec = ledger.get(p.id);
-    if (!rec) return { ...p, origin: "unknown" };
-    if (rec.unreadable !== undefined) return { ...p, origin: "unknown", originUnreadable: rec.unreadable };
-    return { ...p, origin: "agent", label: rec.label, createdAt: rec.createdAt };
-  });
+  const ledger = await originIndex(backend, await reapSet(driver, pages, args.all));
+  const now = Date.now();
+  // Observability (1.8.0): every READABLE lease of this backend, keyed by
+  // target. Read unconditionally, not gated on `probe`, because a lease can
+  // exist whether or not a caller ever asks for a renderer ping.
+  const leaseByTarget = new Map(
+    (await listLeases({ now, liveIds: pages.map((p) => p.id), liveBackend: backend }))
+      .filter((l) => l.backend === backend && l.unreadable === undefined)
+      .map((l) => [l.targetId, l] as const),
+  );
+  const doProbe = args.probe === true && rendererProbeSupported(driver);
+  const annotated: ListedPage[] = await Promise.all(
+    pages.map(async (p) => {
+      const rec = ledger.get(p.id);
+      const base: ListedPage =
+        !rec ? { ...p, origin: "unknown" }
+        : rec.unreadable !== undefined ? { ...p, origin: "unknown", originUnreadable: rec.unreadable }
+        : { ...p, origin: "agent", label: rec.label, createdAt: rec.createdAt };
+      const leaseRow = leaseByTarget.get(p.id);
+      if (leaseRow) {
+        base.lease = { label: leaseRow.label, pid: leaseRow.pid, idleMs: now - leaseRow.lastUsedAt, expiresAt: leaseRow.lastUsedAt + leaseRow.ttlMs, stale: leaseRow.stale };
+      }
+      // Page-type only: see ListedPage.responsive. Concurrent across pages
+      // (this whole map runs inside Promise.all), so one wedged tab's 500ms
+      // budget never serializes onto the next tab's.
+      if (doProbe && (p.type === undefined || p.type === "page")) {
+        const probe = await probeRendererActivity(driver, backend, p.id, now);
+        base.responsive = probe.responsive;
+        if (probe.humanActiveMs !== undefined) base.humanActiveMs = probe.humanActiveMs;
+      }
+      return base;
+    }),
+  );
   // `reaped` is present only when it has something to say, so the common-case
   // shape is byte-identical to 1.4.0. Silently closing a tab is not acceptable:
   // if a read closed something, the read says so.
@@ -238,6 +296,12 @@ export async function newPage(
     // silently WEAKEN every existing claim:true call site to pid-only.
     auto: !explicit,
   });
+  // Install the activity beacon on the same terms claim_page does: at claim
+  // time, after the claim, best effort (installBeacon never throws). A tab
+  // beaconed now is a tab that can ANSWER later — when this agent has released
+  // it and a person has picked it up, which is the case the beacon exists for.
+  // Nothing here is read back: a tab created a moment ago has no human history.
+  await installBeacon(driver, p.id);
   return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
 }
 

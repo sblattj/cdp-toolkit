@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { listLeasesTool } from "../src/leases-tools.ts";
 import { listPages } from "../src/shared-tools.ts";
 import { listOrigins, recordOrigin } from "../src/origins.ts";
-import { leaseFile, markLongLivedProcess, readLease, type LeaseRecord } from "../src/leases.ts";
+import { leaseFile, markLongLivedProcess, readLease, releaseLeaseFor, type LeaseRecord } from "../src/leases.ts";
 import { page, stubDriver } from "./helpers/stub-driver.ts";
 
 let dir = "";
@@ -79,6 +79,141 @@ async function abandonedAgentTab(stub: ReturnType<typeof stubDriver>, id: string
   await writeFile(leaseFile("chrome", id), JSON.stringify(rec));
   stub.pages.push(page(id));
 }
+
+/**
+ * A lease whose TTL has elapsed (reclaimable) but whose owning pid is very
+ * much alive (`process.pid`, this very test process) — the "expired, not
+ * dead-pid" shape the 1.8.0 grace window exists for. reapStaleAgentTabs reads
+ * the real wall clock, so grace is exercised here via CDP_REAP_GRACE_MS and a
+ * short ttlMs, not via an injected `now`.
+ */
+async function expiredAgentTab(stub: ReturnType<typeof stubDriver>, id: string, opts: { ttlMs: number; lastUsedAt: number }): Promise<void> {
+  await recordOrigin("chrome", id, { label: "mid-build-agent" });
+  const rec: LeaseRecord = {
+    backend: "chrome",
+    targetId: id,
+    nonce: "e".repeat(24),
+    pid: process.pid,
+    label: "mid-build-agent",
+    createdAt: 1,
+    lastUsedAt: opts.lastUsedAt,
+    ttlMs: opts.ttlMs,
+    auto: true,
+  };
+  await writeFile(leaseFile("chrome", id), JSON.stringify(rec));
+  stub.pages.push(page(id));
+}
+
+describe("reap wiring: split reap horizon", () => {
+  const originalGrace = process.env.CDP_REAP_GRACE_MS;
+  afterEach(() => {
+    if (originalGrace === undefined) delete process.env.CDP_REAP_GRACE_MS;
+    else process.env.CDP_REAP_GRACE_MS = originalGrace;
+  });
+
+  test("an expired lease within the DEFAULT grace window survives a strict-mode list_pages", async () => {
+    strictOn();
+    delete process.env.CDP_REAP_GRACE_MS; // default: 45 minutes
+    const stub = stubDriver();
+    // 500ms past its 1s ttlMs: reclaimable, but nowhere near a 45-minute grace.
+    await expiredAgentTab(stub, "GRACE-1", { ttlMs: 1_000, lastUsedAt: Date.now() - 1_500 });
+    const res = await listPages(stub.driver, {});
+    expect(stub.closed).toEqual([]);
+    expect(res.pages.map((p) => p.id)).toContain("GRACE-1");
+    expect("reaped" in res).toBe(false);
+    expect(await readLease("chrome", "GRACE-1")).toBeDefined();
+  });
+
+  test("with CDP_REAP_GRACE_MS=0, an expired lease is reaped as soon as its TTL elapses", async () => {
+    strictOn();
+    process.env.CDP_REAP_GRACE_MS = "0";
+    const stub = stubDriver();
+    await expiredAgentTab(stub, "GRACE-2", { ttlMs: 1_000, lastUsedAt: Date.now() - 1_500 });
+    const res = await listPages(stub.driver, {});
+    expect(stub.closed).toEqual(["GRACE-2"]);
+    expect(res.reaped).toEqual([{ targetId: "GRACE-2", label: "mid-build-agent", reason: "expired" }]);
+    expect(await readLease("chrome", "GRACE-2")).toBeUndefined();
+  });
+
+  test("a dead-pid lease is reaped immediately regardless of grace", async () => {
+    strictOn();
+    delete process.env.CDP_REAP_GRACE_MS; // the default 45-minute grace must not apply
+    const stub = stubDriver();
+    await abandonedAgentTab(stub, "GRACE-3"); // dead-pid, lastUsedAt: 1 (ancient)
+    const res = await listPages(stub.driver, {});
+    expect(stub.closed).toEqual(["GRACE-3"]);
+    expect(res.reaped?.[0]?.reason).toBe("dead-pid");
+  });
+
+  test("list_leases respects the same grace window", async () => {
+    strictOn();
+    delete process.env.CDP_REAP_GRACE_MS;
+    const stub = stubDriver();
+    await expiredAgentTab(stub, "GRACE-4", { ttlMs: 1_000, lastUsedAt: Date.now() - 1_500 });
+    const res = await listLeasesTool(stub.driver);
+    expect(stub.closed).toEqual([]);
+    expect(res.leases.map((l) => l.targetId)).toContain("GRACE-4");
+    expect("reaped" in res).toBe(false);
+  });
+});
+
+describe("reap wiring: observability fields", () => {
+  afterEach(async () => {
+    await releaseLeaseFor("chrome", "OBS-1").catch(() => undefined);
+    await releaseLeaseFor("chrome", "OBS-2").catch(() => undefined);
+  });
+
+  test("list_leases rows carry computed idleMs and expiresAt", async () => {
+    const stub = stubDriver({ pages: [page("OBS-1")] });
+    const now = Date.now();
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "OBS-1", nonce: "f".repeat(24), pid: process.pid,
+      label: "obs", createdAt: now, lastUsedAt: now - 5_000, ttlMs: 900_000,
+    };
+    await writeFile(leaseFile("chrome", "OBS-1"), JSON.stringify(rec));
+    const res = await listLeasesTool(stub.driver);
+    const row = res.leases.find((l) => l.targetId === "OBS-1")!;
+    expect(row.idleMs).toBeGreaterThanOrEqual(5_000);
+    expect(row.idleMs).toBeLessThan(15_000);
+    expect(row.expiresAt).toBe(rec.lastUsedAt + rec.ttlMs);
+  });
+
+  test("an unreadable lease row carries neither idleMs nor expiresAt", async () => {
+    const stub = stubDriver({ pages: [] });
+    await writeFile(leaseFile("chrome", "OBS-BAD"), "not json");
+    const res = await listLeasesTool(stub.driver);
+    const row = res.leases.find((l) => l.targetId === "OBS-BAD")!;
+    expect(row.unreadable).toBeDefined();
+    expect("idleMs" in row).toBe(false);
+    expect("expiresAt" in row).toBe(false);
+    await rm(leaseFile("chrome", "OBS-BAD"), { force: true });
+  });
+
+  test("list_pages entries for a leased tab carry a matching lease summary", async () => {
+    const stub = stubDriver({ pages: [page("OBS-2")] });
+    const now = Date.now();
+    const rec: LeaseRecord = {
+      backend: "chrome", targetId: "OBS-2", nonce: "a".repeat(24), pid: process.pid,
+      label: "obs2", createdAt: now, lastUsedAt: now - 1_000, ttlMs: 900_000,
+    };
+    await writeFile(leaseFile("chrome", "OBS-2"), JSON.stringify(rec));
+    const res = await listPages(stub.driver, {});
+    const entry = res.pages.find((p) => p.id === "OBS-2")!;
+    expect(entry.lease).toBeDefined();
+    expect(entry.lease?.label).toBe("obs2");
+    expect(entry.lease?.pid).toBe(process.pid);
+    expect(entry.lease?.expiresAt).toBe(rec.lastUsedAt + rec.ttlMs);
+    expect(entry.lease?.idleMs).toBeGreaterThanOrEqual(1_000);
+    expect(entry.lease?.stale).toBe(false);
+  });
+
+  test("list_pages entries for an unleased tab omit the lease field entirely", async () => {
+    const stub = stubDriver({ pages: [page("OBS-3")] });
+    const res = await listPages(stub.driver, {});
+    const entry = res.pages.find((p) => p.id === "OBS-3")!;
+    expect("lease" in entry).toBe(false);
+  });
+});
 
 describe("reap wiring: list_pages", () => {
   test("closes the abandoned tab, reports it, omits it from pages, and drops its lease", async () => {
