@@ -301,11 +301,13 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * above already rides, applied for one capture and undone afterwards. Refusing it would be dishonest
  * in the opposite direction — claiming a missing primitive this driver demonstrably has. Contrast
  * screenshot.scale, absent because captureScreenshot genuinely has no scale parameter.
- * screenshot.tile is absent for a THIRD reason, neither "has it" nor "no such parameter": the
- * primitive plausibly exists (clip:{type:"box"}) but nothing about band tiling has been measured on
- * this backend, and the Chrome declaration rests entirely on measurement. An undeclared capability
- * that turns out to work is a follow-up; a declared one that silently mis-stitches is a wrong image
- * the caller cannot tell from a right one.
+ * screenshot.tile stays undeclared, but no longer for an unmeasured reason: live-fired against
+ * Firefox 153.0.3, a 20,000px-tall page captured with take_screenshot --fullPage true came back
+ * as a single 1366x20000 PNG at scale 1, verified complete top-to-bottom — no clip, no bands.
+ * Chrome's band tiling exists solely to route around its 16384-device-px encode cap; Firefox has
+ * no such cap, so screenshot.tile (the capability gating explicit tile:true forced banding) has
+ * no gap here to close. It stays undeclared because it would advertise a forced-tiling primitive
+ * this backend has never needed, not because band-tiling behavior is untested.
  */
 const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "emulate.deviceMetrics", "screenshot.fullPage", "screenshot.element", "screenshot.renderSize", "network.intercept", "locate.xpath",
@@ -882,15 +884,14 @@ class BidiPageDriver implements PageDriver {
           `deviceScaleFactor:${opts.scale} first and capture at scale 1, or use --browser chrome.`,
       );
     }
-    // Same ADR-001 param-level shape, and the reason is HONESTY rather than a missing primitive.
-    // browsingContext.captureScreenshot does take clip:{type:"box",x,y,width,height}, so a banded
-    // capture is probably implementable here — but Firefox was not launched for this change, so
-    // every property band tiling depends on is unmeasured on this backend: whether a box clip
-    // renders content outside the viewport at all, whether clip.y is CSS px, whether fixed elements
-    // repeat per band, whether seams are pixel-exact. Each of those was measured on Chrome before
-    // the Chrome path was declared. Shipping an unverified twin would put a silently-wrong stitch in
-    // front of a caller, so this refuses and says why. `tile:false` and the default (auto, which
-    // never bands here) ask this backend for nothing and are untouched.
+    // Same ADR-001 param-level shape, but now a measured non-gap rather than an unmeasured one.
+    // Live-fired against Firefox 153.0.3: a 20,000px-tall page captured with take_screenshot
+    // --fullPage true came back as one 1366x20000 PNG at scale 1, verified complete top-to-bottom,
+    // via the single origin:"document" capture below — no clip, no bands. Chrome's band tiling
+    // exists only to route around its 16384-device-px encode cap; this backend has no such cap, so
+    // there is nothing for tile:true's forced banding to do here. The refusal below stays because
+    // there is no forced-tiling primitive to build, not because it is untested. `tile:false` and
+    // the default (auto, which never bands here) ask this backend for nothing and are untouched.
     if (opts?.tile === true) {
       throw driverError(
         "unsupported",
@@ -1408,13 +1409,14 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     Firefox is next driven: whether a null viewport reverts to the real window (CDP's clear does
  *     NOT, for an override another session set), and whether setViewport reflows synchronously the
  *     way Emulation.setDeviceMetricsOverride was measured to on Chrome.
- *   - screenshot.tile: not declared, and unlike screenshot.scale this is an UNMEASURED gap rather
- *     than a missing parameter. captureScreenshot does take clip:{type:"box"}, so bands are probably
- *     implementable — but every property band tiling rests on (does a box clip render past the
- *     viewport, is clip.y CSS px, do fixed elements repeat per band, are seams pixel-exact) was
- *     measured on Chrome and on nothing else, and Firefox was not launched here. `tile:true` is a
- *     refusal in screenshot() naming --browser chrome; the default (auto) never bands on this
- *     backend, so it is unchanged.
+ *   - screenshot.tile: not declared, but no longer an unmeasured gap. Live-fired against Firefox
+ *     153.0.3: take_screenshot --fullPage true on a 20,000px-tall page returned one 1366x20000 PNG
+ *     at scale 1, verified complete top-to-bottom, via a single origin:"document" capture — no
+ *     clip, no bands, no cap hit. Chrome's band tiling exists solely to route around its
+ *     16384-device-px encode cap; Firefox has no such cap, so screenshot.tile (forced tiling via
+ *     tile:true) has nothing to do here. `tile:true` is still a refusal in screenshot() naming
+ *     --browser chrome; the default (auto) still never bands on this backend — both unchanged, now
+ *     for a documented reason instead of an untested one.
  *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
  *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
  *     emulation have no verified-working BiDi path in this environment, so emulate() never claims
