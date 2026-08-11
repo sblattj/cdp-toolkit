@@ -909,7 +909,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "take_screenshot",
-    "description": "Capture the viewport (default), the full scrollable page (fullPage), or a single element (uid or selector, exactly one and mutually exclusive) via raw CDP Page.captureScreenshot. Writes a PNG/JPEG under /tmp/cdp-toolkit (override with savePath) and returns {path,bytes,format,target}; raw base64 is only included when returnBase64 is set. quality applies to jpeg only.",
+    "description": "Capture the viewport (default), the full scrollable page (fullPage), or a single element (uid or selector, exactly one and mutually exclusive) via raw CDP Page.captureScreenshot — as one image when it fits, or as vertical bands stitched losslessly into one PNG when it does not (see tile). Writes a PNG/JPEG under /tmp/cdp-toolkit (override with savePath; its directory is created for you) and returns {path,bytes,format,target,scale} plus width/height MEASURED from the encoded bytes, which are omitted rather than guessed when the bytes cannot be decoded; renderSize/renderRestored (+renderRestoreError) accompany a renderWidth/renderHeight capture, tiled/bands a banded one. Raw base64 is only included when returnBase64 is set, and is refused on a banded capture. quality applies to jpeg only. Every capture costs one Page.getLayoutMetrics round trip, because Chrome does not refuse an oversized capture politely: past 16384 device px per side Page.captureScreenshot can simply never answer, and captureBeyondViewport leaves the tab resized to the clip, so the size is checked before the capture rather than after.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -937,6 +937,22 @@ export const MANIFEST: ToolSpec[] = [
           "type": "boolean",
           "description": "Capture the full scrollable content height computed from Page.getLayoutMetrics, not just the viewport."
         },
+        "scale": {
+          "type": "number",
+          "description": "Output-pixel multiplier for this one capture: greater than 0, at most 8, default 1. Output px = ceil(css px x scale x devicePixelRatio), so on a ratio-2 display scale 3 is 6x the CSS size; the page is never told anything changed (devicePixelRatio and innerWidth/innerHeight read identically before and after). Chrome only (capability screenshot.scale) — WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter, so under Firefox call emulate with deviceScaleFactor first and capture at scale 1. A projection past Chrome's 16384 device px per side is refused before the browser is dialled, naming the largest scale that fits."
+        },
+        "renderWidth": {
+          "type": "number",
+          "description": "Emulate this viewport width, in CSS px (integer, 1-16384), for the length of ONE capture, then put the previous viewport back. REQUIRED together with renderHeight. Not the same knob as scale: scale re-renders the same layout at more pixels, this changes what the page BELIEVES, so media queries flip and the document re-lays-out — which is how you capture a responsive page at 1920x1080 from a tab that is not that size. Declared by BOTH backends (capability screenshot.renderSize). The restore can only put back an override this toolkit itself applied: one set by the DevTools UI, another client, or a pre-1.9.2 build is invisible and gets reset to the real device. The result reports renderSize and renderRestored; renderRestored:false means the tab is STILL emulated and you have to fix it with emulate."
+        },
+        "renderHeight": {
+          "type": "number",
+          "description": "Emulate this viewport height, in CSS px (integer, 1-16384), for the length of one capture. Required together with renderWidth — a viewport is two numbers, and honouring one while inventing the other would render at a size you never named and never see in the result. Note a narrow renderWidth reflows most documents TALLER, which is the usual way a render-size capture trips the 16384-device-px encode limit."
+        },
+        "tile": {
+          "type": "boolean",
+          "description": "Whether this capture may be taken as vertical bands and stitched into one lossless PNG. Three-valued: omitted = AUTO (one shot when the projected output fits under Chrome's 16384 device px per side, bands when it does not — this is why a whole-page capture of a very long page now returns a file instead of hanging and wedging the tab); false = never band, refuse instead (the pre-1.9.2 behaviour); true = always band, even when one shot would have fitted. Only true costs a capability (screenshot.tile, Chrome only; Firefox was never driven for the band arithmetic). A banded capture is PNG-only and cannot also returnBase64, and only HEIGHT is tiled — a projected WIDTH past the limit is refused, not split, because bands are stitched by concatenating scanlines. Bands are a faithful crop of one document render: fixed and sticky elements do not repeat per band and seams are pixel-exact, but content the page only loads on real scroll (lazy images, virtualized lists) renders blank in bands the real viewport never reached, which is a property of the page and not of the stitch."
+        },
         "uid": {
           "type": "number",
           "description": "Element to clip to: a CDP backendDOMNodeId obtained from take_snapshot. Mutually exclusive with selector."
@@ -947,11 +963,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "savePath": {
           "type": "string",
-          "description": "Override the output file path. Default: /tmp/cdp-toolkit/screenshot-<id>-<stamp>.<ext>."
+          "description": "Override the output file path. Default: /tmp/cdp-toolkit/screenshot-<id>-<stamp>.<ext>, where the stamp is the capture's START (a banded capture writes as it goes and has no finished image to name a file after). The destination directory is created from this path's own dirname, so a savePath outside /tmp/cdp-toolkit works."
         },
         "returnBase64": {
           "type": "boolean",
-          "description": "Also return the raw base64 image bytes in the result, in addition to writing the file."
+          "description": "Also return the raw base64 image bytes in the result, in addition to writing the file. Refused on a banded capture (see tile): a stitched image runs to hundreds of megabytes and base64 inflates it by a third, into the caller's response — read the file at the returned path instead."
         }
       },
       "required": [],
@@ -960,7 +976,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "emulate",
-    "description": "Apply any subset of Chrome emulation overrides in one call: device metrics (width/height together, plus deviceScaleFactor/mobile), userAgent, cpuThrottlingRate (>=1), emulated media type + mediaFeatures, and networkConditions. Pass clearOverrides:true to reset every override to the browser default (ignores all other fields). Non-metrics overrides are session-scoped and reset when the per-call connection closes; device-metrics overrides persist on the target until cleared or the renderer navigates/reloads.",
+    "description": "Apply any subset of Chrome emulation overrides in one call: device metrics (width/height together, plus deviceScaleFactor/mobile), userAgent, cpuThrottlingRate (>=1), emulated media type + mediaFeatures, and networkConditions. Pass clearOverrides:true to reset every override to the browser default (ignores all other fields); as of 1.9.2 that genuinely clears a device-metrics override set by a DIFFERENT process (Emulation.clearDeviceMetricsOverride is a no-op unless the clearing connection also set the override, so the driver re-asserts the tab's current size on its own connection first, then clears — and throws rather than answering cleared:true if it cannot verify that). Non-metrics overrides are session-scoped and reset when the per-call connection closes; device-metrics overrides persist on the target until cleared or the renderer navigates/reloads.",
     "inputSchema": {
       "type": "object",
       "properties": {
