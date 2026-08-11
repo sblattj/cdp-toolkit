@@ -56,7 +56,13 @@
  * breaks the CLI.
  */
 
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { ToolName } from "./index.ts";
+// leaseDir only, for the viewport-override record below. leases.ts imports nothing from this file
+// (node builtins only), so this is not a cycle; the record deliberately shares the lease directory
+// rather than minting a second state location.
+import { leaseDir } from "./leases.ts";
 import type { TargetSelector } from "./types.ts";
 
 /* ---------------------------------- uids ---------------------------------- */
@@ -134,6 +140,7 @@ export type Capability =
   | "screenshot.fullPage" // one-shot full scrollable page, not just the viewport
   | "screenshot.element" // capture clipped to a single element
   | "screenshot.scale" // per-capture output-pixel multiplier; no permanent emulation change
+  | "screenshot.renderSize" // emulate a viewport for the duration of ONE capture, then put the old one back
   | "network.intercept" // fulfill, fail, or continue a matched request
   | "network.responseBodyPostHoc" // read a body for a request not armed in advance
   | "snapshot.accessibilityTree" // native a11y dump, not a DOM-walk approximation
@@ -346,6 +353,149 @@ export interface ScreenshotOptions {
   fullPage?: boolean; // requires "screenshot.fullPage"
   clip?: ElementLocator; // requires "screenshot.element"
   scale?: number; // requires "screenshot.scale"; absent or 1 leaves the capture byte-for-byte as it was
+  /**
+   * Render this capture at an emulated viewport, then put the previous one back. Both fields are
+   * required TOGETHER (the tool layer enforces it; a driver trusts its caller) and both require
+   * Capability "screenshot.renderSize". Absent, the capture is byte-for-byte what it was.
+   *
+   * NOT the same knob as `scale`, and the difference is measured, not asserted. `scale` multiplies
+   * output pixels while the page keeps believing it is its old size: window.devicePixelRatio read 2
+   * both before and after a --scale 3 capture, and innerWidth/innerHeight stayed 1390x1064. This
+   * pair changes what the page BELIEVES for the length of one capture, so media queries flip and
+   * the document re-lays-out — which is the point (capture a responsive page at desktop 1920x1080
+   * from a tab that is not that size) and also why it must be undone afterwards.
+   *
+   * `deviceScaleFactor` and `mobile` are deliberately INHERITED from whatever override was already
+   * in place rather than reset: the caller asked to change the render SIZE, and silently dropping
+   * a device pixel ratio they set earlier would be a second, unrequested change.
+   */
+  renderWidth?: number; // requires "screenshot.renderSize"
+  renderHeight?: number; // requires "screenshot.renderSize"
+}
+
+/**
+ * What a capture returns. `data`/`format` are the whole answer for an ordinary capture; the three
+ * render-size fields are present only when renderWidth/renderHeight were applied.
+ *
+ * `renderRestored:false` IS THE LOUD PART, and it is why this is a result shape rather than a bare
+ * byte buffer. A failed restore means the caller's page is still emulated at the render size after
+ * this call returns — a mutation they did not ask to keep — so it has to travel back with the image
+ * instead of being swallowed. On the THROWING path there is no result to carry it, so a driver
+ * appends the same fact to the error message instead (see CdpPageDriver.screenshot).
+ */
+export interface ScreenshotResult {
+  data: Uint8Array;
+  format: "png" | "jpeg";
+  /** The emulated viewport this capture ran at. Present only when renderWidth/renderHeight were given. */
+  renderSize?: { width: number; height: number };
+  /** Whether the previous viewport was put back. Present only when a render size was applied. */
+  renderRestored?: boolean;
+  /** Why the restore failed. Present only when renderRestored is false. */
+  renderRestoreError?: string;
+}
+
+/* --------------------- the viewport-override record (both drivers) --------------------- */
+
+/**
+ * The device-metrics override this toolkit last applied to a target, as a file under the lease
+ * directory. Written by PageDriver.emulate, removed by emulate{clearOverrides}, read by
+ * PageDriver.screenshot so a render-size capture can put back what it displaced.
+ *
+ * WHY A FILE AND NOT A FIELD ON THE DRIVER. The spec for this feature called for a private field on
+ * the page driver, and that is provably not enough here — MEASURED against Chrome/151.0.7922.76:
+ *
+ *   $ cli emulate --target T --width 800 --height 600     # one process, socket closes on exit
+ *   $ cli evaluate_script --target T ...innerWidth...     # a DIFFERENT process
+ *   "[800,600,2]"                                         # the override OUTLIVED the connection
+ *
+ * The CDP driver's LifetimeModel is "per-call": a PageDriver instance lives for exactly one tool
+ * call, so a field on it is empty by construction at the start of the screenshot call that needs
+ * it, and the override it must not destroy was set by a process that has already exited. Same
+ * reasoning leases.ts and origins.ts give for their own files, arrived at the same way.
+ *
+ * WHY THE RECORD IS LOAD-BEARING AND NOT A CONVENIENCE. Emulation.clearDeviceMetricsOverride does
+ * NOT mean "undo the override" — measured, twice, on the same tab:
+ *
+ *   fresh connection, never set an override, clear it   -> returns {}, page STAYS 800x600
+ *   fresh connection, set 1920x1080, then clear         -> page becomes 1390x1064, the REAL device
+ *
+ * So clearing is a no-op for an override this session did not set, and once a session DOES set one,
+ * clearing reverts to the physical device and takes any earlier override down with it. A
+ * render-size capture always sets one, so its clear always lands — which is exactly why restoring
+ * by clearing would silently destroy a caller's earlier `emulate` and why this record exists.
+ *
+ * WHAT IT CANNOT SEE, and this is a real limit rather than a caveat: an override applied by
+ * something that is not this toolkit — the DevTools UI, Puppeteer, another automation client, or a
+ * toolkit build older than this record — leaves no file, so a render-size capture restores by
+ * clearing and that foreign override is reset to the real device. There is no CDP or BiDi command
+ * that reads a device-metrics override back, so a driver genuinely cannot know it was there.
+ */
+export interface ViewportRecord {
+  width: number;
+  height: number;
+  /** CDP's Emulation.setDeviceMetricsOverride sense: 0 means "the real device's". */
+  deviceScaleFactor?: number;
+  mobile?: boolean;
+}
+
+/** Sibling of leases.ts's lease-<backend>-<targetId>.json, in the same directory and with the same
+ *  filename-safety policy. Keyed by the driver's uid SCHEME ("cdp" / "bidi") because a CDP targetId
+ *  and a BiDi context id are not disjoint by construction — the same reason lease files carry a
+ *  backend in the name. */
+export function viewportRecordFile(scheme: string, targetId: string): string {
+  return join(leaseDir(), `viewport-${scheme}-${targetId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+
+/** The override this toolkit last applied to `targetId`, or undefined when it has applied none.
+ *  A missing, unreadable, or malformed file all read as undefined: "we do not know" is the honest
+ *  answer, and it is the one that makes the caller restore by clearing rather than by guessing. */
+export async function readViewportRecord(scheme: string, targetId: string): Promise<ViewportRecord | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(viewportRecordFile(scheme, targetId), "utf8")) as Partial<ViewportRecord>;
+    if (typeof raw?.width !== "number" || typeof raw?.height !== "number") return undefined;
+    return {
+      width: raw.width,
+      height: raw.height,
+      ...(typeof raw.deviceScaleFactor === "number" ? { deviceScaleFactor: raw.deviceScaleFactor } : {}),
+      ...(typeof raw.mobile === "boolean" ? { mobile: raw.mobile } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record an override this toolkit just applied. Deliberately best-effort: emulate's job is to
+ *  emulate, and a full disk must not turn a working override into a thrown error. The cost of a
+ *  lost write is stated above — a later render-size capture restores by clearing instead. */
+export async function writeViewportRecord(scheme: string, targetId: string, rec: ViewportRecord): Promise<void> {
+  try {
+    await mkdir(leaseDir(), { recursive: true });
+    await writeFile(viewportRecordFile(scheme, targetId), JSON.stringify({ scheme, targetId, ...rec }), "utf8");
+  } catch {
+    /* best-effort, see above */
+  }
+}
+
+/**
+ * What a driver appends to a capture's error when the render-size restore ALSO failed. Shared by
+ * both drivers because the sentence is the caller's only warning that their page is still emulated,
+ * and it must not read differently depending on which browser stranded it. Says what is wrong AND
+ * how to undo it by hand, because at this point the toolkit has already failed to.
+ */
+export function renderRestoreFailureNote(size: { width: number; height: number }, why: string): string {
+  return (
+    `— AND the ${size.width}x${size.height} render-size override could NOT be restored (${why}), so this page is STILL ` +
+    `emulated at ${size.width}x${size.height}: put it back with emulate{width,height} or emulate{clearOverrides:true}.`
+  );
+}
+
+/** Forget the recorded override. Best-effort for the same reason, and a missing file is success. */
+export async function clearViewportRecord(scheme: string, targetId: string): Promise<void> {
+  try {
+    await unlink(viewportRecordFile(scheme, targetId));
+  } catch {
+    /* best-effort, see above */
+  }
 }
 
 /** Each optional field names the Capability it requires, if any. */
@@ -644,9 +794,13 @@ export interface PageDriver {
   setFiles(loc: ElementLocator, files: readonly string[]): Promise<void>;
 
   /* rendering */
-  /** Returns raw image bytes. Artifact naming and writing stay in the tool. */
-  screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }>;
-  /** Apply overrides. Returns the field names actually applied. */
+  /** Returns raw image bytes. Artifact naming and writing stay in the tool. Under
+   *  renderWidth/renderHeight it also reports the emulated size it ran at and whether the previous
+   *  viewport was put back — see ScreenshotResult. */
+  screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult>;
+  /** Apply overrides. Returns the field names actually applied. An implementation that applies
+   *  device metrics MUST record them with writeViewportRecord (and clear the record under
+   *  clearOverrides), or a later render-size capture will restore by clearing and destroy them. */
   emulate(opts: EmulationOptions): Promise<{ applied: string[] }>;
 
   /* events */

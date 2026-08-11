@@ -21,13 +21,15 @@
  *    capture, which would return an image the caller never asked for and cannot tell apart from
  *    the one they wanted. Proved against the REAL bidi capability set, not a hand-written one.
  */
-import { describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BrowserDriver, Capability, PageDriver, PageInfo, ScreenshotOptions } from "../src/driver.ts";
-import { REQUIRED_CAPABILITIES } from "../src/driver.ts";
-import { imagePixelSize, resolveScreenshotScale, takeScreenshot } from "../src/shared-tools.ts";
+import type { BrowserDriver, Capability, PageDriver, PageInfo, ScreenshotOptions, ScreenshotResult } from "../src/driver.ts";
+import {
+  REQUIRED_CAPABILITIES, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, viewportRecordFile, writeViewportRecord,
+} from "../src/driver.ts";
+import { imagePixelSize, resolveRenderSize, resolveScreenshotScale, takeScreenshot } from "../src/shared-tools.ts";
 import { createCdpDriver } from "../src/cdp/driver.ts";
 import { createFirefoxDriver } from "../src/bidi/driver.ts";
 import { toolAvailability } from "../src/capabilities.ts";
@@ -129,13 +131,15 @@ const INFO: PageInfo = { id: "TAB-SCALE-1", url: "https://example.test/shot", ti
 
 /** Minimal PageDriver/BrowserDriver stand-in, mirroring input-parity.test.ts's stubDriver: only
  *  the members takeScreenshot() touches, recording the options it passed down. */
-function stubDriver(capabilities: ReadonlySet<Capability>, data: Uint8Array) {
+function stubDriver(capabilities: ReadonlySet<Capability>, data: Uint8Array, extra: Partial<ScreenshotResult> = {}) {
   const shotCalls: ScreenshotOptions[] = [];
   const page = {
     info: INFO,
-    async screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }> {
+    async screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
       shotCalls.push(opts ?? {});
-      return { data, format: "png" };
+      // A real driver echoes the render size back only when it applied one; `extra` lets a test
+      // stand in for any of the four outcomes (no render size / restored / failed restore).
+      return { data, format: "png", ...extra };
     },
     async release(): Promise<void> {},
   };
@@ -209,7 +213,190 @@ describe("takeScreenshot() wiring", () => {
   });
 });
 
+/* ------------------------------------ render size ------------------------------------ */
+
+/**
+ * take_screenshot's renderWidth/renderHeight: emulate a viewport for ONE capture, then put the
+ * previous one back. Three properties carry this slice, and they are not the same three as `scale`.
+ *
+ * 1. A VIEWPORT IS TWO NUMBERS. Honouring one side and inventing the other renders at a size the
+ *    caller never named, so the pair is required together — the same rule emulate() has always had
+ *    for device metrics, enforced here BEFORE a socket is opened so a rejected call cannot be the
+ *    one that leaves a page mutated.
+ * 2. THE RECORD IS LOAD-BEARING, not bookkeeping. Restore re-applies the override this toolkit last
+ *    applied, because clearing does something different and destructive: measured on
+ *    Chrome/151.0.7922.76, Emulation.clearDeviceMetricsOverride reverts to the REAL device, so
+ *    restoring by clearing silently destroys an `emulate` the caller made earlier and still
+ *    believes is in force. Live-fire confirmed both directions — with the record, a prior 777x555
+ *    emulate came back after a 1920x1080 render capture; with the record deleted, the same call
+ *    left the tab at the real 1390x1064.
+ * 3. A FAILED RESTORE IS NEVER SWALLOWED. It means the caller's page is still emulated after the
+ *    call returned, so it rides back on the result (renderRestored:false) rather than being dropped
+ *    because the image itself came out fine.
+ */
+describe("resolveRenderSize", () => {
+  test("omitted on both sides is undefined, and costs no capability", () => {
+    expect(resolveRenderSize(undefined, undefined, FIREFOX_CAPS)).toBeUndefined();
+    expect(resolveRenderSize(undefined, undefined, CHROME_CAPS)).toBeUndefined();
+  });
+  test("a valid pair passes through as a viewport", () => {
+    expect(resolveRenderSize(1920, 1080, CHROME_CAPS)).toEqual({ width: 1920, height: 1080 });
+    expect(resolveRenderSize(1, 1, CHROME_CAPS)).toEqual({ width: 1, height: 1 });
+    expect(resolveRenderSize(16384, 16384, CHROME_CAPS)).toEqual({ width: 16384, height: 16384 });
+  });
+  test("one side without the other is refused, naming which side was given", () => {
+    expect(() => resolveRenderSize(1920, undefined, CHROME_CAPS)).toThrow(/required together/);
+    expect(() => resolveRenderSize(1920, undefined, CHROME_CAPS)).toThrow(/only renderWidth/);
+    expect(() => resolveRenderSize(undefined, 1080, CHROME_CAPS)).toThrow(/only renderHeight/);
+  });
+  test("non-integer, non-positive and oversize sides are refused, naming the accepted range", () => {
+    for (const bad of [0, -5, 1920.5, Number.NaN, Number.POSITIVE_INFINITY, 16385, 99999]) {
+      expect(() => resolveRenderSize(bad, 1080, CHROME_CAPS)).toThrow(/'renderWidth' must be an integer between 1 and 16384/);
+      expect(() => resolveRenderSize(1920, bad, CHROME_CAPS)).toThrow(/'renderHeight' must be an integer between 1 and 16384/);
+    }
+  });
+  test("a backend without screenshot.renderSize is refused, naming the manual workaround", () => {
+    // Neither shipping driver lacks it, so this arm needs a synthetic set — the point is that a
+    // future backend refuses out loud instead of capturing at the tab's real size, which would
+    // return a picture the caller cannot tell apart from the one they asked for.
+    const noRenderSize: ReadonlySet<Capability> = new Set<Capability>(["screenshot.fullPage"]);
+    expect(() => resolveRenderSize(1920, 1080, noRenderSize)).toThrow(/not supported by this backend/);
+    expect(() => resolveRenderSize(1920, 1080, noRenderSize)).toThrow(/width:1920, height:1080/);
+  });
+  test("the range check runs BEFORE the capability check: a typo reads as a typo on any backend", () => {
+    const noRenderSize: ReadonlySet<Capability> = new Set<Capability>([]);
+    expect(() => resolveRenderSize(0, 1080, noRenderSize)).toThrow(/must be an integer/);
+  });
+});
+
+describe("takeScreenshot() render-size wiring", () => {
+  const RENDER = { width: 1920, height: 1080 };
+  test("passes renderWidth/renderHeight down and reports the size that was applied", async () => {
+    const { driver, shotCalls } = stubDriver(CHROME_CAPS, pngHeader(3840, 2160), { renderSize: RENDER, renderRestored: true });
+    const result = await shoot(driver, { renderWidth: 1920, renderHeight: 1080 });
+    expect(shotCalls[0]?.renderWidth).toBe(1920);
+    expect(shotCalls[0]?.renderHeight).toBe(1080);
+    expect(result.renderSize).toEqual(RENDER);
+    expect(result.renderRestored).toBe(true);
+    // Still decoded from the bytes, not computed: 1920 css x device pixel ratio 2 = 3840.
+    expect({ width: result.width, height: result.height }).toEqual({ width: 3840, height: 2160 });
+  });
+  test("a FAILED restore is reported on the result, not swallowed because the image came out fine", async () => {
+    const { driver } = stubDriver(CHROME_CAPS, pngHeader(3840, 2160), {
+      renderSize: RENDER, renderRestored: false, renderRestoreError: "socket closed",
+    });
+    const result = await shoot(driver, { renderWidth: 1920, renderHeight: 1080 });
+    expect(result.renderRestored).toBe(false);
+    expect(result.renderRestoreError).toBe("socket closed");
+  });
+  test("a driver that reports no renderSize leaves all three fields OFF the result", async () => {
+    const { driver, shotCalls } = stubDriver(CHROME_CAPS, pngHeader(2780, 2128));
+    const result = await shoot(driver);
+    expect(shotCalls[0]?.renderWidth).toBeUndefined();
+    expect(shotCalls[0]?.renderHeight).toBeUndefined();
+    expect("renderSize" in result).toBe(false);
+    expect("renderRestored" in result).toBe(false);
+    expect("renderRestoreError" in result).toBe(false);
+  });
+  test("a half-given or out-of-range pair throws before the driver is ever touched", async () => {
+    for (const bad of [{ renderWidth: 1920 }, { renderHeight: 1080 }, { renderWidth: 0, renderHeight: 1080 }]) {
+      const { driver, shotCalls } = stubDriver(CHROME_CAPS, pngHeader(10, 10));
+      await expect(shoot(driver, bad)).rejects.toThrow(/renderWidth|renderHeight/);
+      expect(shotCalls).toEqual([]);
+    }
+  });
+  test("the refusals are SharedToolErrors, the class the dispatcher wraps", async () => {
+    const { driver } = stubDriver(CHROME_CAPS, pngHeader(10, 10));
+    const err = await shoot(driver, { renderWidth: 1920 }).catch((e: unknown) => e);
+    expect((err as Error).constructor.name).toBe("SharedToolError");
+  });
+  test("composes with scale: both reach the driver in one capture", async () => {
+    const { driver, shotCalls } = stubDriver(CHROME_CAPS, pngHeader(7680, 4320), { renderSize: RENDER, renderRestored: true });
+    const result = await shoot(driver, { renderWidth: 1920, renderHeight: 1080, scale: 2, fullPage: true });
+    expect(shotCalls).toEqual([{ format: "png", quality: undefined, fullPage: true, scale: 2, renderWidth: 1920, renderHeight: 1080 }]);
+    expect(result.scale).toBe(2);
+    expect(result.renderSize).toEqual(RENDER);
+  });
+});
+
+/* ----------------------------- the viewport-override record ----------------------------- */
+
+describe("viewport record (what restore puts back)", () => {
+  let dir = "";
+  const previous = process.env.CDP_ARTIFACT_DIR;
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cdp-viewport-rec-"));
+    process.env.CDP_ARTIFACT_DIR = dir;
+  });
+  afterAll(async () => {
+    if (previous === undefined) delete process.env.CDP_ARTIFACT_DIR;
+    else process.env.CDP_ARTIFACT_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("a target with no record reads undefined — which is what makes restore CLEAR rather than guess", async () => {
+    expect(await readViewportRecord("cdp", "NEVER-EMULATED")).toBeUndefined();
+  });
+  test("a written record round-trips every field restore needs to re-apply the override", async () => {
+    await writeViewportRecord("cdp", "TAB-A", { width: 777, height: 555, deviceScaleFactor: 0, mobile: false });
+    expect(await readViewportRecord("cdp", "TAB-A")).toEqual({ width: 777, height: 555, deviceScaleFactor: 0, mobile: false });
+  });
+  test("the newest write wins: emulate twice and restore owes the SECOND size", async () => {
+    await writeViewportRecord("cdp", "TAB-B", { width: 800, height: 600 });
+    await writeViewportRecord("cdp", "TAB-B", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+    expect(await readViewportRecord("cdp", "TAB-B")).toEqual({ width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  });
+  test("clearing forgets it, and clearing twice is not an error", async () => {
+    await writeViewportRecord("cdp", "TAB-C", { width: 1024, height: 768 });
+    await clearViewportRecord("cdp", "TAB-C");
+    expect(await readViewportRecord("cdp", "TAB-C")).toBeUndefined();
+    await clearViewportRecord("cdp", "TAB-C"); // a missing file is success, not a throw
+  });
+  test("the two backends never collide: a CDP targetId and a BiDi context id are not disjoint", async () => {
+    await writeViewportRecord("cdp", "SAME-ID", { width: 100, height: 200 });
+    await writeViewportRecord("bidi", "SAME-ID", { width: 300, height: 400 });
+    expect(await readViewportRecord("cdp", "SAME-ID")).toEqual({ width: 100, height: 200 });
+    expect(await readViewportRecord("bidi", "SAME-ID")).toEqual({ width: 300, height: 400 });
+    expect(viewportRecordFile("cdp", "SAME-ID")).not.toBe(viewportRecordFile("bidi", "SAME-ID"));
+  });
+  test("a filename-hostile target id cannot escape the lease directory", () => {
+    expect(viewportRecordFile("cdp", "../../etc/passwd")).toBe(join(dir, "viewport-cdp-.._.._etc_passwd.json"));
+  });
+  test("a corrupt or half-written record reads as undefined, never as a partial viewport", async () => {
+    await writeFile(viewportRecordFile("cdp", "TAB-BAD"), "{not json", "utf8");
+    expect(await readViewportRecord("cdp", "TAB-BAD")).toBeUndefined();
+    // Present but missing a side: a viewport is two numbers, so half of one is not a viewport.
+    await writeFile(viewportRecordFile("cdp", "TAB-HALF"), JSON.stringify({ width: 800 }), "utf8");
+    expect(await readViewportRecord("cdp", "TAB-HALF")).toBeUndefined();
+  });
+});
+
+describe("renderRestoreFailureNote", () => {
+  test("names the size the page is stuck at AND how to undo it by hand", () => {
+    const note = renderRestoreFailureNote({ width: 1920, height: 1080 }, "socket closed");
+    expect(note).toContain("1920x1080");
+    expect(note).toContain("socket closed");
+    // At this point the toolkit has already failed to restore, so the caller needs the manual fix.
+    expect(note).toContain("clearOverrides");
+  });
+});
+
 /* --------------------------------- capability gating --------------------------------- */
+
+describe("screenshot.renderSize capability (a PARAM gap, and NOT a Chrome-only one)", () => {
+  test("BOTH backends declare it: each has its own viewport-emulation primitive", () => {
+    // Emulation.setDeviceMetricsOverride on Chrome, browsingContext.setViewport on Firefox — the
+    // same commands both already declare emulate.deviceMetrics on. Refusing it on either would
+    // claim a missing primitive the driver demonstrably has.
+    expect(CHROME_CAPS.has("screenshot.renderSize")).toBe(true);
+    expect(FIREFOX_CAPS.has("screenshot.renderSize")).toBe(true);
+    expect(CHROME_CAPS.has("emulate.deviceMetrics")).toBe(true);
+    expect(FIREFOX_CAPS.has("emulate.deviceMetrics")).toBe(true);
+  });
+  test("it gates no whole tool: take_screenshot stays universal", () => {
+    expect(REQUIRED_CAPABILITIES.take_screenshot).toBeUndefined();
+  });
+});
 
 describe("screenshot.scale capability (ADR-001: a PARAM gap, not a whole-tool one)", () => {
   test("only Chrome declares it", () => {
