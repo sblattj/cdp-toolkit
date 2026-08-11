@@ -26,7 +26,7 @@ import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
 
-const VERSION = "1.9.4";
+const VERSION = "1.9.5";
 
 // Backend + (Firefox only) attach endpoint are read once at startup (MCP has no per-call notion
 // of backend): --browser flag / CDP_BROWSER env, else "chrome" (zero behavior change for existing

@@ -5,6 +5,50 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-08-11
+
+**Documentation only; no code changes since 1.9.4.** Two updates. First, the
+Firefox `fullPage` screenshot gap that 1.9.2's docs hedged as "unmeasured" is
+now resolved: measured against a real Firefox 153.0.3 through the shipped CLI
+in attach mode, a 20,000px-tall page captured with `take_screenshot --fullPage
+true` came back as a single 1366×20000 PNG at scale 1 — verified complete
+top-to-bottom (a marker at y=0, a marker at y=20000, an unbroken ruler through
+the middle, no truncation). Firefox has no equivalent of Chrome's
+16384-device-px encode cap, so `browsingContext.captureScreenshot(origin:
+"document")` returns the whole long page in one BiDi call and never needs the
+band-tiling Chrome's cap requires — tiling exists solely to route around that
+cap, and Firefox doesn't have one, so `screenshot.tile` is a non-issue for
+Firefox correctness rather than a gap. `screenshot.scale` remains a genuine,
+unrelated Firefox gap: BiDi's `captureScreenshot` has no scale parameter at
+all, so Firefox captures stay 1x only. Second, this release also gives a
+changelog entry to doc-only additions that landed on top of 1.9.4 without one:
+Linux and remote-over-SSH attach guidance, and a `claude mcp add` one-liner,
+both in README.md's setup instructions.
+
+### Added
+
+- README.md: Linux and remote-over-SSH `--connect`/`CDP_FIREFOX_ENDPOINT`
+  attach guidance, and a `claude mcp add cdp-toolkit --scope user -- bun run
+  "$(pwd)/src/mcp.ts"` one-liner in the quick-start block.
+
+### Changed
+
+- README.md's "Honest capability gaps" list and CONTRACT.md's `screenshot.ts`
+  module row: the Firefox `tile:true`/`screenshot.tile` hedge ("unmeasured
+  gap... probably implementable") is replaced with the measured result above.
+  `scale`'s status is unchanged and still called out as a genuine gap.
+
+### Notes
+
+- No code changed: `src/bidi/driver.ts`'s `BIDI_CAPABILITIES` set and its
+  header comment still do not declare `screenshot.tile` and still describe it
+  as unmeasured — that comment is stale relative to this release's docs but is
+  source code, out of scope for a docs-only patch, and is left for a follow-up
+  code-touching release to reconcile.
+- Tool count unchanged at **45**; no tool added, renamed, or removed.
+- Version bump only: `package.json` and `src/mcp.ts`'s `VERSION` constant move
+  1.9.4 → 1.9.5. No other source file changed.
+
 ## [1.9.4] - 2026-08-11
 
 Firefox gains a second mode: **attach**. Until now `--browser firefox` always spawned a
