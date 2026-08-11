@@ -5,6 +5,76 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.4] - 2026-08-11
+
+Firefox gains a second mode: **attach**. Until now `--browser firefox` always spawned a
+throwaway-profile Firefox — a login wall for anything needing a real, already-authenticated
+session. `--connect <port|host:port|ws-url>` (or env `CDP_FIREFOX_ENDPOINT`) instead connects to
+a Firefox **you** already started with `--remote-debugging-port`, so tools see your real logged-in
+profile. This process never launches or kills that browser: dispose only ends the BiDi session
+(`session.end`), never the process. Also fixes a doc-nit (README/CONTRACT overclaimed "Firefox
+cannot be attached to at all" — the real, narrower limitation is that you cannot relaunch the
+`firefox` binary with the debug flag against an already-running instance) and a real hang (a
+second attach against a Firefox that already has an active BiDi session used to hang forever;
+it now fails fast with an actionable error).
+
+### Added
+
+- **`--connect <endpoint>` / `CDP_FIREFOX_ENDPOINT`** — Firefox attach mode. `<endpoint>` accepts
+  three spellings, all normalized to a ws URL: a bare port (`9223`), `host:port`
+  (`127.0.0.1:9223`), or a full `ws://`/`wss://` URL. Flag beats env, mirroring
+  `--browser`/`CDP_BROWSER` precedence. An endpoint **implies** the Firefox backend on its own —
+  there is nothing else it could mean — and errors against an explicit `--browser chrome` /
+  `CDP_BROWSER=chrome` rather than silently picking one side.
+- `src/backend.ts`: `normalizeBidiEndpoint`, `resolveFirefoxEndpoint`, `stripConnectFlag`,
+  `resolveBackend` (the single backend-selection entry point `cli.ts`/`mcp.ts` now both call —
+  returns `{kind, endpoint?}`), and `startFirefoxSession`/`getOrCreateFirefoxSession` now accept
+  an `{ endpoint }` to attach instead of launch.
+- `src/bidi/client.ts`: `connectBidiSessionUrl(wsUrl, opts?)` — connects directly to a ws URL,
+  no port-to-URL construction. `connectBidiSession(port, opts)` is now a thin wrapper over it
+  (kept exported, unchanged behavior).
+- `src/bidi/driver.ts`: `createFirefoxDriverForEndpoint(wsUrl, opts?)` — the attach-mode driver
+  constructor. The driver's connection identity moved from a bare `port: number` to a ws
+  `endpoint: string`, so an attach endpoint can carry a different host/port/path than a launched
+  Firefox's `ws://127.0.0.1:<port>/session`.
+- `firefox:attach:smoke` script (`test/firefox-attach-smoke.ts`) — drives the real attach path
+  against an out-of-band-spawned Firefox: attach, read a page, dispose (Firefox stays alive), a
+  second attach cycle to the same Firefox (proves `session.end` freed the slot), and confirms
+  `resolveBackend` auto-implies `firefox` from `--connect` alone.
+- `test/backend-attach.test.ts` — pure-unit coverage of `normalizeBidiEndpoint`,
+  `resolveFirefoxEndpoint`, `stripConnectFlag`, and `resolveBackend`, including the
+  `--browser chrome` + `--connect` conflict.
+
+### Fixed
+
+- **A second attach against a Firefox with an already-active BiDi session used to hang forever.**
+  Firefox allows exactly one active WebDriver BiDi session at a time; a colliding `session.new`
+  fails with the raw wire message `Maximum number of active sessions`, which reached no caller
+  as an error — it hung. `getConnection` (`src/bidi/driver.ts`) now catches that specific message
+  and raises a clear, actionable error naming the endpoint and the fix (close the other client,
+  or restart Firefox; a client killed without a clean dispose, e.g. `SIGKILL`, can leave a
+  session Firefox does not reap on its own).
+- **Attach-mode dispose was undefined behavior before this release** (the mode did not exist):
+  `BidiBrowserDriver.dispose()` now sends `session.end` before closing the socket, which is what
+  actually frees Firefox's single session slot for the next attach — closing the socket alone
+  does not. Launch-mode dispose is unaffected: the spawned process is still killed after the
+  driver disposes, same as before.
+- **`src/bidi/launch.ts` doc-nit** (the issue's explicit ask, code unchanged): the header/footer
+  said Firefox "cannot be attached to at all." That overstated a real, narrower fact — you cannot
+  *relaunch* the `firefox` binary with `--remote-debugging-port` against an already-running
+  instance and have it take effect (the relaunch hands off and exits, opening no port; still true,
+  still verified against Firefox 153.0.3). Attaching to a port a Firefox process was *originally*
+  launched with — by this toolkit or by hand — always worked and is now this release's first-class
+  path. README.md and CONTRACT.md carried the same overclaim and are corrected too.
+
+### Notes
+
+- Tool count unchanged at **45**; no tool added, renamed, or removed. Both Firefox modes expose
+  the same tool set as before (see README's "Tool availability is filtered per backend").
+- The CLI is one process per invocation either way: an attach-mode CLI call still launches no
+  process and kills none, it just skips `launchFirefox` entirely. Multi-step attach workflows
+  still want the MCP server, same reasoning as launch mode.
+
 ## [1.9.3] - 2026-08-10
 
 `cli.ts` had **no `--help` handling at all.** `--help` fell through the generic

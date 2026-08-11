@@ -227,10 +227,47 @@ cdp --capabilities --browser firefox                 # see what's available and 
 
 Backend selection precedence: `--browser chrome|firefox` flag, then `CDP_BROWSER`, then `chrome`. For the MCP server, set `CDP_BROWSER=firefox` (or pass `--browser firefox` in its launch args) in your MCP client config; the backend is fixed for the life of that server process.
 
-**Firefox is launched, never attached to.** Unlike Chrome, there is no way to add a debug port to an already-running Firefox: the flag only takes effect on the process's original launch, so relaunching the binary against a running instance hands off and exits silently, opening no port (verified against Firefox 153.0.3). `--browser firefox` therefore always starts a fresh Firefox process with a throwaway profile:
+Firefox runs in one of **two modes**, and the difference between them is process ownership.
+
+**LAUNCH (default): a fresh throwaway-profile Firefox, launched and killed per session.** `--browser firefox` with no `--connect`/`CDP_FIREFOX_ENDPOINT` starts a brand-new Firefox process with an empty profile — a login wall for anything that needs a real, already-authenticated session:
 
 - **CLI** (one process per invocation): each command launches Firefox, runs exactly one tool call, and disposes the session and kills the process before exiting, win or lose. State does not carry between separate CLI invocations: there is no running Firefox left afterward for a second command to find.
 - **MCP server** (long-lived): the first Firefox tool call launches one Firefox process and memoizes its BiDi session for the life of the server; every later Firefox call reuses it. The session is torn down on `SIGINT`/`SIGTERM`/stdin close. Multi-step Firefox workflows (navigate, then snapshot, then click) need the MCP server, not the CLI, for exactly this reason.
+
+**ATTACH (`--connect <port|host:port|ws-url>` / `CDP_FIREFOX_ENDPOINT`): connect to a Firefox YOU already started.** Launch a Firefox with its debug port open yourself, and cdp-toolkit connects to that process's BiDi endpoint instead of spawning a throwaway one — so tools see your real, logged-in profile, cookies and all. This process never launches or kills that Firefox: dispose only ends the BiDi session (`session.end`), never the browser.
+
+```bash
+# 1. Start YOUR Firefox with the debug port open (a separate, empty --no-remote profile
+#    is recommended so it doesn't collide with a Firefox you already have open; drop
+#    -profile/-no-remote to attach to your everyday profile instead, once nothing else
+#    is holding its BiDi session):
+firefox --remote-debugging-port 9223 --no-remote -profile /tmp/ff-attach-profile &
+
+# 2. CLI: --connect implies --browser firefox, so it doesn't need to be passed too
+bun run src/cli.ts --connect 9223 take_snapshot
+cdp --connect 127.0.0.1:9223 take_snapshot          # host:port also works
+cdp --connect ws://127.0.0.1:9223/session take_snapshot   # or the full ws:// URL
+```
+
+3. MCP client config: set the env var instead of a flag (the endpoint doesn't belong in `args`):
+
+```json
+{
+  "mcpServers": {
+    "cdp-toolkit": {
+      "command": "npx",
+      "args": ["-y", "cdp-toolkit"],
+      "env": { "CDP_BROWSER": "firefox", "CDP_FIREFOX_ENDPOINT": "9223" }
+    }
+  }
+}
+```
+
+`<endpoint>` accepts three spellings, all normalized to a ws URL: a bare port (`9223`), `host:port` (`127.0.0.1:9223`), or a full `ws://`/`wss://` URL. `--connect`/`CDP_FIREFOX_ENDPOINT` implies the Firefox backend on its own and errors against an explicit `--browser chrome`.
+
+**Firefox allows only one active WebDriver BiDi session at a time.** A second `session.new` against the same endpoint fails outright while a first session is open. Disposing cleanly (the normal exit path, both CLI and MCP shutdown) sends `session.end` first, which frees the slot for the next attach. A client that dies **without** disposing — a `SIGKILL`, a crash — leaves the slot occupied: Firefox does not reap an abandoned session on its own. A colliding attach against an occupied slot now fails fast with an actionable error naming the endpoint, rather than hanging forever (fixed in 1.9.4); recover by closing the other client or restarting Firefox.
+
+**Attaching is not relaunching.** The one thing that is genuinely impossible is handing a debug port to an *already-running* Firefox process after the fact: the `--remote-debugging-port` flag only takes effect on a process's original launch, so relaunching the `firefox` binary against a running instance hands off to it and exits silently, opening no port (verified against Firefox 153.0.3). That is a real, narrow limitation of the Firefox binary itself. It is not the same claim as "Firefox cannot be attached to" — a Firefox that was launched *with* the debug port open, whether by this toolkit or by your own hand, exposes a plain BiDi endpoint that any number of fresh clients can connect to later, which is exactly what `--connect`/`CDP_FIREFOX_ENDPOINT` does.
 
 **Tool availability is filtered per backend**, not per call: `tools/list` (MCP) and `--list`/`--capabilities` (CLI) only ever advertise a tool the selected browser can actually run. A tool is never listed and then thrown from at call time. Under Firefox, four tool groups are absent because Firefox 153's BiDi implementation has no equivalent domain:
 
@@ -250,7 +287,6 @@ Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's 
 - **Thin emulation.** Only viewport size/DPR and `userAgent` are applied. CPU throttling, media-feature emulation (e.g. `prefers-color-scheme`), and network-condition throttling are not available: Firefox 153 does not implement the underlying BiDi commands.
 - **No tracing, heap snapshots, or Lighthouse.** See the capability list above; there is no BiDi equivalent for any of the three.
 - **`locate.text` is not available** (Firefox 153's `browsingContext.locateNodes` rejects the `innerText` locator type as unsupported), unlike Chrome, which has it via `DOM.performSearch`.
-- **No `--browser firefox` attach mode.** By design, per the launch model above: every invocation gets its own throwaway Firefox process and profile.
 - **No modifier-key clicks.** `click`'s `modifiers` (Alt/Control/Meta/Shift) is a Chrome-only *parameter* on an otherwise-universal tool: a non-empty `modifiers` array throws under `--browser firefox` rather than being silently dropped. A plain click still works on both backends.
 - **No real HTML5 drag-and-drop mode.** `drag`'s `mode:"html5"` requires capability `input.html5Drag` and is rejected with a clear error under Firefox; `mode:"mouse"` (the default) works on both.
 - **No per-capture screenshot `scale`, and no band tiling** — two *parameters* on an otherwise-universal tool, for two different reasons. `scale` (`screenshot.scale`) is a genuine protocol gap: `browsingContext.captureScreenshot` has no scale parameter at all, and the refusal points at `emulate {deviceScaleFactor}` + a scale-1 capture instead. `tile:true` (`screenshot.tile`) is an **unmeasured** gap, not a missing primitive: BiDi does take a box clip, so bands are probably implementable, but every property tiling rests on (does a box clip render past the viewport, is `clip.y` CSS px, do fixed elements repeat per band, are seams pixel-exact) was measured on Chrome and nowhere else, so it is not advertised. Auto-tiling never fires without `screenshot.tile`, so a Firefox capture behaves exactly as it did before. **`renderWidth`/`renderHeight` (`screenshot.renderSize`) are available on both backends** — that one is not a gap.

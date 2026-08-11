@@ -25,6 +25,28 @@ curl -s http://127.0.0.1:9222/json/version                    # smoke-check the 
 
 If **every** call errors `Unable to connect`, the port is dead — Chrome was relaunched without the flag. Launch args are ignored on an already-running Chrome, so you must fully quit and relaunch.
 
+### Firefox: launch vs. attach
+
+`--browser firefox` (or `CDP_BROWSER=firefox`) picks the Firefox/BiDi backend. By default it
+**launches** a fresh throwaway-profile Firefox per session — fine for anonymous browsing, but a
+login wall for anything that needs a real, already-authenticated session.
+
+To drive a Firefox you already have logged in, **attach** instead: start that Firefox with
+`--remote-debugging-port <port>` yourself, then pass `--connect <port|host:port|ws-url>` (or set
+`CDP_FIREFOX_ENDPOINT`) — implies the Firefox backend on its own, no need to also pass
+`--browser firefox`:
+
+```bash
+cdp --connect 9223 take_snapshot
+CDP_FIREFOX_ENDPOINT=9223 cdp take_snapshot   # MCP config: set this as an env var instead
+```
+
+This toolkit never launches or kills a Firefox you attach to; it only opens and, on dispose,
+ends the BiDi session (`session.end`). **Firefox allows only one active BiDi session at a time** —
+a second attach against the same Firefox while a session is still open now fails fast with a
+clear error (it used to hang) rather than colliding silently; if a prior client died without
+disposing cleanly (e.g. was killed), close it or restart Firefox to free the slot.
+
 ## Target selectors
 
 Every page-scoped tool takes `target`:
