@@ -1044,26 +1044,125 @@ function stamp(): string {
   return new Date(Date.now()).toISOString().replace(/[:.]/g, "-");
 }
 
+/** Upper bound on take_screenshot's `scale`. 8 already gives ~11k px off a 1390 px viewport on a
+ *  ratio-2 display, past which the driver's own 16384 px encode guard is the binding limit anyway;
+ *  the point of a ceiling here is that a fat-fingered `scale: 800` is refused instantly instead of
+ *  wedging a real browser command for minutes. Refused, not clamped, like MAX_DRAG_STEPS. */
+const MAX_SCREENSHOT_SCALE = 8;
+
+/**
+ * take_screenshot's `scale`, plus the second backend gate in this file (resolveDragMode is the
+ * first, and this follows its shape exactly). scale needs Capability "screenshot.scale", which
+ * only the Chrome driver declares: Page.captureScreenshot takes a per-call clip.scale, while
+ * WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter at all. Per ADR-001
+ * this is a PARAM-level gap, not a whole-tool one — take_screenshot stays in tools/list on Firefox
+ * because every other argument works there, and asking for a scale on Firefox is a clear
+ * validation error, never a silent 1x capture that would return an image the caller never asked
+ * for and could not tell apart from the one they wanted. Exported for the unit tests.
+ */
+export function resolveScreenshotScale(scale: number | undefined, capabilities: ReadonlySet<Capability>): number {
+  if (scale === undefined) return 1;
+  if (typeof scale !== "number" || !Number.isFinite(scale) || scale <= 0 || scale > MAX_SCREENSHOT_SCALE) {
+    throw new SharedToolError(`take_screenshot: 'scale' must be a finite number greater than 0 and at most ${MAX_SCREENSHOT_SCALE} (default 1)`);
+  }
+  if (scale !== 1 && !capabilities.has("screenshot.scale")) {
+    throw new SharedToolError(
+      "take_screenshot: 'scale' is not supported by this backend (WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter). " +
+        `Call emulate with deviceScaleFactor:${scale} first and capture at scale 1, or use --browser chrome for a per-capture scale.`,
+    );
+  }
+  return scale;
+}
+
+/** PNG: an 8-byte signature, then an IHDR chunk whose payload opens with two big-endian uint32s. */
+function pngPixelSize(b: Uint8Array, view: DataView): { width: number; height: number } | undefined {
+  if (b.length < 24) return undefined;
+  if (view.getUint32(0) !== 0x89504e47 || view.getUint32(4) !== 0x0d0a1a0a) return undefined;
+  if (String.fromCharCode(b[12]!, b[13]!, b[14]!, b[15]!) !== "IHDR") return undefined;
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+/** SOF markers carrying frame dimensions. SOF4 (0xc4 DHT), SOF8 (0xc8), SOF12 (0xcc DAC) are NOT frame headers. */
+const JPEG_SOF = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+
+/** JPEG: walk the marker segments to the first start-of-frame, which carries height then width. */
+function jpegPixelSize(b: Uint8Array, view: DataView): { width: number; height: number } | undefined {
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return undefined;
+  let i = 2;
+  while (i + 3 < b.length) {
+    if (b[i] !== 0xff) {
+      i += 1; // resync past fill bytes / padding
+      continue;
+    }
+    const marker = b[i + 1]!;
+    if (marker === 0xff) {
+      i += 1;
+      continue;
+    }
+    // Standalone markers: no length field follows.
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      i += 2;
+      continue;
+    }
+    const segLen = view.getUint16(i + 2);
+    if (JPEG_SOF.has(marker)) {
+      if (i + 9 > b.length) return undefined;
+      return { width: view.getUint16(i + 7), height: view.getUint16(i + 5) };
+    }
+    if (segLen < 2) return undefined;
+    i += 2 + segLen;
+  }
+  return undefined;
+}
+
+/**
+ * Output dimensions read from the ENCODED BYTES, never computed from the clip and the scale the
+ * caller asked for: those two disagree the moment the device pixel ratio multiplies in (a scale-1
+ * capture of a 1390 px viewport is a 2780 px PNG on a ratio-2 display), and a computed number that
+ * quietly disagrees with the file on disk is worse than no number. `undefined` when the bytes are
+ * neither PNG nor JPEG, so take_screenshot can OMIT width/height rather than report a guess.
+ *
+ * A deliberate second implementation of tools/screencast.ts's imageSize, not a shared one: this
+ * file is the browser-NEUTRAL tool layer and imports nothing from src/tools/ (that Chrome-only
+ * layer is what it replaced), and screencast.ts's copy takes a node Buffer while a driver hands
+ * this one a Uint8Array. The two are pinned by their own tests and must stay in agreement.
+ * Exported for the unit tests.
+ */
+export function imagePixelSize(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.byteLength < 4) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return pngPixelSize(bytes, view) ?? jpegPixelSize(bytes, view);
+}
+
 export async function takeScreenshot(
   driver: BrowserDriver,
   args: {
     target?: TargetSelector; format?: "png" | "jpeg"; quality?: number; fullPage?: boolean;
-    uid?: DriverUid; selector?: string; savePath?: string; returnBase64?: boolean;
+    uid?: DriverUid; selector?: string; savePath?: string; returnBase64?: boolean; scale?: number;
   } = {},
-): Promise<{ path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; base64?: string }> {
+): Promise<{ path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; scale: number; width?: number; height?: number; base64?: string }> {
   if ((args.uid !== undefined && args.uid !== "") && args.selector) throw new SharedToolError("provide exactly one of uid or selector, not both");
   const format = args.format ?? "png";
+  // Range + capability check BEFORE withPage: a scale this backend cannot honour must not claim a
+  // lease or open a socket (same reasoning as drag's resolveDragMode call site).
+  const scale = resolveScreenshotScale(args.scale, driver.capabilities);
   return withPage(driver, args.target, async (page) => {
     const clip = args.uid !== undefined || args.selector ? locatorOf(args) : undefined;
-    const { data, format: outFormat } = await page.screenshot({ format, quality: args.quality, fullPage: args.fullPage, ...(clip ? { clip } : {}) });
+    const { data, format: outFormat } = await page.screenshot({ format, quality: args.quality, fullPage: args.fullPage, scale, ...(clip ? { clip } : {}) });
     if (data.byteLength === 0) throw new SharedToolError("captureScreenshot returned empty data");
     await mkdir(ARTIFACT_DIR, { recursive: true });
     const ext = outFormat === "jpeg" ? "jpg" : "png";
     const path = args.savePath ?? join(ARTIFACT_DIR, `screenshot-${page.info.id.slice(0, 8)}-${stamp()}.${ext}`);
     await writeFile(path, Buffer.from(data));
-    const result: { path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; base64?: string } = {
-      path, bytes: data.byteLength, format: outFormat, target: target3(page.info),
+    const size = imagePixelSize(data);
+    const result: { path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; scale: number; width?: number; height?: number; base64?: string } = {
+      path, bytes: data.byteLength, format: outFormat, target: target3(page.info), scale,
     };
+    // Absent beats invented: undecodable bytes leave width/height off the result entirely.
+    if (size) {
+      result.width = size.width;
+      result.height = size.height;
+    }
     if (args.returnBase64) result.base64 = Buffer.from(data).toString("base64");
     return result;
   });
