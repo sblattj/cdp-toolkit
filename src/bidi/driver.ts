@@ -873,6 +873,20 @@ class BidiPageDriver implements PageDriver {
   // a real parity gap noted in the footer rather than smoothed over.
   async emulate(opts: EmulationOptions): Promise<{ applied: string[] }> {
     if (opts.clearOverrides) {
+      // CHECKED FOR THE SAME CROSS-PROCESS NO-OP THE CDP DRIVER HAD (see that method's comment) —
+      // by protocol semantics, since Firefox was not launched to measure this directly. The W3C
+      // WebDriver BiDi spec's "remote end steps for browsingContext.setViewport" (and the "set
+      // viewport" / "set device pixel ratio override" algorithms it calls) key EVERY step off
+      // |navigable| — the browsing context — never off which session or connection issued an
+      // earlier override: "If |viewport| is not null, set the width/height of |navigable|'s layout
+      // viewport... Otherwise, set the |navigable|'s layout viewport to the implementation-defined
+      // default", and the device-pixel-ratio twin literally does `Remove |navigable| from [device
+      // pixel ratio overrides]`. There is no per-session ownership check anywhere in that algorithm,
+      // unlike CDP's clearDeviceMetricsOverride (measured to be a no-op unless the calling
+      // connection is also the one that set the override). So a `viewport: null` from ANY BiDi
+      // connection reverts THIS navigable to its real default, regardless of which connection —
+      // this toolkit's own per-call ones included — set the override being cleared. No defect,
+      // no "set-then-clear" workaround needed; left as it was.
       await this.conn.send("emulation.setUserAgentOverride", { userAgent: null, contexts: [this.contextId] }).catch(() => undefined);
       await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: null, devicePixelRatio: null }).catch(() => undefined);
       // No override of ours left to put back: a render-size capture should restore to null.

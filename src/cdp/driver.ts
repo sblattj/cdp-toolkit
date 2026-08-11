@@ -972,18 +972,53 @@ class CdpPageDriver implements PageDriver {
   async emulate(opts: EmulationOptions): Promise<{ applied: string[] }> {
     if (opts.clearOverrides) {
       const c = () => undefined;
-      await this.conn.send("Emulation.clearDeviceMetricsOverride").catch(c);
+      // MEASURED BUG, now fixed: a bare Emulation.clearDeviceMetricsOverride on a FRESH connection
+      // is a no-op — it resolves with {} (success) while a stale override some OTHER, now-
+      // disconnected process set stays fully in force (see ViewportRecord's header comment in
+      // ../driver.ts for the two-process proof). Under this toolkit's per-call driver lifetime, the
+      // connection that runs clearOverrides is essentially NEVER the connection that ran the
+      // original emulate, so this was the COMMON case, not an edge case — `emulate` was the
+      // documented wedged-tab recovery procedure, and it was silently doing nothing.
+      //
+      // Remedy, measured to work every time (../driver.ts's ViewportRecord header, the A/B/C/D/E/F
+      // trace): "set an override, then clear it" — clearDeviceMetricsOverride only reverts to the
+      // REAL device when the clearing connection is ALSO the one that set the override, so setting
+      // one first on THIS connection makes it the override's owner and turns the clear that follows
+      // into a real one. The numbers used to "set" do not matter for correctness (clearing always
+      // lands on the real device once this connection owns an override) — but they matter for being
+      // side-effect-free, so read the layout's CURRENT size first and re-apply exactly that: the
+      // page never visibly moves, only this connection's ownership of the override changes.
+      let metricsClearError: string | undefined;
+      try {
+        await this.ensureDomain("Page");
+        const metrics = await layoutMetrics(this.conn);
+        const width =
+          metrics.cssVisualViewport?.clientWidth ?? metrics.cssLayoutViewport?.clientWidth ??
+          metrics.visualViewport?.clientWidth ?? metrics.layoutViewport?.clientWidth ?? 1;
+        const height =
+          metrics.cssVisualViewport?.clientHeight ?? metrics.cssLayoutViewport?.clientHeight ??
+          metrics.visualViewport?.clientHeight ?? metrics.layoutViewport?.clientHeight ?? 1;
+        await this.conn.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 0, mobile: false });
+        await this.conn.send("Emulation.clearDeviceMetricsOverride");
+      } catch (e) {
+        metricsClearError = e instanceof Error ? e.message : String(e);
+      }
       await this.conn.send("Emulation.setUserAgentOverride", { userAgent: "" }).catch(c);
       await this.conn.send("Emulation.setCPUThrottlingRate", { rate: 1 }).catch(c);
       await this.conn.send("Emulation.setEmulatedMedia", { media: "", features: [] }).catch(c);
       await this.ensureDomainSoft("Network");
       await this.conn.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(c);
-      // There is no override of ours left to put back, so a render-size capture should restore by
-      // clearing. NOTE the measured limit of the clear above: Emulation.clearDeviceMetricsOverride
-      // is a no-op for an override some OTHER, now-disconnected session set (verified: a fresh
-      // connection cleared a stale 800x600 and the page stayed 800x600), so this can drop the record
-      // while the browser keeps a zombie override nothing can see. A later render-size capture still
-      // ends that tab at the real device size, which is what clearOverrides claimed to do anyway.
+      if (metricsClearError !== undefined) {
+        // Honest failure, not a lie wearing success's shape: `cleared: true` must mean the page
+        // really is back at the real device, and CONTRACT.md #65 says throw on failure rather than
+        // return an error sentinel. The record is deliberately LEFT IN PLACE: we could not confirm
+        // the browser-side override is gone, so it remains the best available description of what
+        // the page may still be showing.
+        throw driverError("page-error", `emulate: could not verify the device-metrics override was cleared (${metricsClearError})`);
+      }
+      // Only forget the recorded override once the clear that supersedes it is confirmed to have
+      // actually run — a record dropped before that point could make a later render-size capture
+      // "restore" an override that never left.
       await clearViewportRecord(this.browser.scheme, this.info.id);
       return { applied: [] };
     }
