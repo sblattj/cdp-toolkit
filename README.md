@@ -265,6 +265,21 @@ cdp --connect ws://127.0.0.1:9223/session take_snapshot   # or the full ws:// UR
 
 `<endpoint>` accepts three spellings, all normalized to a ws URL: a bare port (`9223`), `host:port` (`127.0.0.1:9223`), or a full `ws://`/`wss://` URL. `--connect`/`CDP_FIREFOX_ENDPOINT` implies the Firefox backend on its own and errors against an explicit `--browser chrome`.
 
+**On Linux, and over SSH to a remote host.** Attach is a plain loopback WebSocket, so it is byte-identical on every OS; only the *launch* half is platform-specific. On Linux the binary is `firefox` on `PATH` (or `/usr/bin/firefox`), and the same `--remote-debugging-port 9223` opens the endpoint. One catch worth stating plainly: if your everyday Firefox is already running, relaunching it with the flag just focuses the open window and opens no port (see "Attaching is not relaunching" below). To attach to your real logged-in profile, quit Firefox first and reopen it with the flag; to run beside your daily browser instead, use the separate `--no-remote -profile` instance shown above.
+
+When Firefox runs on a different host than cdp-toolkit (a remote box, a container), its debug port binds to loopback *there*, so forward the port and attach to localhost:
+
+```bash
+ssh -L 9223:127.0.0.1:9223 you@the-box     # forward the remote debug port
+cdp --connect 9223 take_snapshot           # then attach as if it were local
+```
+
+For Claude Code, register the MCP server with the endpoint in one line (the env var implies the Firefox backend):
+
+```bash
+claude mcp add cdp-toolkit -e CDP_FIREFOX_ENDPOINT=9223 -- npx -y cdp-toolkit
+```
+
 **Firefox allows only one active WebDriver BiDi session at a time.** A second `session.new` against the same endpoint fails outright while a first session is open. Disposing cleanly (the normal exit path, both CLI and MCP shutdown) sends `session.end` first, which frees the slot for the next attach. A client that dies **without** disposing — a `SIGKILL`, a crash — leaves the slot occupied: Firefox does not reap an abandoned session on its own. A colliding attach against an occupied slot now fails fast with an actionable error naming the endpoint, rather than hanging forever (fixed in 1.9.4); recover by closing the other client or restarting Firefox.
 
 **Attaching is not relaunching.** The one thing that is genuinely impossible is handing a debug port to an *already-running* Firefox process after the fact: the `--remote-debugging-port` flag only takes effect on a process's original launch, so relaunching the `firefox` binary against a running instance hands off to it and exits silently, opening no port (verified against Firefox 153.0.3). That is a real, narrow limitation of the Firefox binary itself. It is not the same claim as "Firefox cannot be attached to" — a Firefox that was launched *with* the debug port open, whether by this toolkit or by your own hand, exposes a plain BiDi endpoint that any number of fresh clients can connect to later, which is exactly what `--connect`/`CDP_FIREFOX_ENDPOINT` does.
