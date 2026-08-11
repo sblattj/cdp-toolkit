@@ -133,6 +133,57 @@ written down.
 
 ### Fixed
 
+- **An element-clipped `take_screenshot` returned the wrong region of the page
+  whenever the element was not already on screen.** `--selector` and `--uid`
+  both, at every page height tried. The mechanism is a frame mismatch worth
+  learning on its own: `DOM.getBoxModel` answers in the **viewport** frame (its
+  quad matched `getBoundingClientRect()` to the pixel every time), but
+  `captureBeyondViewport: true` — hardcoded on every capture here — makes
+  Chrome read `clip.x`/`clip.y` as **document** coordinates. The driver scrolled
+  the element into view with `DOM.scrollIntoViewIfNeeded` and then handed
+  Chrome the element's now-small *on-screen* y as if it were its position in
+  the document, so the capture landed within one viewport height of the top of
+  the page no matter how far down the element really was. Measured on
+  Chrome 151.0.7922.76, a 10,000 CSS px page with the target at y=5000: the
+  scroll settled at `scrollY` 4593 with `rectTop` 407, and the returned
+  2780×500 PNG was `document[407..657]` — a flat slab of page background with
+  no part of the element in it. Identical failure at the two sizes this bug was
+  first reported at, 16,578 px (`scrollY` 14593) and 140,982 px (`scrollY`
+  69593). Starting the same call from `scrollY` 4950 instead — element already
+  visible at `rectTop` 50, so the driver's own scroll is a no-op — returned
+  `document[50..300]`: the document's top banner for its first 100 CSS px, then
+  background, boundary on the predicted pixel. **The fix is the frame
+  conversion**: the page's scroll offset is added to the box-model quad, in CSS
+  px (`cssVisualViewport.pageX`/`pageY`), read **after** the scroll settles and
+  off the same single `Page.getLayoutMetrics` every capture already pays for —
+  reading it before the scroll would correct by 0 on a freshly navigated tab
+  and change nothing. Those same three page heights now return the element
+  itself, and the three starting scroll positions 0 / 4950 / 9000 return one
+  identical sha256 `54b96705…` instead of two different wrong images. `scale`
+  (5560×1000 at `scale 2`), `renderWidth`/`renderHeight` (1600×500 at 800×600,
+  `renderRestored: true`), `tile` and the `uid` path all ride the corrected
+  rect unchanged, and the short-page control — element inside the initial
+  viewport, no scroll needed, offset 0 — is byte-for-byte what it was.
+  **Two honest notes.** First, the units are a live trap: on a scrolled page
+  `visualViewport.pageX`/`pageY` come back in **CSS** px (700/4593) while
+  `clientWidth`/`clientHeight` on that very same rect are **device** px
+  (2780×2128), and only `layoutViewport` reports the offset in device px
+  (1400/9186) — so "no `css` prefix means device px" is false for exactly the
+  fields this fix reads, and a plausible implementation that divided them by
+  the pixel ratio would have halved the correction. Second, this release's own
+  regression check could not have caught it: the element-clip A/B recorded
+  under *Changed* above compared each commit against its parent's binaries and
+  came back byte-identical **because both sides were wrong the same way** — a
+  same-vs-same check is blind to a bug older than both of its arms.
+  `DOM.scrollIntoViewIfNeeded` was kept rather than dropped, and that was
+  measured too, not assumed: with `captureBeyondViewport` nothing has to be on
+  screen to be captured, but on a fixture whose target fills itself from an
+  `IntersectionObserver`, the capture with the scroll reads "LAZY CONTENT
+  LOADED" and the same capture without it returns the unloaded placeholder in
+  the correct region — the same caveat the tiling notes below record, from the
+  other side. WebDriver BiDi never had this defect: it passes
+  `clip: {type: "element"}` and does no coordinate arithmetic of its own.
+
 - **`emulate {clearOverrides: true}` reported `"cleared": true` while clearing
   nothing.** Reproduced across three separate CLI processes: process A set
   802×601, process B cleared and reported success, process C read back
