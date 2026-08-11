@@ -30,9 +30,11 @@ import {
   REQUIRED_CAPABILITIES, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, viewportRecordFile, writeViewportRecord,
 } from "../src/driver.ts";
 import { imagePixelSize, resolveRenderSize, resolveScreenshotScale, takeScreenshot } from "../src/shared-tools.ts";
-import { createCdpDriver } from "../src/cdp/driver.ts";
+import { CdpPageDriver, createCdpDriver } from "../src/cdp/driver.ts";
 import { createFirefoxDriver } from "../src/bidi/driver.ts";
 import { toolAvailability } from "../src/capabilities.ts";
+import type { CdpConnection } from "../src/client.ts";
+import type { Target } from "../src/types.ts";
 
 /* --------------------------------- image builders --------------------------------- */
 
@@ -368,6 +370,109 @@ describe("viewport record (what restore puts back)", () => {
     // Present but missing a side: a viewport is two numbers, so half of one is not a viewport.
     await writeFile(viewportRecordFile("cdp", "TAB-HALF"), JSON.stringify({ width: 800 }), "utf8");
     expect(await readViewportRecord("cdp", "TAB-HALF")).toBeUndefined();
+  });
+});
+
+/**
+ * emulate({clearOverrides:true}) — the MEASURED cross-process no-op fix.
+ *
+ * Live-fire (two real CLI processes against Chrome/151.0.7922.76, pasted in the commit message)
+ * proved the bug: process A sets a distinctive 802x601 override, a FRESH process B runs
+ * clearOverrides, and the tab stays at 802x601 while the result reports `"cleared": true`. Root
+ * cause: Emulation.clearDeviceMetricsOverride is a no-op unless the CLEARING connection is also
+ * the SETTING connection, and this toolkit's per-call driver lifetime means those are essentially
+ * never the same connection. Live-fire also proved the remedy — set an override on the clearing
+ * connection first, then clear it — reliably lands on the real device every time.
+ *
+ * These tests stub CdpConnection.send to pin down what the driver-level unit test above cannot:
+ * the exact CALL ORDER (set before clear, not the reverse, and not clear-only), and the HONESTY
+ * property that a clear the driver could not verify throws rather than returning `{applied: []}`
+ * for the caller (shared-tools.ts's emulate()) to relabel as `cleared: true`.
+ */
+function stubCdpConn(onSend?: (method: string, params?: Record<string, unknown>) => unknown): { conn: CdpConnection; calls: Array<{ method: string; params?: Record<string, unknown> }> } {
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  const conn = {
+    async send(method: string, params?: Record<string, unknown>) {
+      calls.push({ method, params });
+      return onSend ? onSend(method, params) : {};
+    },
+  } as unknown as CdpConnection;
+  return { conn, calls };
+}
+function fakeTarget(id: string): Target {
+  return { id, type: "page", title: "t", url: "about:blank", webSocketDebuggerUrl: "ws://x" };
+}
+const FAKE_CDP_BROWSER = { scheme: "cdp" } as unknown as BrowserDriver;
+const METRICS_1390x1064 = { cssVisualViewport: { clientWidth: 1390, clientHeight: 1064 } };
+
+describe("CdpPageDriver.emulate({clearOverrides:true})", () => {
+  let dir = "";
+  const previous = process.env.CDP_ARTIFACT_DIR;
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cdp-clear-fix-"));
+    process.env.CDP_ARTIFACT_DIR = dir;
+  });
+  afterAll(async () => {
+    if (previous === undefined) delete process.env.CDP_ARTIFACT_DIR;
+    else process.env.CDP_ARTIFACT_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("sets a device-metrics override on THIS connection BEFORE clearing it, reusing the size it just read", async () => {
+    const { conn, calls } = stubCdpConn((method) => (method === "Page.getLayoutMetrics" ? METRICS_1390x1064 : {}));
+    const driver = new CdpPageDriver(conn, fakeTarget("T-order"), FAKE_CDP_BROWSER);
+    await expect(driver.emulate({ clearOverrides: true })).resolves.toEqual({ applied: [] });
+    const setIdx = calls.findIndex((c) => c.method === "Emulation.setDeviceMetricsOverride");
+    const clearIdx = calls.findIndex((c) => c.method === "Emulation.clearDeviceMetricsOverride");
+    expect(setIdx).toBeGreaterThanOrEqual(0);
+    expect(clearIdx).toBeGreaterThan(setIdx);
+    // Reused exactly what Page.getLayoutMetrics just reported: nothing a caller could observe moves.
+    expect(calls[setIdx]?.params).toEqual({ width: 1390, height: 1064, deviceScaleFactor: 0, mobile: false });
+  });
+
+  test("a record from a DIFFERENT process is forgotten only once the clear is confirmed to have run", async () => {
+    const { conn } = stubCdpConn((method) => (method === "Page.getLayoutMetrics" ? METRICS_1390x1064 : {}));
+    await writeViewportRecord("cdp", "T-record", { width: 802, height: 601, deviceScaleFactor: 0, mobile: false });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-record"), FAKE_CDP_BROWSER);
+    await driver.emulate({ clearOverrides: true });
+    expect(await readViewportRecord("cdp", "T-record")).toBeUndefined();
+  });
+
+  test("HONESTY: a clear that could not be verified THROWS rather than reporting success", async () => {
+    const { conn } = stubCdpConn((method) => {
+      if (method === "Page.getLayoutMetrics") return METRICS_1390x1064;
+      if (method === "Emulation.clearDeviceMetricsOverride") throw new Error("target closed");
+      return {};
+    });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-fail"), FAKE_CDP_BROWSER);
+    await expect(driver.emulate({ clearOverrides: true })).rejects.toThrow(/could not verify.*cleared/i);
+  });
+
+  test("HONESTY: on that failure the record is LEFT IN PLACE, not silently dropped", async () => {
+    const { conn } = stubCdpConn((method) => {
+      if (method === "Page.getLayoutMetrics") return METRICS_1390x1064;
+      if (method === "Emulation.setDeviceMetricsOverride") throw new Error("detached");
+      return {};
+    });
+    await writeViewportRecord("cdp", "T-fail-record", { width: 777, height: 555, deviceScaleFactor: 0, mobile: false });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-fail-record"), FAKE_CDP_BROWSER);
+    await expect(driver.emulate({ clearOverrides: true })).rejects.toThrow();
+    expect(await readViewportRecord("cdp", "T-fail-record")).toEqual({ width: 777, height: 555, deviceScaleFactor: 0, mobile: false });
+  });
+
+  test("even on failure, the OTHER overrides (userAgent/cpu/media/network) are still attempted best-effort", async () => {
+    const { conn, calls } = stubCdpConn((method) => {
+      if (method === "Page.getLayoutMetrics") return METRICS_1390x1064;
+      if (method === "Emulation.clearDeviceMetricsOverride") throw new Error("boom");
+      return {};
+    });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-besteffort"), FAKE_CDP_BROWSER);
+    await driver.emulate({ clearOverrides: true }).catch(() => undefined);
+    const methods = calls.map((c) => c.method);
+    expect(methods).toContain("Emulation.setUserAgentOverride");
+    expect(methods).toContain("Emulation.setCPUThrottlingRate");
+    expect(methods).toContain("Emulation.setEmulatedMedia");
+    expect(methods).toContain("Network.emulateNetworkConditions");
   });
 });
 
