@@ -78,6 +78,62 @@ export async function click(args: ClickArgs): Promise<unknown>;
 - Beacon sessions (`src/activity.ts`, `src/cdp/driver.ts`): a `BeaconSessions` pool of held Chrome connections, one per tab with an installed activity beacon, bounded at 32 with oldest-first eviction — the same module-scope pattern `recorder.ts`/`network_mock.ts` already use for their own persistent per-target sessions. Exists only because `Page.addScriptToEvaluateOnNewDocument`'s registration dies with the connection that made it (verified against a live browser, not assumed), so surviving navigation under this toolkit's per-call lifetime requires holding a connection open; eviction degrades (the current document's listeners keep answering, only the next navigation's re-arm is lost) rather than breaking. Firefox needs no equivalent: its `LifetimeModel` is `"session"`, so a `script.addPreloadScript` registration on the one memoized BiDi connection per port already lives as long as that connection does.
 - The browser-session connection (`src/tools/browser-session.ts`): one lazily-opened, module-scoped connection to the CDP browser endpoint (not a page endpoint), held open for the process's life, backing `wait_for_download` and `grant_permissions`. Opened only on first use of either tool, so a session that never touches downloads or permissions pays nothing. Exists because `Browser.setDownloadBehavior` and `Browser.grantPermissions` were measured — probed against a real browser before either tool was written — to NOT persist past the arming/granting client's disconnect, which this toolkit's per-call connection lifetime would otherwise hit on every single call. Both tools are therefore MCP-server-only capabilities, the same category as `performance_start_trace`/`stop_screen_recording`'s persistent-connection requirement, for the same underlying reason.
 
+## Firefox backend: launch vs. attach (`src/backend.ts`, `src/bidi/driver.ts`)
+
+The Firefox/BiDi backend runs in one of two modes, selected by `resolveBackend(argv, env)`
+(`src/backend.ts`) and shared by `cli.ts` and `mcp.ts`. The two modes differ in exactly one
+thing — process ownership — and that difference must never blur:
+
+- **LAUNCH** (default, no endpoint resolved): `startFirefoxSession()` calls `launchFirefox()`
+  (`src/bidi/launch.ts`), which owns the spawned process end to end. `dispose()` closes the BiDi
+  driver **then** kills the process, in that order, so no invocation can leak a process.
+- **ATTACH** (an endpoint was resolved): `startFirefoxSession({ endpoint })` calls
+  `createFirefoxDriverForEndpoint(wsUrl)` (`src/bidi/driver.ts`) directly — no `launchFirefox`,
+  no process handle at all. `dispose()` is `driver.dispose()` only: it sends `session.end` (see
+  below) then closes the socket. **It must never call a process `close()`; there is no process
+  to close.** The Firefox the user started outlives every attach session against it.
+
+**Config surface** (`resolveFirefoxEndpoint`, `normalizeBidiEndpoint`, `resolveBackend` in
+`src/backend.ts`):
+
+- env `CDP_FIREFOX_ENDPOINT`, CLI flag `--connect <endpoint>` — flag beats env (same precedence
+  as `--browser`/`CDP_BROWSER`). An empty env value counts as unset, so an exported-but-blank
+  `CDP_FIREFOX_ENDPOINT` does not force attach mode.
+- `<endpoint>` accepts three spellings, all normalized by `normalizeBidiEndpoint` to a ws URL:
+  bare port (`9223` → `ws://127.0.0.1:9223/session`), `host:port` (`127.0.0.1:9223` → same
+  shape), or a full `ws://`/`wss://` URL (used verbatim; a bare origin with no path or `/` gets
+  `/session` appended, since Firefox serves BiDi there). Invalid input (bad URL, non-numeric,
+  port outside 1–65535) throws with the accepted spellings named in the message rather than
+  reaching the transport as an opaque connect timeout.
+- An endpoint **implies** `kind: "firefox"` in the returned `BackendSelection` — there is nothing
+  else `--connect`/`CDP_FIREFOX_ENDPOINT` could mean. `resolveBackend` throws
+  (`"--connect / CDP_FIREFOX_ENDPOINT is a Firefox attach option and is not valid with the
+  chrome backend"`) when an endpoint is present **and** the browser was explicitly set to chrome
+  (`--browser chrome` or `CDP_BROWSER=chrome`); an endpoint alongside no explicit `--browser` (or
+  an explicit `--browser firefox`) silently selects Firefox as always.
+- `stripConnectFlag` mirrors `stripBrowserFlag`: `cli.ts` strips `--connect <value>` out of argv
+  before tool-arg parsing so it never reaches a tool's own args.
+
+**The single-BiDi-session constraint.** Firefox allows exactly one active WebDriver BiDi session
+per process; a second `session.new` against the same Firefox fails with `session.new: Maximum
+number of active sessions` (verified against Firefox 153.0.3). `getConnection` in
+`src/bidi/driver.ts` catches that specific message and rethrows via the local `driverError`
+helper (code `"disconnected"`) naming the endpoint and explaining the fix (close the other
+client, or restart Firefox), instead of letting the raw wire message reach the caller. Closing the BiDi socket alone does
+**not** free the slot — only `session.end` does, which is why `BidiBrowserDriver.dispose()`
+sends `session.end` (best-effort, swallowing any error — harmless if the socket is already gone)
+**before** closing the connection. A client that dies without a clean dispose (e.g. `SIGKILL`)
+leaves the slot occupied until Firefox restarts: this toolkit does not and cannot force-end a
+session it does not own, since there is no id to end. This is why a colliding attach now fails
+fast with an actionable error instead of hanging forever (the pre-1.9.4 behavior).
+
+**Driver identity moved from port to endpoint.** `BidiBrowserDriver` is keyed by a BiDi ws
+endpoint string (`this.endpoint`), not a `port: number`: a launched Firefox's endpoint is
+`ws://127.0.0.1:${port}/session` (via `createFirefoxDriver(port)`), while an attach endpoint may
+carry a different host, port, or path entirely (via `createFirefoxDriverForEndpoint(wsUrl)`).
+Both funnel into the same `connections: Map<string, BidiConnection>` keyed by that string. Any
+future change to connection identity must account for both call shapes.
+
 ## The element-reference scheme (READ if you touch snapshot or input)
 
 A `Uid` **is** a CDP `backendDOMNodeId` (a number). This makes refs stateless:
