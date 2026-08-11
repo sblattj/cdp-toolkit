@@ -1,15 +1,22 @@
 /**
  * Firefox launcher for the WebDriver BiDi backend.
  *
- * Why this exists at all: unlike Chrome, there is no attach-to-the-user's-
- * running-browser story here. You cannot add --remote-debugging-port to an
- * already-running Firefox: relaunching the binary with that flag hands off
- * to the running instance and exits silently, opening no port. The flag
- * only takes effect on the ORIGINAL launch of a process. That means this
- * module must own full process lifetime, start it, own its pid, and reap
- * it, because there is no later point at which a debug port can be bolted
- * on. Do not "simplify" this into an attach-to-running-browser helper; that
- * shape cannot work on Firefox and was verified against Firefox 153.0.3.
+ * What THIS module does: it owns full process lifetime for the Firefox instances it starts —
+ * launches the binary, holds its pid, and reaps it. That is required because there is no live
+ * handoff for the debug port: you cannot RELAUNCH an already-running Firefox with
+ * --remote-debugging-port and have it take effect — the relaunch hands off to the running
+ * instance and exits silently, opening no port. The flag only takes effect on the ORIGINAL
+ * launch of a process, which is why this launcher must be the one to start it. Do not
+ * "simplify" this into a relaunch-to-open-a-port helper; that shape cannot work on Firefox and
+ * was verified against Firefox 153.0.3.
+ *
+ * What this does NOT mean: that Firefox "cannot be attached to" at all. A Firefox that was
+ * ORIGINALLY launched with --remote-debugging-port — by this module, or by hand by the user —
+ * exposes a plain BiDi ws endpoint that a fresh client CAN connect to later, any number of
+ * times. That attach path is real, supported, and separate from this file: see backend.ts's
+ * `startFirefoxSession({ endpoint })` and `createFirefoxDriverForEndpoint` (bidi/driver.ts),
+ * which is exactly how cdp-toolkit connects to a user-launched Firefox to see their real
+ * logged-in profile instead of a throwaway one.
  *
  * Zero runtime dependencies: only node:child_process, node:fs, node:net,
  * node:os and node:path.
@@ -185,8 +192,11 @@ export async function launchFirefox(opts: LaunchFirefoxOptions = {}): Promise<La
 /*
  * CDP methods/domains used: none, this module speaks no browser protocol,
  * it only launches the process and confirms the debug port is listening.
- * Parity gap vs the Chrome-side story: there is no equivalent of attaching
- * to an already-running browser instance the way client.ts can resolve a
- * target on an already-listening port 9222. Firefox always requires this
- * launcher to have started the process.
+ * This launcher itself has no attach story — it only ever starts fresh processes — but that is
+ * a scope limit of THIS FILE, not a Firefox limit: see backend.ts's `startFirefoxSession({
+ * endpoint })` / `createFirefoxDriverForEndpoint` (bidi/driver.ts) for the supported attach path,
+ * which connects to the ws endpoint of a Firefox that was launched (by this module or by hand)
+ * with --remote-debugging-port. Still unsupported, and unsupportable on Firefox, is relaunching
+ * the binary against an already-running instance to open a port after the fact (header above) —
+ * that is a different operation from attaching to a port that is already open.
  */

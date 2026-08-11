@@ -23,7 +23,7 @@
  *   - --list  -> all tool names (one per line) to stdout, exit 0.
  */
 import { TOOLS, TOOL_NAMES, type ToolName } from "./index.ts";
-import { resolveBrowserKind, stripBrowserFlag, startFirefoxSession } from "./backend.ts";
+import { resolveBackend, stripBrowserFlag, stripConnectFlag, startFirefoxSession } from "./backend.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
@@ -32,7 +32,7 @@ import { MANIFEST } from "./manifest.ts";
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
 Usage:
-  bun run src/cli.ts <tool> [--browser chrome|firefox] [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
+  bun run src/cli.ts <tool> [--browser chrome|firefox] [--connect <port|host:port|ws-url>] [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
   bun run src/cli.ts --list [--browser chrome|firefox]
   bun run src/cli.ts --capabilities [--browser chrome|firefox]
   bun run src/cli.ts --help | -h                 # this message
@@ -47,14 +47,23 @@ Examples:
   bun run src/cli.ts --browser firefox take_snapshot
   bun run src/cli.ts --capabilities --browser firefox
   bun run src/cli.ts take_screenshot --help
+  bun run src/cli.ts --connect 9223 take_snapshot     # attach to your own logged-in Firefox (implies --browser firefox)
 
 --help/-h is recognised ANYWHERE in argv, before any tool dispatch: it never touches the
 browser (no CDP connection, no lease, no file written) and is never passed through as a tool
 argument, even when it appears after a tool name.
 
 Backend selection: --browser chrome|firefox, else the CDP_BROWSER env var, else "chrome" (default,
-zero behavior change for existing users). Firefox is LAUNCHED per invocation (it cannot be attached
-to), used for exactly one tool call, then disposed before the process exits.
+zero behavior change for existing users). Firefox runs in one of two modes:
+  - LAUNCH (default): a fresh throwaway-profile Firefox is spawned for this one invocation, used
+    for exactly one tool call, then disposed (session ended, process killed) before the process
+    exits. This is a login wall for anything that needs your real session.
+  - ATTACH (--connect <port|host:port|ws-url>, or the CDP_FIREFOX_ENDPOINT env var): connects to a
+    Firefox YOU already started with --remote-debugging-port, so tools see your real logged-in
+    profile. This process never launches or kills that Firefox; dispose only ends the BiDi session.
+    --connect implies --browser firefox and conflicts with an explicit --browser chrome. Firefox
+    allows only one active BiDi session at a time, so a client that dies without disposing cleanly
+    (e.g. SIGKILL) can leave the slot occupied until Firefox restarts.
 
 Target selector grammar: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>
   plus worker:<substr> (Chrome only) for evaluate_script, list_network_requests, get_network_request
@@ -201,8 +210,8 @@ function printToolHelp(name: ToolName): void {
 
 async function main(): Promise<number> {
   const rawArgv = process.argv.slice(2);
-  const browser = resolveBrowserKind(rawArgv);
-  const parsed = parseArgv(stripBrowserFlag(rawArgv));
+  const { kind: browser, endpoint } = resolveBackend(rawArgv);
+  const parsed = parseArgv(stripConnectFlag(stripBrowserFlag(rawArgv)));
 
   // --help/-h short-circuits BEFORE any availability lookup or backend touch — no CDP
   // connection, no lease, no file written. This must be the very first thing checked in
@@ -292,14 +301,15 @@ async function main(): Promise<number> {
       return 0;
     }
 
-    // Firefox: one process per invocation. Launch, run exactly one tool call, always dispose,
-    // even if the tool call itself throws, so the spawned Firefox process never leaks.
+    // Firefox: one process per invocation. Launch (or, with --connect/CDP_FIREFOX_ENDPOINT,
+    // attach), run exactly one tool call, always dispose, even if the tool call itself throws —
+    // in launch mode that reaps the spawned process; in attach mode it only ends the BiDi session.
     const neutralFn = FIREFOX_TOOLS[tool];
     if (!neutralFn) {
       process.stderr.write(`${JSON.stringify({ error: `tool '${tool}' has no Firefox implementation wired` })}\n`);
       return 1;
     }
-    const session = await startFirefoxSession();
+    const session = await startFirefoxSession({ endpoint });
     try {
       const result = await neutralFn(session.driver, parsed.args as never);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
