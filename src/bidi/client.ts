@@ -286,12 +286,51 @@ export class BidiConnection {
 }
 
 /**
- * Open a BiDi connection to a Firefox debug port and create its session in
- * one step, per the established endpoint shape ws://127.0.0.1:<port>/session.
- * This module does not launch Firefox; pass a port from launch.ts's
- * launchFirefox() or any other running Firefox with the debug port open.
+ * Open a BiDi connection to an explicit WebSocket endpoint and create its
+ * session in one step. THE URL IS THE IDENTITY: a Firefox this toolkit
+ * launched is ws://127.0.0.1:<port>/session, but attach mode (backend.ts's
+ * normalizeBidiEndpoint) may hand over any host/port/path the user's own
+ * Firefox is listening on, so nothing here reconstructs a URL from a port.
+ * This module never launches Firefox; the endpoint must already be listening.
  * The returned connection is retained once (holders === 1): the caller owns
  * that first retain and must release() or dispose() it.
+ *
+ * NOTE for attach callers: Firefox permits exactly ONE active BiDi session, and
+ * closing a socket does NOT free that slot (verified on 153.0.3) — only
+ * session.end does. A second session.new against a Firefox that still holds an
+ * abandoned session fails with "Maximum number of active sessions"; driver.ts
+ * turns that into an actionable "disconnected" DriverError.
+ */
+export async function connectBidiSessionUrl(
+  wsUrl: string,
+  opts: {
+    timeoutMs?: number;
+    capabilities?: BidiCommands["session.new"]["params"]["capabilities"];
+  } = {},
+): Promise<BidiConnection> {
+  const conn = new BidiConnection(wsUrl, { timeoutMs: opts.timeoutMs });
+  await conn.connect();
+  try {
+    await conn.newSession(opts.capabilities ?? {});
+  } catch (e) {
+    // A REJECTED session.new still leaves an OPEN socket, and an open WebSocket is a live handle
+    // that keeps the event loop alive: without this the CLI printed "Maximum number of active
+    // sessions" and then hung forever instead of exiting (measured against Firefox 153.0.3 while
+    // a second client held the one session slot). Close it before rethrowing so a failed connect
+    // costs an error and nothing else.
+    conn.dispose();
+    throw e;
+  }
+  conn.retain();
+  return conn;
+}
+
+/**
+ * Port-shaped convenience wrapper over connectBidiSessionUrl, for the launched
+ * Firefox whose endpoint is always the loopback shape ws://127.0.0.1:<port>/session.
+ * Pass a port from launch.ts's launchFirefox() or any other running Firefox with
+ * the debug port open on loopback. Kept exported for back-compat with callers
+ * that only ever hold a port.
  */
 export async function connectBidiSession(
   port: number,
@@ -300,11 +339,7 @@ export async function connectBidiSession(
     capabilities?: BidiCommands["session.new"]["params"]["capabilities"];
   } = {},
 ): Promise<BidiConnection> {
-  const conn = new BidiConnection(`ws://127.0.0.1:${port}/session`, { timeoutMs: opts.timeoutMs });
-  await conn.connect();
-  await conn.newSession(opts.capabilities ?? {});
-  conn.retain();
-  return conn;
+  return connectBidiSessionUrl(`ws://127.0.0.1:${port}/session`, opts);
 }
 
 /*
@@ -314,6 +349,9 @@ export async function connectBidiSession(
  * typed send()/on()/waitFor() surface above but this file itself calls none
  * of their commands directly, that is left to the driver and tool layers
  * built on top. Parity gap vs client.ts: there is no browserWsUrl/listTargets
- * equivalent here, BiDi's endpoint discovery is the single fixed
- * ws://127.0.0.1:<port>/session path, so no HTTP discovery step exists.
+ * equivalent here and no HTTP discovery step at all — the ws URL IS the
+ * endpoint identity. For a Firefox this toolkit launched that URL is derived
+ * from a port (the fixed loopback shape ws://127.0.0.1:<port>/session); for an
+ * attached one it is whatever the user configured, so it may carry a different
+ * host, port, or path and must be passed through verbatim.
  */
