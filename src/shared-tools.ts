@@ -1074,6 +1074,54 @@ export function resolveScreenshotScale(scale: number | undefined, capabilities: 
   return scale;
 }
 
+/** Upper bound on a render-size side, in CSS px. Deliberately Chrome's own 16384 px per-side encode
+ *  ceiling: a viewport wider than the widest image the browser can encode cannot produce a
+ *  full-width capture of itself anyway, so anything past it is a typo rather than an intent. The
+ *  binding limit in practice is lower and is enforced where it can actually be computed — the
+ *  driver's assertClipEncodable, on the post-override numbers, since a 8192 css-px render is already
+ *  16384 device px on a ratio-2 display. Refused, not clamped, like MAX_DRAG_STEPS. */
+const MAX_RENDER_SIZE_PX = 16384;
+
+/**
+ * take_screenshot's `renderWidth`/`renderHeight`, and the third backend gate in this file
+ * (resolveDragMode is the first, resolveScreenshotScale the second, and this follows their shape).
+ *
+ * REQUIRED TOGETHER, mirroring the "device metrics require both width and height" rule emulate()
+ * has always had: a viewport is two numbers, and honouring one while inventing the other would
+ * render at a size the caller never named and never sees in the result.
+ *
+ * Unlike `scale` this is NOT a Chrome-only capability — both drivers ride their own viewport
+ * emulation for it — so on today's backends the capability arm never fires. It is written anyway
+ * because ADR-001 says availability is declared, not assumed: a future backend that cannot emulate
+ * a viewport must refuse out loud here rather than silently capture at the tab's real size, which
+ * would return a picture indistinguishable from the one the caller asked for. Exported for the tests.
+ */
+export function resolveRenderSize(
+  renderWidth: number | undefined,
+  renderHeight: number | undefined,
+  capabilities: ReadonlySet<Capability>,
+): { width: number; height: number } | undefined {
+  if (renderWidth === undefined && renderHeight === undefined) return undefined;
+  if (renderWidth === undefined || renderHeight === undefined) {
+    throw new SharedToolError(
+      "take_screenshot: 'renderWidth' and 'renderHeight' are required together (a viewport is two numbers; " +
+        `got ${renderWidth === undefined ? "only renderHeight" : "only renderWidth"})`,
+    );
+  }
+  for (const [name, value] of [["renderWidth", renderWidth], ["renderHeight", renderHeight]] as const) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_RENDER_SIZE_PX) {
+      throw new SharedToolError(`take_screenshot: '${name}' must be an integer between 1 and ${MAX_RENDER_SIZE_PX} css px (got ${JSON.stringify(value)})`);
+    }
+  }
+  if (!capabilities.has("screenshot.renderSize")) {
+    throw new SharedToolError(
+      "take_screenshot: 'renderWidth'/'renderHeight' are not supported by this backend (it cannot emulate a viewport for a capture). " +
+        `Call emulate with width:${renderWidth}, height:${renderHeight} first, capture, then restore the viewport yourself.`,
+    );
+  }
+  return { width: renderWidth, height: renderHeight };
+}
+
 /** PNG: an 8-byte signature, then an IHDR chunk whose payload opens with two big-endian uint32s. */
 function pngPixelSize(b: Uint8Array, view: DataView): { width: number; height: number } | undefined {
   if (b.length < 24) return undefined;
@@ -1134,34 +1182,76 @@ export function imagePixelSize(bytes: Uint8Array): { width: number; height: numb
   return pngPixelSize(bytes, view) ?? jpegPixelSize(bytes, view);
 }
 
+/**
+ * take_screenshot's result. Named rather than inlined now that it carries the render-size outcome:
+ * the shape appears three times in this function (signature, literal, and the widening the optional
+ * fields need) and a fourth divergent copy is how a field goes missing.
+ *
+ * `scale` is ALWAYS present; `width`/`height` only when the bytes decoded; the three render-size
+ * fields only when a render size was applied. Absent beats invented, everywhere here.
+ */
+export interface ScreenshotToolResult {
+  path: string;
+  bytes: number;
+  format: "png" | "jpeg";
+  target: { id: string; url: string; title: string };
+  scale: number;
+  width?: number;
+  height?: number;
+  /** The emulated viewport the capture ran at. */
+  renderSize?: { width: number; height: number };
+  /** False means the page is STILL emulated at renderSize: the caller has to put it back. */
+  renderRestored?: boolean;
+  renderRestoreError?: string;
+  base64?: string;
+}
+
 export async function takeScreenshot(
   driver: BrowserDriver,
   args: {
     target?: TargetSelector; format?: "png" | "jpeg"; quality?: number; fullPage?: boolean;
     uid?: DriverUid; selector?: string; savePath?: string; returnBase64?: boolean; scale?: number;
+    renderWidth?: number; renderHeight?: number;
   } = {},
-): Promise<{ path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; scale: number; width?: number; height?: number; base64?: string }> {
+): Promise<ScreenshotToolResult> {
   if ((args.uid !== undefined && args.uid !== "") && args.selector) throw new SharedToolError("provide exactly one of uid or selector, not both");
   const format = args.format ?? "png";
-  // Range + capability check BEFORE withPage: a scale this backend cannot honour must not claim a
-  // lease or open a socket (same reasoning as drag's resolveDragMode call site).
+  // Range + capability checks BEFORE withPage: an argument this backend cannot honour must not claim
+  // a lease or open a socket (same reasoning as drag's resolveDragMode call site). For the render
+  // size that is stronger than tidiness — the refusal happens before any viewport is emulated, so a
+  // rejected call cannot be the one that leaves a page mutated.
   const scale = resolveScreenshotScale(args.scale, driver.capabilities);
+  const renderSize = resolveRenderSize(args.renderWidth, args.renderHeight, driver.capabilities);
   return withPage(driver, args.target, async (page) => {
     const clip = args.uid !== undefined || args.selector ? locatorOf(args) : undefined;
-    const { data, format: outFormat } = await page.screenshot({ format, quality: args.quality, fullPage: args.fullPage, scale, ...(clip ? { clip } : {}) });
+    const shot = await page.screenshot({
+      format, quality: args.quality, fullPage: args.fullPage, scale,
+      ...(clip ? { clip } : {}),
+      ...(renderSize ? { renderWidth: renderSize.width, renderHeight: renderSize.height } : {}),
+    });
+    const { data, format: outFormat } = shot;
     if (data.byteLength === 0) throw new SharedToolError("captureScreenshot returned empty data");
     await mkdir(ARTIFACT_DIR, { recursive: true });
     const ext = outFormat === "jpeg" ? "jpg" : "png";
     const path = args.savePath ?? join(ARTIFACT_DIR, `screenshot-${page.info.id.slice(0, 8)}-${stamp()}.${ext}`);
     await writeFile(path, Buffer.from(data));
     const size = imagePixelSize(data);
-    const result: { path: string; bytes: number; format: "png" | "jpeg"; target: { id: string; url: string; title: string }; scale: number; width?: number; height?: number; base64?: string } = {
+    const result: ScreenshotToolResult = {
       path, bytes: data.byteLength, format: outFormat, target: target3(page.info), scale,
     };
     // Absent beats invented: undecodable bytes leave width/height off the result entirely.
     if (size) {
       result.width = size.width;
       result.height = size.height;
+    }
+    // What actually happened to the page, reported from the DRIVER's answer rather than from what
+    // was asked for. renderRestored:false means the caller's tab is still emulated at renderSize
+    // and they have to fix it — the one outcome that must never be swallowed, so it rides back on
+    // the success result the same way a decoded width does.
+    if (renderSize && shot.renderSize) {
+      result.renderSize = shot.renderSize;
+      result.renderRestored = shot.renderRestored ?? false;
+      if (shot.renderRestoreError !== undefined) result.renderRestoreError = shot.renderRestoreError;
     }
     if (args.returnBase64) result.base64 = Buffer.from(data).toString("base64");
     return result;

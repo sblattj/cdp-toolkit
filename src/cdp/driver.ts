@@ -13,11 +13,12 @@ import { resolveUid } from "../tools/snapshot.ts";
 import { resolveWorkerSelector } from "./workers.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
-  LEGACY_NUMERIC_UID, interpolatePoints, type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
+  LEGACY_NUMERIC_UID, interpolatePoints, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, writeViewportRecord,
+  type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type SetCookieParams,
   type DragDestination, type DragOptions,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
-  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
+  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -371,19 +372,44 @@ function devicePixelsPerCssPx(m: LayoutMetrics): number {
  * later screenshot on it timed out too. A refusal here is what keeps a caller's tab intact.
  */
 const MAX_ENCODED_SIDE_PX = 16384;
-function assertClipEncodable(clip: { width: number; height: number }, scale: number, devicePx: number): void {
+/**
+ * `renderSize` is only for the message. It is named separately because it changes what the caller
+ * should DO about the refusal: past the cap because of `scale`, the fix is a smaller scale, but past
+ * it because a narrow render size made the document reflow taller, the fix is a different render
+ * size (or dropping fullPage) and a "largest scale that fits" hint would be useless advice.
+ */
+function assertClipEncodable(
+  clip: { width: number; height: number },
+  scale: number,
+  devicePx: number,
+  renderSize?: { width: number; height: number },
+): void {
   const outWidth = Math.ceil(clip.width * scale * devicePx);
   const outHeight = Math.ceil(clip.height * scale * devicePx);
   if (outWidth <= MAX_ENCODED_SIDE_PX && outHeight <= MAX_ENCODED_SIDE_PX) return;
-  // Floor to 2dp: a rounded-UP suggestion would be a scale that fails the same way.
-  const fits = Math.floor((MAX_ENCODED_SIDE_PX / (Math.max(clip.width, clip.height) * devicePx)) * 100) / 100;
+  const at = renderSize ? ` at render size ${renderSize.width}x${renderSize.height}` : "";
+  const projection =
+    `(clip ${clip.width}x${clip.height} css px${at} x scale ${scale} x device pixel ratio ${devicePx}), ` +
+    `past Chrome's ${MAX_ENCODED_SIDE_PX} px per-side limit; `;
+  if (scale !== 1) {
+    // Floor to 2dp: a rounded-UP suggestion would be a scale that fails the same way.
+    const fits = Math.floor((MAX_ENCODED_SIDE_PX / (Math.max(clip.width, clip.height) * devicePx)) * 100) / 100;
+    throw driverError(
+      "page-error",
+      `screenshot scale ${scale} would encode ${outWidth}x${outHeight} px ${projection}` +
+        (fits >= 0.01
+          ? `the largest scale that fits this clip is ${fits}.`
+          : `this clip is already past the limit at scale 1 — capture a smaller region.`),
+    );
+  }
+  const maxCssSide = Math.floor(MAX_ENCODED_SIDE_PX / devicePx);
   throw driverError(
     "page-error",
-    `screenshot scale ${scale} would encode ${outWidth}x${outHeight} px (clip ${clip.width}x${clip.height} css px x scale ${scale} x ` +
-      `device pixel ratio ${devicePx}), past Chrome's ${MAX_ENCODED_SIDE_PX} px per-side limit; ` +
-      (fits >= 0.01
-        ? `the largest scale that fits this clip is ${fits}.`
-        : `this clip is already past the limit at scale 1 — capture a smaller region.`),
+    `this capture would encode ${outWidth}x${outHeight} px ${projection}` +
+      `at device pixel ratio ${devicePx} the clip may be at most ${maxCssSide} css px per side` +
+      (renderSize
+        ? ` — a narrow renderWidth reflows the document TALLER, so widen it, shorten the page, or drop fullPage.`
+        : ` — capture a smaller region or drop fullPage.`),
   );
 }
 async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
@@ -435,11 +461,16 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * page and persists until cleared). It is a PARAM-level capability like input.html5Drag, so
  * take_screenshot stays universal and only the `scale` argument is gated; WebDriver BiDi's
  * browsingContext.captureScreenshot has no scale parameter at all, so it is honestly Chrome-only.
+ * screenshot.renderSize rides Emulation.setDeviceMetricsOverride applied for the length of one
+ * capture and undone in a finally. Unlike screenshot.scale this is NOT a Chrome-only gap: BiDi's
+ * browsingContext.setViewport is a real equivalent and the Firefox driver declares it too. Both
+ * drivers already declare emulate.deviceMetrics on the very same primitive, so a backend that could
+ * not honour this would be a backend that cannot emulate a viewport at all.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
-  "screenshot.fullPage", "screenshot.element", "screenshot.scale", "network.intercept",
+  "screenshot.fullPage", "screenshot.element", "screenshot.scale", "screenshot.renderSize", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag",
   "browser.downloads", "browser.permissions", "worker.targets",
@@ -811,7 +842,90 @@ class CdpPageDriver implements PageDriver {
     const { objectId } = await resolveElementLocator(this.conn, loc);
     await this.conn.send("DOM.setFileInputFiles", { files: [...files], objectId });
   }
-  async screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }> {
+  /**
+   * A capture, optionally rendered at an emulated viewport that is put back afterwards.
+   *
+   * ORDERING IS THE WHOLE CORRECTNESS ARGUMENT. The override goes on FIRST, before anything is
+   * measured, because narrowing the viewport reflows the document: capture() reads
+   * Page.getLayoutMetrics for fullPage's content rect and for the device-pixel projection, and
+   * elementClip reads a box model, and all three answer differently at 1920 wide than at 390. That
+   * also puts assertClipEncodable on the POST-override numbers, so a 1920-wide render at scale 4 is
+   * refused on the size it would really encode rather than on the tab's old size.
+   *
+   * NO REFLOW WAIT, and that is measured rather than assumed. Emulation.setDeviceMetricsOverride
+   * resolves only once layout has settled: on a page with a `@media (max-width:900px)` rule, an
+   * IMMEDIATE getLayoutMetrics + captureScreenshot after the override matched one taken after a
+   * double-requestAnimationFrame round-trip on every field — content rect, computed background
+   * colour (the media query had already flipped), a grid child's height (236.47 vs 444.46 px across
+   * the breakpoint), and the PNG's own sha256. Three transitions, 1920x1080 -> 420x900 -> 1920x1080,
+   * byte-identical each time. So there is deliberately no sleep here; adding a speculative one would
+   * be untestable latency on every capture.
+   *
+   * RESTORE RUNS ON EVERY EXIT. A thrown guard (assertClipEncodable), a per-command timeout, a
+   * page-side failure — the capture's error is held, the viewport is put back, and only then does
+   * the error propagate. Leaving it unrestored is the exact failure this feature exists to avoid:
+   * an aborted capture that strands a device-metrics override poisons every later measurement on
+   * that tab (innerHeight stuck at the content height) and is expensive to even diagnose. When the
+   * restore ITSELF fails there is no result to carry the bad news, so the fact is appended to the
+   * error message instead — the caller's page really is still emulated and silence would be a lie.
+   */
+  async screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
+    const renderSize =
+      opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
+        ? { width: opts.renderWidth, height: opts.renderHeight }
+        : undefined;
+    if (!renderSize) return this.capture(opts);
+    // Read BEFORE applying ours: our own setDeviceMetricsOverride overwrites the browser's state
+    // and there is no CDP command that reads a device-metrics override back out.
+    const previous = await readViewportRecord(this.browser.scheme, this.info.id);
+    await this.conn.send("Emulation.setDeviceMetricsOverride", {
+      width: renderSize.width,
+      height: renderSize.height,
+      // Inherited, not reset: the caller asked to change the render SIZE. Dropping a
+      // deviceScaleFactor or mobile flag they set with emulate would be a second, silent change.
+      deviceScaleFactor: previous?.deviceScaleFactor ?? 0,
+      mobile: previous?.mobile ?? false,
+    });
+    let shot: ScreenshotResult | undefined;
+    let captureError: unknown;
+    try {
+      shot = await this.capture(opts);
+    } catch (e) {
+      captureError = e;
+    }
+    let restoreError: string | undefined;
+    try {
+      // Re-apply, never clear, when we know what was there: clearDeviceMetricsOverride resets to the
+      // REAL device (measured — see ViewportRecord's header), so clearing here would silently
+      // destroy an override the caller set with emulate earlier and believes is still in force.
+      if (previous) {
+        await this.conn.send("Emulation.setDeviceMetricsOverride", {
+          width: previous.width,
+          height: previous.height,
+          deviceScaleFactor: previous.deviceScaleFactor ?? 0,
+          mobile: previous.mobile ?? false,
+        });
+      } else {
+        await this.conn.send("Emulation.clearDeviceMetricsOverride");
+      }
+    } catch (e) {
+      restoreError = e instanceof Error ? e.message : String(e);
+    }
+    if (!shot) {
+      // Mutate rather than re-wrap: a DriverError's `code` ("timeout", "page-error", ...) is what
+      // callers branch on, and a fresh error would throw that away to add one sentence.
+      if (restoreError !== undefined && captureError instanceof Error) {
+        captureError.message = `${captureError.message} ${renderRestoreFailureNote(renderSize, restoreError)}`;
+      }
+      throw captureError;
+    }
+    const result: ScreenshotResult = { ...shot, renderSize, renderRestored: restoreError === undefined };
+    if (restoreError !== undefined) result.renderRestoreError = restoreError;
+    return result;
+  }
+  /** The capture itself, with no viewport emulation of its own. Split out so screenshot()'s restore
+   *  wraps EVERY way this can fail, the throwing paths included. */
+  private async capture(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
     await this.ensureDomain("Page");
     const format = opts?.format ?? "png";
     const quality = format === "jpeg" ? (opts?.quality ?? 80) : undefined;
@@ -820,18 +934,37 @@ class CdpPageDriver implements PageDriver {
     // scale absent (or exactly 1) must leave this call byte-for-byte what it was: clip.scale stays
     // 1 on the element/fullPage paths and the plain no-clip path still sends NO clip at all.
     const scale = opts?.scale ?? 1;
+    const renderSize =
+      opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
+        ? { width: opts.renderWidth, height: opts.renderHeight }
+        : undefined;
     // ONE Page.getLayoutMetrics serves both the clip and the device-px projection below; the
-    // scale-1 no-clip path skips it entirely, so no path gains a round trip it did not have.
-    const metrics = opts?.fullPage || scale !== 1 ? await layoutMetrics(this.conn) : undefined;
+    // plain scale-1 no-clip path skips it entirely, so no pre-existing path gains a round trip it
+    // did not have. A render size ALWAYS fetches it, because the guard below is the only thing
+    // standing between a reflowed-taller document and a wedged tab, and it cannot run without the
+    // measured rect.
+    const metrics = opts?.fullPage || scale !== 1 || renderSize ? await layoutMetrics(this.conn) : undefined;
     let clip: { x: number; y: number; width: number; height: number } | undefined;
     if (opts?.clip) clip = await elementClip(this.conn, opts.clip);
-    // `metrics` is defined exactly when fullPage was asked for OR a scale has to be carried, and
-    // both want the same rect (see contentClip): the second case is only synthesizing the clip
+    // `metrics` is defined exactly when fullPage was asked for OR a scale/render size has to be
+    // carried, and all want the same rect (see contentClip): those cases only synthesize the clip
     // Chrome would have inferred anyway, because clip.scale is the only place scale can ride.
     else if (metrics) clip = contentClip(metrics);
     if (clip) params.clip = { ...clip, scale };
     // Guarded here, not in the tool layer: the clip is only known once it has been measured.
-    if (clip && metrics && scale !== 1) assertClipEncodable(clip, scale, devicePixelsPerCssPx(metrics));
+    //
+    // DELIBERATELY NOT CONDITIONED ON scale !== 1 ANY MORE, and this was a live-fire bug, not a
+    // tidy-up. `--fullPage --renderWidth 420 --renderHeight 900` at scale 1 on a 4-column grid page
+    // reflowed the document from 2880 to 10800 css px tall, projected to 840x21600 device px, sailed
+    // past this guard because the scale was 1, and WEDGED the tab: innerWidth/innerHeight stuck at
+    // 420x10800, exactly the failure this feature exists to prevent.
+    //
+    // And the restore could not save it. Measured with CDP_TIMEOUT_MS=8000: the capture timed out
+    // client-side, the restore ran and SUCCEEDED (the error carried no restore-failure note), and
+    // the page was still 420x10800 afterwards — because the timeout is only local, Chrome's capture
+    // is still running, and it re-resizes the page after the restore lands. A finally cannot beat a
+    // command that is still executing, so this pre-flight refusal is the only real protection.
+    if (clip && metrics) assertClipEncodable(clip, scale, devicePixelsPerCssPx(metrics), renderSize);
     const { data } = await this.conn.send<{ data: string }>("Page.captureScreenshot", params);
     return { data: new Uint8Array(Buffer.from(data, "base64")), format };
   }
@@ -845,6 +978,13 @@ class CdpPageDriver implements PageDriver {
       await this.conn.send("Emulation.setEmulatedMedia", { media: "", features: [] }).catch(c);
       await this.ensureDomainSoft("Network");
       await this.conn.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(c);
+      // There is no override of ours left to put back, so a render-size capture should restore by
+      // clearing. NOTE the measured limit of the clear above: Emulation.clearDeviceMetricsOverride
+      // is a no-op for an override some OTHER, now-disconnected session set (verified: a fresh
+      // connection cleared a stale 800x600 and the page stayed 800x600), so this can drop the record
+      // while the browser keeps a zombie override nothing can see. A later render-size capture still
+      // ends that tab at the real device size, which is what clearOverrides claimed to do anyway.
+      await clearViewportRecord(this.browser.scheme, this.info.id);
       return { applied: [] };
     }
     const applied: string[] = [];
@@ -855,6 +995,15 @@ class CdpPageDriver implements PageDriver {
         throw driverError("page-error", "emulate device metrics require both width and height");
       }
       await this.conn.send("Emulation.setDeviceMetricsOverride", {
+        width: opts.width,
+        height: opts.height,
+        deviceScaleFactor: opts.deviceScaleFactor ?? 0,
+        mobile: opts.mobile ?? false,
+      });
+      // Recorded so a later render-size capture puts THIS back instead of clearing to the real
+      // device. Written after the command succeeds, so a rejected override leaves no record
+      // claiming an override that is not there. See ViewportRecord in ../driver.ts.
+      await writeViewportRecord(this.browser.scheme, this.info.id, {
         width: opts.width,
         height: opts.height,
         deviceScaleFactor: opts.deviceScaleFactor ?? 0,
@@ -1378,4 +1527,18 @@ export { CdpBrowserDriver, CdpPageDriver };
  *     Output px is ceil(cssPx * scale * devicePixelRatio) — the ratio multiplies in, measured —
  *     and anything past 16384 px a side is refused BEFORE the call, because Chrome's own answer
  *     there is either a hang or an error naming no dimension (see MAX_ENCODED_SIDE_PX).
+ *   - screenshot.renderSize rides Emulation.setDeviceMetricsOverride, applied before ANYTHING is
+ *     measured (a narrower viewport reflows the document, so the content rect, the element box and
+ *     the encode guard must all be read after it) and undone on every exit path. Restore re-applies
+ *     the record ../driver.ts's writeViewportRecord kept, never a bare clear: measured,
+ *     Emulation.clearDeviceMetricsOverride is a NO-OP for an override another session set, and once
+ *     this session sets one it reverts to the REAL device — so clearing would silently destroy a
+ *     caller's earlier emulate. NOT a Chrome-only capability: the BiDi driver declares it too.
+ *   - The encode guard is deliberately NOT conditioned on scale, since 1.9.2: a scale-1 fullPage at
+ *     a narrow render size reflowed a page from 2880 to 10800 css px tall and wedged the tab. And a
+ *     wedge is not recoverable by the restore — the per-command timeout is client-side only, so
+ *     Chrome's capture is still running and re-resizes the page after the restore lands (measured
+ *     with CDP_TIMEOUT_MS=8000: the restore SUCCEEDED and the tab was still 420x10800). The
+ *     pre-flight refusal is the only real protection; an already-wedged tab is recovered by an
+ *     explicit emulate{width,height}, verified.
  * ---------------------------------------------------------------------------- */

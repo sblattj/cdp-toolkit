@@ -24,13 +24,13 @@
  */
 import type { TargetSelector } from "../types.ts";
 import {
-  UID_STAMP_ATTR, isDriverError, interpolatePoints,
+  UID_STAMP_ATTR, isDriverError, interpolatePoints, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, writeViewportRecord,
   type BrowserCookie, type BrowserDriver, type Capability, type DeleteCookiesFilter, type HandledDialogInfo, type DriverError, type DriverErrorCode, type DriverEvent,
   type DragDestination, type DragOptions,
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
-  type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
+  type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
@@ -288,9 +288,14 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * network.intercept rides network.addIntercept + network.beforeRequestSent, verified working
  * (see intercept()'s comment on why urlPatterns is never populated). screenshot.fullPage uses
  * captureScreenshot's origin:"document", screenshot.element uses its clip:{type:"element"}, both verified.
+ * screenshot.renderSize IS declared, and it is the one screenshot capability here that is not a
+ * Chrome-only gap: it rides browsingContext.setViewport, the very command emulate.deviceMetrics
+ * above already rides, applied for one capture and undone afterwards. Refusing it would be dishonest
+ * in the opposite direction — claiming a missing primitive this driver demonstrably has. Contrast
+ * screenshot.scale, absent because captureScreenshot genuinely has no scale parameter.
  */
 const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
-  "emulate.deviceMetrics", "screenshot.fullPage", "screenshot.element", "network.intercept", "locate.xpath",
+  "emulate.deviceMetrics", "screenshot.fullPage", "screenshot.element", "screenshot.renderSize", "network.intercept", "locate.xpath",
 ]);
 
 /* --------------------------------- module-scope session memoization --------------------------------- */
@@ -771,7 +776,71 @@ class BidiPageDriver implements PageDriver {
     }
   }
 
-  async screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }> {
+  /**
+   * A capture, optionally rendered at an emulated viewport that is put back afterwards. Same
+   * contract and the same restore-on-every-exit discipline as CdpPageDriver.screenshot — read that
+   * method's comment for the reasoning; only the commands differ (browsingContext.setViewport here,
+   * Emulation.setDeviceMetricsOverride there).
+   *
+   * NOT LIVE-FIRED. Firefox was not launched for this change, so unlike the Chrome path every claim
+   * here rests on the shape of browsingContext.setViewport plus the unit tests, not on a measured
+   * page. What IS verified is that the restore cannot be skipped: the ordering and the finally-path
+   * are shared logic exercised by test/screenshot-scale.test.ts against a stub. Two specifics to
+   * confirm when Firefox is next driven: whether setViewport's null viewport reverts to the real
+   * window (CDP's clear does not, for an override another session set), and whether it reflows
+   * synchronously the way setDeviceMetricsOverride was measured to.
+   */
+  async screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
+    const renderSize =
+      opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
+        ? { width: opts.renderWidth, height: opts.renderHeight }
+        : undefined;
+    if (!renderSize) return this.capture(opts);
+    const previous = await readViewportRecord(this.browser.scheme, this.contextId);
+    try {
+      // devicePixelRatio is deliberately not sent: this changes the render SIZE, and omitting the
+      // field leaves whatever ratio an earlier emulate set in place (the CDP path inherits it the
+      // same way).
+      await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: { width: renderSize.width, height: renderSize.height } });
+    } catch (e) {
+      throw mapBidiError(e);
+    }
+    let shot: ScreenshotResult | undefined;
+    let captureError: unknown;
+    try {
+      shot = await this.capture(opts);
+    } catch (e) {
+      captureError = e;
+    }
+    let restoreError: string | undefined;
+    try {
+      // Re-apply the tracked viewport, never a bare null: a null viewport reverts to the real
+      // window and would destroy an override the caller set with emulate earlier.
+      if (previous) {
+        await this.conn.send("browsingContext.setViewport", {
+          context: this.contextId,
+          viewport: { width: previous.width, height: previous.height },
+          ...(previous.deviceScaleFactor != null ? { devicePixelRatio: previous.deviceScaleFactor } : {}),
+        });
+      } else {
+        await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: null });
+      }
+    } catch (e) {
+      restoreError = e instanceof Error ? e.message : String(e);
+    }
+    if (!shot) {
+      if (restoreError !== undefined && captureError instanceof Error) {
+        captureError.message = `${captureError.message} ${renderRestoreFailureNote(renderSize, restoreError)}`;
+      }
+      throw captureError;
+    }
+    const result: ScreenshotResult = { ...shot, renderSize, renderRestored: restoreError === undefined };
+    if (restoreError !== undefined) result.renderRestoreError = restoreError;
+    return result;
+  }
+  /** The capture itself, with no viewport emulation of its own. Split out so screenshot()'s restore
+   *  wraps EVERY way this can fail, the throwing paths included. */
+  private async capture(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
     // ADR-001 param-level gap, same shape as drag's mode:"html5" (see resolveDragMode in
     // ../shared-tools.ts): browsingContext.captureScreenshot has NO scale parameter — its only
     // knobs are origin, format and clip — so a scale asked for here is refused outright rather
@@ -806,12 +875,21 @@ class BidiPageDriver implements PageDriver {
     if (opts.clearOverrides) {
       await this.conn.send("emulation.setUserAgentOverride", { userAgent: null, contexts: [this.contextId] }).catch(() => undefined);
       await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: null, devicePixelRatio: null }).catch(() => undefined);
+      // No override of ours left to put back: a render-size capture should restore to null.
+      await clearViewportRecord(this.browser.scheme, this.contextId);
       return { applied: [] };
     }
     const applied: string[] = [];
     try {
       if (opts.width != null && opts.height != null) {
         await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: { width: opts.width, height: opts.height }, ...(opts.deviceScaleFactor != null ? { devicePixelRatio: opts.deviceScaleFactor } : {}) });
+        // Recorded so a later render-size capture puts THIS back rather than reverting to the real
+        // window. See ViewportRecord in ../driver.ts.
+        await writeViewportRecord(this.browser.scheme, this.contextId, {
+          width: opts.width,
+          height: opts.height,
+          ...(opts.deviceScaleFactor != null ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
+        });
         applied.push("deviceMetrics");
       }
       if (opts.userAgent != null) {
@@ -1242,6 +1320,14 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     origin, format and clip — no scale anywhere, and its clip types (box/element) carry no
  *     multiplier either. A `scale` other than 1 is a refusal in screenshot() (ADR-001 param-level
  *     gap, like drag's html5 mode), pointing at emulate's deviceScaleFactor as the real workaround.
+ *   - screenshot.renderSize: DECLARED, and the one screenshot capability here that is not a gap. It
+ *     rides browsingContext.setViewport — the same command emulate.deviceMetrics already uses —
+ *     applied for one capture and restored to the tracked viewport (or `viewport:null`) afterwards.
+ *     NOT live-fired: Firefox was not launched for this change, so the ordering and the restore rest
+ *     on the shared logic's unit tests rather than a measured page. Two things to confirm when
+ *     Firefox is next driven: whether a null viewport reverts to the real window (CDP's clear does
+ *     NOT, for an override another session set), and whether setViewport reflows synchronously the
+ *     way Emulation.setDeviceMetricsOverride was measured to on Chrome.
  *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
  *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
  *     emulation have no verified-working BiDi path in this environment, so emulate() never claims
