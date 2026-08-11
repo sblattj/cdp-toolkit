@@ -24,7 +24,7 @@ import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
 
-const VERSION = "1.9.3";
+const VERSION = "1.9.4";
 
 // --browser is read once at startup (MCP has no per-call notion of backend): explicit flag,
 // else CDP_BROWSER env var, else "chrome" (zero behavior change for existing users/configs).

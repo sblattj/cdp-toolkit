@@ -1,9 +1,16 @@
 /**
  * BiDi implementation of the browser-neutral Driver contract in ../driver.ts (ADR-001), for
- * Firefox. lifetime is "session": a BiDi socket cannot be resumed, so createFirefoxDriver(port)
- * memoizes ONE BidiConnection per port at module scope (the connections map below), page()
+ * Firefox. THE CONNECTION IDENTITY IS A BiDi ws ENDPOINT, not a port: createFirefoxDriver(port)
+ * derives the loopback endpoint of a Firefox this toolkit launched, while
+ * createFirefoxDriverForEndpoint(wsUrl) takes a user-supplied one for ATTACH mode (a Firefox the
+ * user started with --remote-debugging-port; see ../backend.ts). Attach is a first-class path,
+ * not a workaround — what is impossible is RELAUNCHING the binary to open a port on a running
+ * instance (bidi/launch.ts's header), not connecting to a port that is already open.
+ * lifetime is "session": a BiDi socket cannot be resumed, so this file memoizes ONE
+ * BidiConnection per endpoint at module scope (the connections map below), page()
  * retains a holder, release() decrements it, and only BrowserDriver.dispose() ever closes the
- * socket. There is deliberately no reconnect-and-resume path: if the socket dies, every pending
+ * socket — after sending session.end, so an attached Firefox (which outlives us) gets its single
+ * session slot back. There is deliberately no reconnect-and-resume path: if the socket dies, every pending
  * and future call on it rejects with "disconnected" rather than silently starting a fresh
  * session underneath a caller who still thinks they hold the old one. (driver.ts's LifetimeModel
  * doc says a "session" driver "MUST re-establish itself transparently if the transport dies";
@@ -37,7 +44,7 @@ import { assertLeaseOk } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "../workers.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
-import { BidiConnection, BidiError, connectBidiSession } from "./client.ts";
+import { BidiConnection, BidiError, connectBidiSessionUrl } from "./client.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
 import type {
@@ -305,31 +312,47 @@ const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 ]);
 
 /* --------------------------------- module-scope session memoization --------------------------------- */
-// "session" LifetimeModel: ONE BidiConnection per port, shared by every page() acquisition on that
-// port. getConnection retains a holder on every call (fresh or reused); callers release() it.
-const connections = new Map<number, BidiConnection>();
-async function getConnection(port: number, timeoutMs?: number): Promise<BidiConnection> {
-  const existing = connections.get(port);
+// "session" LifetimeModel: ONE BidiConnection per BiDi ws endpoint, shared by every page()
+// acquisition on that endpoint. Keyed by the endpoint URL string rather than a port because attach
+// mode's endpoint may be any host/port/path (../backend.ts's normalizeBidiEndpoint), and the URL is
+// the only identity both modes share. getConnection retains a holder on every call (fresh or
+// reused); callers release() it.
+const connections = new Map<string, BidiConnection>();
+async function getConnection(endpoint: string, timeoutMs?: number): Promise<BidiConnection> {
+  const existing = connections.get(endpoint);
   if (existing) { existing.retain(); return existing; }
   // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
   // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
   // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
   // next handleUserPrompt call). Setting "ignore" here is what makes handleDialog() able to see
   // and answer a live prompt at all.
-  const conn = await connectBidiSession(port, {
+  const conn = await connectBidiSessionUrl(endpoint, {
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" } } },
+  }).catch((e: unknown) => {
+    // Firefox allows exactly ONE active BiDi session and never reaps an abandoned one (verified:
+    // still held 10s after an abrupt socket death). A client killed without session.end therefore
+    // leaves the slot occupied until Firefox restarts, and the raw wire message ("Maximum number of
+    // active sessions") tells the user nothing about how to get unstuck. Force-ending a session we
+    // do not own is not an option (there is no id to end), so this maps the error to instructions.
+    if (e instanceof BidiError && /maximum number of active sessions/i.test(e.message)) {
+      throw driverError("disconnected",
+        `Firefox already has an active WebDriver BiDi session on ${endpoint}; it allows only one. ` +
+        `Close the other client, or restart Firefox, then retry. (A previously killed client can leave a ` +
+        `session that Firefox does not reap.)`);
+    }
+    throw e;
   }); // already retained once
-  connections.set(port, conn);
+  connections.set(endpoint, conn);
   return conn;
 }
 
 /**
- * Contexts that already carry a beacon preload script, keyed port:context ->
+ * Contexts that already carry a beacon preload script, keyed endpoint:context ->
  * the script id BiDi handed back.
  *
  * WHY FIREFOX NEEDS NO HELD CONNECTION where Chrome does. This driver's
- * LifetimeModel is "session": ONE BidiConnection is memoized per port above and
+ * LifetimeModel is "session": ONE BidiConnection is memoized per endpoint above and
  * lives until dispose(), so a preload script registered on it stays registered
  * across navigations for free. Chrome's equivalent registration is cleared when
  * the registering client disconnects, and this toolkit's CDP lifetime is
@@ -1181,10 +1204,12 @@ class BidiBrowserDriver implements BrowserDriver {
   readonly capabilities = BIDI_CAPABILITIES;
   readonly uidStability: UidStability = "document-stamp";
   readonly snapshotFidelity = "dom-heuristic" as const;
-  constructor(private readonly port: number, private readonly timeoutMs?: number) {}
+  /** `endpoint` is a BiDi ws URL (see getConnection): derived from a port for a launched
+   *  Firefox, user-supplied for an attached one. It is this driver's whole identity. */
+  constructor(private readonly endpoint: string, private readonly timeoutMs?: number) {}
 
   async listPages(): Promise<PageInfo[]> {
-    const conn = await getConnection(this.port, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs);
     try {
       const { contexts } = await conn.send("browsingContext.getTree", {}).catch((e) => { throw mapBidiError(e); });
       return Promise.all(contexts.map((c) => pageInfoOf(conn, c)));
@@ -1193,7 +1218,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async newPage(url?: string): Promise<PageInfo> {
-    const conn = await getConnection(this.port, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs);
     try {
       const { context } = await conn.send("browsingContext.create", { type: "tab" }).catch((e) => { throw mapBidiError(e); });
       // Established fact: navigating the default about:home context to a data: URL is rejected,
@@ -1205,7 +1230,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async closePage(id: string): Promise<{ success: boolean }> {
-    const conn = await getConnection(this.port, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs);
     try {
       await conn.send("browsingContext.close", { context: id }).catch((e) => { throw mapBidiError(e); });
       return { success: true };
@@ -1214,7 +1239,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async activatePage(id: string): Promise<PageInfo> {
-    const conn = await getConnection(this.port, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs);
     try {
       await conn.send("browsingContext.activate", { context: id }).catch((e) => { throw mapBidiError(e); });
       const ctx = await resolveContext(conn, id);
@@ -1224,7 +1249,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async page(selector: TargetSelector): Promise<PageDriver> {
-    const conn = await getConnection(this.port, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs);
     let ctx: BrowsingContextInfo;
     try {
       ctx = await resolveContext(conn, selector);
@@ -1252,10 +1277,10 @@ class BidiBrowserDriver implements BrowserDriver {
    * an annotation that must never fail real work.
    */
   async installActivityBeacon(contextId: string): Promise<boolean> {
-    const conn = await getConnection(this.port, this.timeoutMs).catch(() => undefined);
+    const conn = await getConnection(this.endpoint, this.timeoutMs).catch(() => undefined);
     if (!conn) return false;
     try {
-      const key = `${this.port}:${contextId}`;
+      const key = `${this.endpoint}:${contextId}`;
       if (!bidiBeaconScripts.has(key)) {
         const registered = await conn.send("script.addPreloadScript", {
           functionDeclaration: BEACON_FUNCTION_DECLARATION,
@@ -1279,7 +1304,7 @@ class BidiBrowserDriver implements BrowserDriver {
   /** Read the beacon timestamp for a context, or null when it has none. Gate-free;
    *  see the declaration in ../driver.ts for why that is required here. */
   async readActivityBeacon(contextId: string): Promise<number | null> {
-    const conn = await getConnection(this.port, this.timeoutMs).catch(() => undefined);
+    const conn = await getConnection(this.endpoint, this.timeoutMs).catch(() => undefined);
     if (!conn) return null;
     try {
       const res = await conn.send("script.evaluate", {
@@ -1299,19 +1324,35 @@ class BidiBrowserDriver implements BrowserDriver {
 
   async dispose(): Promise<void> {
     for (const key of [...bidiBeaconScripts.keys()]) {
-      if (key.startsWith(`${this.port}:`)) bidiBeaconScripts.delete(key);
+      if (key.startsWith(`${this.endpoint}:`)) bidiBeaconScripts.delete(key);
     }
-    const conn = connections.get(this.port);
+    const conn = connections.get(this.endpoint);
     if (!conn) return;
-    connections.delete(this.port);
+    connections.delete(this.endpoint);
+    // Cleanly END the BiDi session so Firefox frees its single session slot for the next
+    // attach (a launch-mode Firefox is killed anyway; this matters for attach mode where the
+    // user's browser lives on). Verified: closing the socket alone does NOT free the slot, and
+    // Firefox never reaps the orphan, so skipping this would make the SECOND attach fail.
+    // Best-effort: harmless if the socket is already gone.
+    await conn.send("session.end", {}).catch(() => undefined);
     conn.dispose();
   }
 }
 
-/** Construct the BiDi implementation of the frozen Driver contract. `port` is a Firefox debug
- *  port already listening (see ./launch.ts's launchFirefox), never 9222/CDP's convention. */
+/** Construct the BiDi implementation of the frozen Driver contract for a LAUNCHED Firefox. `port`
+ *  is a Firefox debug port already listening (see ./launch.ts's launchFirefox), never 9222/CDP's
+ *  convention; it is only ever a shorthand for the loopback endpoint below. Note port 0 is a legal
+ *  argument for capability probes (createFirefoxDriver(0)) that never open a socket. */
 export function createFirefoxDriver(port: number, opts?: { timeoutMs?: number }): BrowserDriver {
-  return new BidiBrowserDriver(port, opts?.timeoutMs);
+  return new BidiBrowserDriver(`ws://127.0.0.1:${port}/session`, opts?.timeoutMs);
+}
+
+/** Construct the same driver for ATTACH mode: `wsUrl` is the BiDi endpoint of a Firefox the user
+ *  started themselves with --remote-debugging-port, already normalized by ../backend.ts's
+ *  normalizeBidiEndpoint. This driver NEVER owns that process — dispose() ends the BiDi session and
+ *  closes the socket, and nothing anywhere in this path kills a browser it did not launch. */
+export function createFirefoxDriverForEndpoint(wsUrl: string, opts?: { timeoutMs?: number }): BrowserDriver {
+  return new BidiBrowserDriver(wsUrl, opts?.timeoutMs);
 }
 // resolveContext is exported for ONE reason: it is the Firefox lease choke
 // point, and a choke point nothing can call directly is a choke point nothing
@@ -1320,7 +1361,8 @@ export function createFirefoxDriver(port: number, opts?: { timeoutMs?: number })
 export { BidiBrowserDriver, BidiPageDriver, resolveContext };
 
 /* ------------------------------------------------------------------------------
- * BiDi modules/commands used: session (new, subscribe/unsubscribe, via client.ts); browsingContext
+ * BiDi modules/commands used: session (new, subscribe/unsubscribe, via client.ts; end, sent by
+ * dispose() so an attached Firefox gets its one session slot back); browsingContext
  * (create, close, activate, getTree, navigate, reload, locateNodes, captureScreenshot, setViewport,
  * handleUserPrompt); script (evaluate, callFunction); input (performActions, setFiles); network
  * (addDataCollector, removeDataCollector, getData, addIntercept, removeIntercept, continueRequest,
@@ -1385,4 +1427,10 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *   - LifetimeModel's "MUST re-establish itself transparently if the transport dies" is NOT
  *     implemented: a dead BiDi socket surfaces as "disconnected" on every subsequent call instead
  *     of silently starting a new session underneath the caller. See the top-of-file comment.
+ *   - Concurrent clients: Chrome happily accepts many CDP sockets against one browser, Firefox
+ *     accepts exactly ONE active BiDi session. In attach mode that makes this driver mutually
+ *     exclusive with any other BiDi client (a Playwright/geckodriver run, a second cdp-toolkit)
+ *     on the same Firefox, and a client killed without session.end leaks the slot until Firefox
+ *     restarts. getConnection maps that into an actionable "disconnected" error; there is nothing
+ *     to declare as a Capability here because the constraint is per-browser, not per-tool.
  * ---------------------------------------------------------------------------- */
