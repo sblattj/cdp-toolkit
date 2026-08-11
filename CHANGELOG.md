@@ -5,6 +5,66 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.3] - 2026-08-10
+
+`cli.ts` had **no `--help` handling at all.** `--help` fell through the generic
+`--key value` branch into `args.help = true`, and the named tool ran with that
+as an inert extra property; `-h` doesn't even start with `--`, so it fell all
+the way to the positional-token branch and was silently dropped once a tool
+name was already set. Either way, **the tool ran.** Measured live this
+session: `cdp take_screenshot --help` executed a real capture of whatever tab
+happened to be active and wrote a 1.2 MB PNG to `/tmp/cdp-toolkit` — a "tell
+me, don't do it" discovery gesture that silently photographed what the user
+was looking at. Reproduced again here with the safe, non-capturing
+`list_pages --help` against a `CDP_BASE` pointed at a closed port: pre-fix it
+printed `{"error":"Unable to connect. Is the computer able to access the
+url?"}` and exited 1 — proof the tool dispatched and tried to reach the
+browser instead of printing help. Post-fix, the identical invocation against
+the same dead port prints usage and exits 0, and a directory listing of the
+artifact dir taken before and after is byte-identical: no file, no browser
+touch.
+
+### Fixed
+
+- **`--help`/`-h` now short-circuit before any tool dispatch, recognised
+  anywhere in argv** (not just as the first token), and are never treated as
+  a tool argument or a tool name. With no tool named, `cdp --help`/`-h` prints
+  the existing top-level usage banner (now also documenting the flag itself).
+  With a tool named, `cdp <tool> --help` prints that tool's argument list —
+  name, type, required/optional, description — read directly from
+  `MANIFEST`'s `inputSchema` (`src/manifest.ts`), the exact JSON Schema the
+  MCP server advertises via `tools/list`, so there is no second
+  hand-maintained argument list to drift from it.
+- An unknown tool name alongside `--help` (`cdp nope --help`) is reported as
+  `{"error":"unknown tool 'nope'. ..."}` and exits 1 — the same message the
+  CLI already gives for `cdp nope` without `--help` — rather than silently
+  falling back to top-level usage as though the name had been accepted.
+- **Decision, stated explicitly:** an unknown `--flag` passed to a *known*
+  tool still passes through as a tool argument, unchanged from pre-1.9.3
+  behavior. Every `inputSchema` already declares `additionalProperties:
+  false`, but neither `cli.ts` nor `mcp.ts` has ever enforced that — each tool
+  validates its own args at runtime, extra keys are typically just ignored,
+  and an existing caller may already depend on that leniency for something
+  harmless. Rejecting unknown flags here would diverge the CLI from the MCP
+  server (whose validation this release does not touch) to fix a problem this
+  bug did not create. `--help`/`-h` are instead recognised by name,
+  specifically, ahead of generic flag parsing — narrow enough that it needs
+  none of that broader, riskier call.
+
+### Added
+
+- `test/cli-help.test.ts` (6 tests): spawns the real CLI as a subprocess with
+  `CDP_BASE` pointed at a closed port, so any invocation that still reaches
+  tool dispatch fails loudly with a connection error instead of silently
+  succeeding. Watched fail against the pre-fix code first — 5 of 6 red on
+  exit code 1 instead of 0 — before confirming green post-fix.
+
+### Notes
+
+- Tool count unchanged at **45**; no tool added, renamed, or removed.
+  `take_screenshot` is not among the files this release touches.
+- 748 pass / 0 fail across 22 files, up from 742/21. `bun run typecheck` clean.
+
 ## [1.9.2] - 2026-08-10
 
 `take_screenshot` grows four arguments — `scale`, `renderWidth`/`renderHeight`,
