@@ -5,6 +5,214 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-08-10
+
+`take_screenshot` grows four arguments — `scale`, `renderWidth`/`renderHeight`,
+`tile` — and stops being able to hang the tab it is capturing. The constraint
+worth learning from this release: **Chrome cannot encode a screenshot larger
+than 16384 device px on either side, and past that it does not refuse politely
+— `Page.captureScreenshot` never answers, and because `captureBeyondViewport`
+resizes the renderer to the clip for the length of the capture, a call that
+never returns never puts it back.** Output px are `ceil(css × scale ×
+devicePixelRatio)`, so on an ordinary ratio-2 display that ceiling arrives at
+about 8192 CSS px — a long article, a chat log, a docs page. A plain no-flag
+`take_screenshot` of a 9000 CSS px page timed out (probed with an 8 s command
+timeout) and left the tab wedged at 1390×9000, with every later capture on it
+timing out too. It now returns a 2780×18000 px file in 1 second, as two
+stitched bands. Tool count
+stays 45 — no new tool, `take_screenshot` grew arguments. Five commits landed
+it in sequence, on top of two measurement passes that drove a live
+Chrome 151.0.7922.76 and wrote no code — the encode cap and the band-artifact
+hunt. Every number below comes off a measurement, and where a measurement
+contradicted the brief that ordered the work, the measurement is what is
+written down.
+
+### Added
+
+- **`scale` — a per-capture output multiplier**, a finite number greater than
+  0 and at most 8 (default 1), Chrome only (capability `screenshot.scale`).
+  Measured exact on a live tab: a 2780×2128 default capture at `scale 3` is
+  8340×6384, a `--fullPage` at `scale 2` is 5560×13000, a 400×250 CSS element
+  at `scale 4` is 3200×2000 — `sips` agrees with the reported size on 9 of 9
+  artifacts, PNG and JPEG alike. It re-renders, it does not upsample, and it
+  changes nothing the page can see: `devicePixelRatio` read 2 and
+  `innerWidth`/`innerHeight` read 1390×1064 both before and after a `scale 3`
+  capture. Firefox refuses it rather than silently returning a 1x image the
+  caller could not tell apart from the one they wanted —
+  `browsingContext.captureScreenshot` has no scale parameter, and the refusal
+  points at `emulate {deviceScaleFactor}` instead.
+
+- **`renderWidth`/`renderHeight` — emulate a viewport for exactly one capture,
+  then put the previous one back.** Required together, integers in
+  `[1, 16384]` CSS px, and declared by **both** backends (capability
+  `screenshot.renderSize`) — unlike `scale`, this is not a Chrome-only
+  argument. A 1390×1064 tab captured at 1920×1080 yields 3840×2160 device px
+  and reads back at 1390×1064 afterwards; captured at 420×900 it is
+  **byte-identical** (sha256 `93ffca74…`) to the same page genuinely emulated
+  at 420×900, media query flipped and all. That is the difference from `scale`
+  in one sentence: `scale` re-renders the same layout at more pixels,
+  `renderWidth`/`renderHeight` change what the page *believes* for one
+  capture. The restore holds on the success path, on the throwing path, and
+  over a caller's prior `emulate` (a tab emulated at 777×555 is 777×555 again
+  afterwards, not the real device). Two honest limits ride in the result
+  rather than in a comment: the restore can only put back an override **this
+  toolkit** applied — one set by the DevTools UI, another client, or an older
+  build leaves no record and is reset to the real device — and a capture that
+  TIMES OUT cannot be restored at all, because the `finally` runs while
+  Chrome's own command is still executing and re-resizes the page behind it.
+  `renderRestored: false` (plus `renderRestoreError`) is what the caller gets
+  when the tab is still emulated and they must fix it themselves.
+
+- **`tile` — vertical band capture, stitched losslessly, and AUTO by
+  default.** Three-valued: omitted means one shot when the projection fits and
+  bands when it does not; `false` never bands and refuses instead (the exact
+  pre-1.9.2 behaviour); `true` always bands, even when one shot would have
+  fitted. Only `true` costs a capability (`screenshot.tile`, Chrome only).
+  The headline, a plain call with no flags on a 140,982 CSS px page:
+  **2780×281964 px, 18 bands, 10,818,058 bytes, 17–18 s**, tab healthy
+  afterwards (`[innerWidth, innerHeight, devicePixelRatio]` = `[1390, 1064,
+  2]`, `scrollY` 0) and two runs byte-identical. 281964 is 140982 × 2 exactly:
+  the whole document, nothing dropped. A banded capture is PNG-only and cannot
+  also `returnBase64`; both combinations are refused in 21–31 ms measured,
+  before a single band is captured, with a message naming the band count and
+  the region that forced the decision. Tiling is **vertical only** — a projected WIDTH
+  past the cap is refused (naming the largest scale, or renderWidth, that
+  would fit), not split into a grid, because PNG scanlines are the unit that
+  can be concatenated without decoding the image whole.
+
+- **New result fields.** `scale` is always present. `width`/`height` are
+  **decoded from the encoded bytes** (PNG IHDR, JPEG SOF marker walk) rather
+  than projected, and are **omitted entirely** when the bytes cannot be
+  decoded — absent beats invented. `renderSize`, `renderRestored` and
+  `renderRestoreError` accompany a render-size capture; `tiled: true` and
+  `bands: <n>` are present only on a banded one, so a caller always knows when
+  an image was assembled rather than captured.
+
+- **`src/png.ts`, a streaming lossless PNG band stitcher**, zero runtime
+  dependencies (`node:zlib` is a builtin). Peak RSS is **135.3 MB while
+  writing a 1.42 GB image** (368,640 rows) — 9× the raw pixels of a 157 MB one
+  for 11.7% more memory, because peak tracks band size, not image size (Bun's
+  own floor is 23.6 MB of that).
+  Its output is byte-identical under ffmpeg's raw decode to the source bands
+  concatenated, at every one of PNG's five row filters, and a 2-band stitch of
+  a page that fitted decodes to the identical sha256 as the single shot of the
+  same page. It carries `gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs` from the first band
+  and throws on a mismatch: every Chrome capture measured carries an embedded
+  ICC profile, so a stitcher that dropped ancillary chunks — the obvious
+  default — would silently recolour every image it touched.
+
+### Changed
+
+- **Every capture now costs one `Page.getLayoutMetrics` round trip, including
+  the plain default one.** That is the change that closed the hazard. The
+  plain path was the one path that built no clip, so the encode guard never
+  ran on it, while `captureBeyondViewport: true` is hardcoded for every
+  capture — meaning an ordinary long page, hit with an ordinary flagless
+  screenshot, was already capturing beyond the viewport with nothing standing
+  between it and the hang. Nothing else about that path moved: it still sends
+  **no `clip` key at all**, and every step of this release A/B'd the common
+  path against its own parent commit's binaries on the same live tab —
+  default, `fullPage`, `scale 2`, `jpeg`, element-clip and `tile:false` all
+  came back byte-identical.
+
+- **`savePath` outside the artifact dir now works.** The destination directory
+  is created from the output path's own dirname rather than always
+  `CDP_ARTIFACT_DIR`; previously a `savePath` in a non-existent directory
+  failed `ENOENT` while `CDP_ARTIFACT_DIR` was created for nobody.
+
+- **The default filename's stamp is the capture's START**, not its end: a
+  banded capture writes as bands arrive and has no finished image to name a
+  file after, and one naming path is easier to trust than two.
+
+- **A new state-file type**, `${CDP_ARTIFACT_DIR}/viewport-<scheme>-<targetId>.json`,
+  a sibling of the lease and origin files. A render-size capture must restore
+  the caller's *previous* override, and a `PageDriver` lives for exactly one
+  call (under the CLI, one process), so the record has to outlive the
+  connection the same way a lease does — measured: an `emulate` override set
+  in one process is still in force when read from another.
+
+### Fixed
+
+- **`emulate {clearOverrides: true}` reported `"cleared": true` while clearing
+  nothing.** Reproduced across three separate CLI processes: process A set
+  802×601, process B cleared and reported success, process C read back
+  `[802, 601]`. `Emulation.clearDeviceMetricsOverride` only reverts to the real
+  device when the clearing connection is also the connection that *set* the
+  override — and under this toolkit's per-call connection lifetime it
+  essentially never is, so this was the common case, not an edge case. The
+  driver now reads the tab's currently effective size, re-asserts that exact
+  size on its own connection (a value the caller cannot observe changing,
+  whose only job is to take ownership), and then clears; the same trace now
+  reads back `[1390, 1064]`, the real device. If any step of that sequence
+  throws, the call throws too rather than returning a false success, and the
+  viewport record is deliberately left in place so a later capture does not
+  read "no record" as "nothing to restore".
+
+### Measured, not assumed — the numbers this release ships on
+
+- **16384 device px per side, both axes, clipped and unclipped alike.**
+  16384×1600 encodes in 266 ms; 16400×1600 — sixteen pixels more — never
+  answers (60 s probe cap). With no `clip` key at all: 2560×16384 succeeds in
+  217 ms, 2560×24000 hangs. **It is not an area limit:** 8192×8192 (67,108,864
+  px) succeeds in 1.3 s while 16400×1600 (26,240,000 px, 2.6× less) hangs. The
+  cap is also in DEVICE px, so a CSS clip of 8200×800 at `deviceScaleFactor: 2`
+  hangs identically to asking for 16400×1600 directly.
+- **Band tiling is visually clean, and this was falsification-tested rather
+  than assumed.** A `position: fixed` header present in the top band appears
+  **zero** times in a band 8000 px down; a `position: sticky` header appears
+  only in the band containing its true document position. Seams are row-exact
+  — band A ends on ROW 039, band B begins on ROW 040, no duplicate, no gap.
+  Clipped bands are byte-identical across three different real scroll
+  positions, so a stitcher never has to manage scroll. `clip.y` is always CSS
+  px and `scale` only multiplies resolution, so the two compose without
+  rescaling offsets. Content-verified end to end on the 140,982 px page: all
+  **71** label bands land at exactly their expected rows across 9 bands and 8
+  seams.
+- **The honest caveat.** A page that loads content only on real scroll —
+  lazy images, virtualized lists, infinite scroll — renders **blank** in bands
+  the real viewport never reached. Measured directly: a page whose
+  `IntersectionObserver` had loaded 9 of 300 rows still reported 9 after a
+  deep-band capture, and the deep band was uniform `#222`.
+  `captureBeyondViewport` does not trigger an `IntersectionObserver`. This is
+  a property of the source page, not a bug in the stitch, and it is not
+  fixable here — which is exactly why an auto-tiled capture reports `tiled`,
+  so a caller knows to reason about it (pre-scroll the page, or disable
+  virtualization, before capturing).
+- **Two corrections to earlier internal notes, kept rather than quietly
+  dropped.** (1) At 140,982 CSS px the *old* code did not hang: it failed in
+  about a second with `Page.captureScreenshot: Page is too large.` and left
+  the tab healthy. The hang-and-wedge lives at *modest* overshoot — the 9000
+  CSS px page above. Both are failures, but "it hangs at 140,982" is not what
+  this Chrome build does. (2) A wedged tab is **not** recovered by
+  `emulate --clearOverrides`: measured in order, clearing reports success and
+  the tab stays 1390×9000, an explicit `emulate --width/--height` recovers it,
+  and clearing again puts it *back*. Only a reload actually clears it. The
+  renderer's real viewport is what the abandoned capture resized, so
+  "clear to the real device" lands on the wrong size.
+
+### Notes
+
+- Tool count is unchanged at **45**. `take_screenshot` grew four arguments;
+  no tool was added, renamed, or removed.
+- **Firefox/BiDi does not declare `screenshot.scale` or `screenshot.tile`**,
+  and for two different reasons stated plainly rather than dressed up as
+  design: `browsingContext.captureScreenshot` genuinely has no scale
+  parameter, while band tiling is *probably* implementable there
+  (`clip: {type: "box"}` exists) but every property it rests on — does a box
+  clip render past the viewport, is `clip.y` CSS px, do fixed elements repeat
+  per band, are seams pixel-exact — was measured on Chrome and nowhere else,
+  because no Firefox was driven for it. `screenshot.renderSize` **is**
+  declared by both. Auto-tiling never fires on a backend without
+  `screenshot.tile`, so Firefox behaviour is unchanged.
+- New tests: **117**, in `test/screenshot-scale.test.ts` (81) and
+  `test/png.test.ts` (36) — 736 pass / 0 fail across 21 files, up from 619.
+  Both new suites were mutation-checked rather than merely green: 13 deliberate
+  mutants of `src/png.ts` and 6 of the tiling arithmetic were each killed,
+  and the three mutants that survived are documented in the source as provably
+  equivalent rather than silently "fixed" later.
+- `docs/social-preview.html` and `docs/demo.tape` carry no version string and
+  needed no re-render for this release.
+
 ## [1.9.1] - 2026-08-10
 
 `list_network_requests`, `get_network_request`, and `list_console_messages` now

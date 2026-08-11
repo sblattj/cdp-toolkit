@@ -1,6 +1,6 @@
 ---
 name: using-cdp-toolkit
-description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (mcp__cdp-toolkit__*) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, scrolling or dragging (incl. real HTML5 drag-and-drop), capturing a file download, granting a permission, claiming a tab so parallel agents don't collide (and knowing whether a human is already in it), mocking a backend, reading a secret without leaking it, or when a call returns empty {}, reads the page too early, or a leased-tab call is refused by name.
+description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (mcp__cdp-toolkit__*) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, scrolling or dragging (incl. real HTML5 drag-and-drop), capturing a file download, granting a permission, claiming a tab so parallel agents don't collide (and knowing whether a human is already in it), mocking a backend, reading a secret without leaking it, screenshotting a page that is very long or needs another viewport/resolution, or when a call returns empty {}, reads the page too early, a leased-tab call is refused by name, or a tab is stuck at the size of a capture that never finished.
 ---
 
 # Using cdp-toolkit
@@ -104,6 +104,35 @@ Before assuming CDP "can't see" what your extension's background worker is doing
 - `dispatch_mouse {action:"move"|"down"|"up", x, y}` is the raw primitive, Chrome-only (absent under Firefox, not throwing). Compose your own move/down/move/up sequence for anything `click`/`drag` can't do directly: canvas drag-painting, marquee selection, a custom-hit-testing widget.
 - `drag`'s default `mode:"mouse"` **can** trigger real HTML5 drag-and-drop (`draggable="true"` elements) — it is not a no-op there — but whether the drop is accepted depends on the interpolated pointer path landing on a `dragover`. If a drop you expect to work keeps failing silently (`dragstart` fires, `drop` doesn't), use `mode:"html5"` (Chrome-only): it replays the page's own drag data as `dragEnter`/`dragOver`/`drop` deterministically, independent of pointer path. `steps` (mouse mode) and `by:{dx,dy}` (offset drags: sliders, panning) are also available.
 
+## Screenshots: the 16384 px wall, and which knob you actually want
+
+**Take the plain screenshot first.** `take_screenshot {target}` and `{target, fullPage:true}` handle the long-page case by themselves as of 1.9.2: past Chrome's encode limit the capture is taken as vertical bands and stitched into one lossless PNG, and the result tells you it happened (`tiled:true`, `bands:18`). You do not pass `tile` to get that. Reach for a knob only when the default's answer is wrong for your purpose:
+
+| Want | Argument | Not this |
+|---|---|---|
+| More pixels in the same layout (read small text, zoom in later) | `scale` (>0, ≤8, **Chrome only**) | not `renderWidth` — that reflows the page |
+| The page as it looks at another viewport (mobile layout, desktop layout) | `renderWidth`+`renderHeight`, **required together** (both backends) | not `scale` — the page's layout does not change |
+| A permanent viewport change for several calls | `emulate {width,height}` | not `renderWidth` — that lasts exactly one capture |
+| Fail loudly instead of writing a 10 MB banded PNG | `tile:false` | not "capture and check the size" |
+
+**The wall, and why it is worth knowing.** Chrome cannot encode an image past **16384 device px on either side**, and it does not refuse politely there: `Page.captureScreenshot` never answers, and `captureBeyondViewport` leaves the tab resized to the clip it was capturing, so every later screenshot on that tab times out too. Output px are `ceil(css × scale × devicePixelRatio)`, so on a ratio-2 display the cap lands at ~8192 CSS px per side. The toolkit measures the projection before every capture, so you get a refusal or bands rather than a hang — but the arithmetic is worth carrying, because it is what the refusals are telling you:
+
+- `scale 3` on a 1390×3250 CSS page projects 8340×19500 and is refused, naming the largest scale that fits (2.52). Ask for less, or drop `fullPage`.
+- A projected **width** past the cap is refused, not tiled — bands stack top to bottom because scanlines are the only unit a PNG can be concatenated on. Lower `scale`, narrow `renderWidth`, or clip to an element.
+- A **narrow `renderWidth` reflows most documents taller**, which is the usual way a render-size capture hits the cap. 420 CSS px wide turned a 2880 px page into 10800.
+- A banded capture is PNG-only and cannot `returnBase64`. Both are refused before any band is captured, so asking is cheap — but if you need base64, capture a region small enough for one shot.
+
+**When NOT to reach for these:**
+
+- **Don't pass `tile:true`.** It forces banding even when one shot would have fitted (it deliberately splits a fitting region in two). It exists so the band path is testable; auto already bands when banding is needed.
+- **Don't use a screenshot to read text you could read.** `take_snapshot` or `evaluate_script` returning `innerText` costs a fraction of the tokens of a scaled PNG. `scale` is for pixels you will look at, not for text you want parsed.
+- **Don't tile a lazy/virtualized page and trust it.** Bands past the real viewport render **blank** on any page that loads content on scroll (infinite lists, viewport-triggered images, virtualized grids): `captureBeyondViewport` does not trigger an `IntersectionObserver`, and this is not fixable in the stitcher. Pre-drive a real `scroll` pass (or disable virtualization) first, then capture. `tiled:true` in the result is your cue to think about this.
+- **Don't reach for `renderWidth` when the tab should stay resized.** It restores the previous viewport on every exit path; if you want the next five calls to see a mobile layout, `emulate` once instead.
+
+**If a tab is already wedged** (an older build, another tool, or a capture that timed out): `emulate --clearOverrides` does **not** fix it and will report success anyway — the renderer's *real* viewport is what the abandoned capture resized, so "clear to the real device" lands on the wrong size. `emulate {width, height}` masks it, and `navigate_page {reload:true}` actually clears it.
+
+**Reading the result.** `width`/`height` are decoded from the bytes that were actually written, and are **absent** rather than guessed when the image cannot be decoded — an absent size means "undecodable", never "zero". `renderRestored:false` (with `renderRestoreError`) means the tab is still emulated and you have to fix it with `emulate`; it rides back on a *successful* capture, so do not skip reading it.
+
 ## Downloads and permissions need the long-lived MCP server
 
 `wait_for_download` and `grant_permissions` are Chrome-only **and MCP-server-only** — under the one-shot CLI, the connection they need dies with the process before it could ever matter, so both throw or are absent there. Same category as `performance_start_trace`/`start_screen_recording`.
@@ -194,7 +223,8 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | back / forward in history | `navigate_page {history:"back"\|"forward"}` |
 | wait for / capture a download | `wait_for_download` (MCP-server-only, arm before you click) |
 | pre-answer a permission prompt | `grant_permissions` (MCP-server-only) |
-| screenshot | `take_screenshot` (`fullPage`, `uid`/`selector` clip) |
+| screenshot | `take_screenshot` (`fullPage`, `uid`/`selector` clip; a page past Chrome's 16384 device px limit is auto-banded and stitched — `tiled`/`bands` on the result) |
+| screenshot at more pixels / at another viewport | `take_screenshot {scale}` (chrome-only) / `{renderWidth,renderHeight}` (both, required together, restored after) |
 | cookies (httpOnly incl.) | `list_cookies` / `set_cookie` / `delete_cookies` |
 | console / network | `list_console_messages` / `list_network_requests` (`reload:true` to record fresh; also `target:"worker:<substring>"`, chrome-only) |
 | claim / release / inspect a tab (+ is a human there?) | `claim_page` / `release_page` / `list_leases` (`humanActiveMs`/`contention`) |
@@ -212,4 +242,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 - **Claiming a tab then omitting the token later.** Every subsequent call to a leased tab needs `lease`, including from the same session.
 - **Calling `wait_for_download` after the click, with no `arm:true` first.** The download is denied outright, not just misfiled — there is no file to recover afterward.
 - **Assuming `drag`'s default mode never fires real HTML5 drag events.** It can and often does; the actual gap is a drop getting silently refused because of the pointer path. Reach for `mode:"html5"` when a drop keeps failing, not because mouse mode "doesn't do HTML5 DnD."
+- **Passing `tile:true` to get a long page captured.** Auto already bands when banding is needed; `tile:true` forces bands even when one shot would have fitted. The only thing you ever need to pass for a long page is nothing.
+- **Trusting a tiled capture of a lazy-loading or virtualized page.** Bands the real viewport never reached come back blank — `captureBeyondViewport` triggers no `IntersectionObserver`. Scroll the content in first.
+- **Using `emulate --clearOverrides` to un-wedge a tab stuck at a capture's size.** It reports success and changes nothing (the *real* viewport was resized, not an override). Use `emulate {width,height}` to mask it, or a reload to actually clear it.
 - **Reading `humanActiveMs: null` as "nobody's here."** It means no data — verify with the plain fact that you haven't seen a `contention` warning either, not by treating null as a green light.
