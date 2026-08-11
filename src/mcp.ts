@@ -9,7 +9,9 @@
  * then fail with a clear error if the browser is unreachable.
  *
  * Launch: `bunx -y cdp-toolkit`  (or `bun run src/mcp.ts` from a checkout)
- * Config:  CDP_BASE (default http://127.0.0.1:9222), CDP_TIMEOUT_MS, CDP_ARTIFACT_DIR.
+ * Config:  CDP_BASE (default http://127.0.0.1:9222), CDP_TIMEOUT_MS, CDP_ARTIFACT_DIR,
+ *          CDP_FIREFOX_ENDPOINT (attach to a user-launched Firefox instead of spawning one;
+ *          see backend.ts's ATTACH mode).
  *
  * stdout is the JSON-RPC channel, all diagnostics go to stderr only.
  */
@@ -18,7 +20,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
-import { resolveBrowserKind, stripBrowserFlag, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
+import { resolveBackend, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
 import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
@@ -26,9 +28,11 @@ import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts
 
 const VERSION = "1.9.4";
 
-// --browser is read once at startup (MCP has no per-call notion of backend): explicit flag,
-// else CDP_BROWSER env var, else "chrome" (zero behavior change for existing users/configs).
-const BROWSER = resolveBrowserKind(stripBrowserFlag(process.argv.slice(2)));
+// Backend + (Firefox only) attach endpoint are read once at startup (MCP has no per-call notion
+// of backend): --browser flag / CDP_BROWSER env, else "chrome" (zero behavior change for existing
+// users/configs); --connect flag / CDP_FIREFOX_ENDPOINT env selects Firefox ATTACH mode and
+// implies browser=firefox (resolveBackend, backend.ts).
+const { kind: BROWSER, endpoint: FIREFOX_ENDPOINT } = resolveBackend(process.argv.slice(2));
 const AVAILABILITY = toolAvailability(BROWSER);
 const AVAILABLE_NAMES = new Set<string>(AVAILABILITY.available);
 
@@ -90,7 +94,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const neutralFn = neutralDispatch[name];
     if (!neutralFn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
     try {
-      const session = await getOrCreateFirefoxSession();
+      const session = await getOrCreateFirefoxSession({ endpoint: FIREFOX_ENDPOINT });
       const result = await neutralFn(session.driver, args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
@@ -105,12 +109,17 @@ auditCoverage();
 // (CDP_REQUIRE_LEASE) safe to honor here and unsafe in cli.ts. See requireLease.
 markLongLivedProcess();
 await server.connect(new StdioServerTransport());
-console.error(`[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}, ${AVAILABILITY.available.length} tools, CDP_BASE=${BASE}`);
+console.error(
+  `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools, CDP_BASE=${BASE}`,
+);
 
-// Firefox owns a real OS process (see bidi/launch.ts): it must be reaped on every shutdown path,
-// not just a clean exit. SIGINT/SIGTERM cover ctrl-C and a supervising client killing the server;
-// stdin 'close' covers the normal MCP shutdown (the client closes the stdio pipe). All three are
-// idempotent through disposeFirefoxSession(), and a no-op entirely when Firefox was never launched.
+// LAUNCH-mode Firefox owns a real OS process (see bidi/launch.ts): it must be reaped on every
+// shutdown path, not just a clean exit. ATTACH-mode Firefox (CDP_FIREFOX_ENDPOINT / --connect)
+// owns no process here — disposeFirefoxSession() below only ends its BiDi session (freeing
+// Firefox's single session slot) and closes the socket, leaving the user's browser running.
+// SIGINT/SIGTERM cover ctrl-C and a supervising client killing the server; stdin 'close' covers
+// the normal MCP shutdown (the client closes the stdio pipe). All three are idempotent through
+// disposeFirefoxSession(), and a no-op entirely when Firefox was never launched/attached.
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
