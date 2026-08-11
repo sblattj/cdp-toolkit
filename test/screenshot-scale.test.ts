@@ -779,6 +779,126 @@ describe("CdpPageDriver.screenshot: banding on the wire", () => {
   });
 });
 
+/* ------- element clip: the viewport-frame -> document-frame correction (the scroll bug) ------- */
+
+/**
+ * A connection that models the ONE thing the old element-clip path got wrong, and nothing else.
+ *
+ * Every number is off Chrome/151.0.7922.76 (2026-08-10), a 1390x1064 css viewport on a ratio-2
+ * display, `#target` sitting at document y=5000 of a 10,000 css px page:
+ *   - DOM.getBoxModel answers in the VIEWPORT frame — the quad came back at y=407, matching
+ *     getBoundingClientRect().top, NOT the element's document y of 5000.
+ *   - DOM.scrollIntoViewIfNeeded is what put it at 407: it moved the page to scrollY 4593, so the
+ *     metrics before and after that call are DIFFERENT. Hence `scrolled`: read the offset before
+ *     the scroll and you correct by 0; read it after and you correct by 4593.
+ * 700 is used for the x offset (also measured, by scrolling that page horizontally) so a fix that
+ * only ever adds the y offset cannot pass.
+ */
+function scrolledElementConn(box: { x: number; y: number; w: number; h: number }, opts?: { legacyOnly?: boolean; noScroll?: boolean }) {
+  let scrolled = false;
+  return stubCdpConn((method) => {
+    if (method === "DOM.scrollIntoViewIfNeeded") {
+      scrolled = true;
+      return {};
+    }
+    if (method === "Page.getLayoutMetrics") {
+      const pageX = scrolled && !opts?.noScroll ? 700 : 0;
+      const pageY = scrolled && !opts?.noScroll ? 4593 : 0;
+      if (opts?.legacyOnly) {
+        return {
+          layoutViewport: { pageX: pageX * 2, pageY: pageY * 2, clientWidth: 2780, clientHeight: 2128 },
+          visualViewport: { pageX, pageY, clientWidth: 2780, clientHeight: 2128 },
+          contentSize: { width: 2780, height: 20000 },
+        };
+      }
+      return {
+        cssVisualViewport: { pageX, pageY, clientWidth: 1390, clientHeight: 1064 },
+        cssLayoutViewport: { pageX, pageY, clientWidth: 1390, clientHeight: 1064 },
+        // Deliberately CSS px on visualViewport's offsets and device px on its client size: that is
+        // what Chrome really sends, and a fix reading THIS rect and dividing would halve the offset.
+        visualViewport: { pageX, pageY, clientWidth: 2780, clientHeight: 2128 },
+        layoutViewport: { pageX: pageX * 2, pageY: pageY * 2, clientWidth: 2780, clientHeight: 2128 },
+        cssContentSize: { width: 1390, height: 10000 },
+        contentSize: { width: 2780, height: 20000 },
+      };
+    }
+    if (method === "Runtime.evaluate") return { result: { objectId: "obj-1" } };
+    if (method === "DOM.describeNode") return { node: { backendNodeId: 99 } };
+    if (method === "DOM.getBoxModel") {
+      const { x, y, w, h } = box;
+      return { model: { content: [x, y, x + w, y, x + w, y + h, x, y + h] } };
+    }
+    return { data: "" };
+  });
+}
+/** The clip that went on the wire for a single (non-banded) capture. */
+function sentClip(calls: Array<{ method: string; params?: Record<string, unknown> }>): unknown {
+  const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+  expect(shots.length).toBe(1);
+  return shots[0]?.params?.clip;
+}
+
+describe("CdpPageDriver.screenshot: an element clip is DOCUMENT-absolute, not viewport-relative", () => {
+  test("the scroll offset is added to the box model, on both axes", async () => {
+    // THE REGRESSION. Before the fix this sent {x:40,y:407} — the element's post-scroll ON-SCREEN
+    // position handed to a captureBeyondViewport capture, which reads clip x/y as document
+    // coordinates. Live-fired at three page heights (10,000 / 16,578 / 140,982 css px): every one
+    // returned a flat slab of page background with no part of the element in it.
+    const { conn, calls } = scrolledElementConn({ x: 40, y: 407, w: 1200, h: 250 });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-elclip"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" } });
+    expect(sentClip(calls)).toEqual({ x: 740, y: 5000, width: 1200, height: 250, scale: 1 });
+  });
+  test("the offset is read AFTER the scroll settles, and still costs only ONE getLayoutMetrics", async () => {
+    // The near-miss fix: correct by an offset read BEFORE DOM.scrollIntoViewIfNeeded moved the
+    // page. On a freshly navigated tab that offset is 0, so the clip stays at the broken y=407 and
+    // the bug survives its own fix. Ordering is the assertion; the count is the "no extra round
+    // trip" half of the same requirement.
+    const { conn, calls } = scrolledElementConn({ x: 40, y: 407, w: 1200, h: 250 });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-elorder"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" } });
+    const scrollIdx = calls.findIndex((c) => c.method === "DOM.scrollIntoViewIfNeeded");
+    const metricsIdx = calls.findIndex((c) => c.method === "Page.getLayoutMetrics");
+    expect(scrollIdx).toBeGreaterThanOrEqual(0);
+    expect(metricsIdx).toBeGreaterThan(scrollIdx);
+    expect(calls.filter((c) => c.method === "Page.getLayoutMetrics").length).toBe(1);
+  });
+  test("an element already in view (offset 0) is untouched — the short-page control", async () => {
+    // The case that always worked, and must keep working byte-for-byte: no scroll, no offset, so
+    // the box model's own coordinates already ARE document coordinates.
+    const { conn, calls } = scrolledElementConn({ x: 0, y: 500, w: 1390, h: 250 }, { noScroll: true });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-elshort"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" } });
+    expect(sentClip(calls)).toEqual({ x: 0, y: 500, width: 1390, height: 250, scale: 1 });
+  });
+  test("scale rides the CORRECTED clip, never the viewport one", async () => {
+    const { conn, calls } = scrolledElementConn({ x: 40, y: 407, w: 1200, h: 250 });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-elscale"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" }, scale: 3 });
+    expect(sentClip(calls)).toEqual({ x: 740, y: 5000, width: 1200, height: 250, scale: 3 });
+  });
+  test("a BANDED element clip walks from the corrected y, not from the on-screen one", async () => {
+    // Bands are the one place the error compounds: every band inherits clip.y, so an uncorrected
+    // start puts all five of them in the wrong part of the document.
+    const { conn, calls } = scrolledElementConn({ x: 40, y: 407, w: 1200, h: 40000 });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-elband"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" } }, drainBands);
+    const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+    expect(shots.map((c) => (c.params?.clip as { y: number }).y)).toEqual([5000, 13192, 21384, 29576, 37768]);
+    expect(shots.map((c) => (c.params?.clip as { x: number }).x)).toEqual(Array(5).fill(740));
+  });
+  test("on a metrics reply with no css-prefixed rects, the offset stays in the SAME frame as the rest", async () => {
+    // The legacy branch. devicePixelsPerCssPx already answers 1 for such a reply (no css rect to
+    // form a ratio with) and contentClip already hands Chrome the device-px contentSize, so the
+    // offset has to come back in device px too — 9186, not 4593. Correcting into a frame nothing
+    // else in the file is using would be a second bug, not a fix.
+    const { conn, calls } = scrolledElementConn({ x: 80, y: 814, w: 2400, h: 500 }, { legacyOnly: true });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-ellegacy"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#target" } });
+    expect(sentClip(calls)).toEqual({ x: 1480, y: 10000, width: 2400, height: 500, scale: 1 });
+  });
+});
+
 /* ------------------------ the tool layer: bands in, one file out ------------------------ */
 
 /** A real, complete, decodable PNG: filter-0 rows of a deterministic pattern. Small enough to

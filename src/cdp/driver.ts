@@ -303,9 +303,17 @@ async function backendNodeIdOf(conn: CdpConnection, loc: ElementLocator): Promis
  *   cssLayoutViewport{pageX:0,pageY:0,clientWidth:1390,clientHeight:1064}
  *   cssVisualViewport{offsetX,offsetY,pageX,pageY,clientWidth:1390,clientHeight:1064,scale:1,zoom:1}
  *   cssContentSize   {x,y,width:1390,height:1064}
- * The css* rects are CSS px, the non-css twins the SAME rect in device px, so their ratio is the
- * live device-pixel multiplier (2 here). Every field is optional on this type because the css*
- * family is the newer half of the reply and an older Chrome answers with only the legacy names.
+ * The css-prefixed rects are CSS px and the legacy twins carry the SAME rect in device px, so their
+ * clientWidth ratio is the live device-pixel multiplier (2 here). Every field is optional on this
+ * type because the css-prefixed family is the newer half of the reply and an older Chrome answers
+ * with only the legacy names.
+ *
+ * THE UNIT RULE HAS ONE MEASURED EXCEPTION, and it is a live footgun rather than trivia: on a
+ * scrolled page `visualViewport.pageX`/`pageY` come back in CSS px, not device px, while
+ * `clientWidth`/`clientHeight` on that very same rect stay device px. Scrolled to 700/4593 above:
+ * cssVisualViewport 700/4593, cssLayoutViewport 700/4593, visualViewport 700/4593 (CSS!),
+ * layoutViewport 1400/9186 (device). scrollOffsetCssPx below is the one reader of those offsets and
+ * spells out which fields it trusts and why.
  */
 interface LayoutMetrics {
   layoutViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
@@ -351,6 +359,36 @@ function devicePixelsPerCssPx(m: LayoutMetrics): number {
   if (!css || !dev) return 1;
   const ratio = dev / css;
   return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+}
+/**
+ * The page's scroll offset in CSS px — what has to be ADDED to a viewport-relative rect to make it
+ * document-absolute, which is the frame `Page.captureScreenshot` reads its clip in whenever
+ * captureBeyondViewport is true (hardcoded true below).
+ *
+ * WHICH FIELD, MEASURED rather than inferred from the "css" prefix, because that prefix is NOT a
+ * clean CSS-px/device-px split for the offsets. Same reply, same instant, page scrolled to
+ * window.scrollX/scrollY = 700/4593 on a deviceScaleFactor-2 display (Chrome/151.0.7922.76,
+ * 2026-08-10):
+ *   cssVisualViewport  pageX/pageY = 700 / 4593   <- CSS px  (what this returns)
+ *   cssLayoutViewport  pageX/pageY = 700 / 4593   <- CSS px, identical
+ *   visualViewport     pageX/pageY = 700 / 4593   <- CSS px TOO, despite clientWidth/clientHeight
+ *                                                    on that same rect reading 2780x2128 (device px)
+ *   layoutViewport     pageX/pageY = 1400 / 9186  <- device px, exactly 2x
+ * So `visualViewport` mixes units WITHIN one rect, and is the one field a "no css prefix means
+ * device px" assumption would silently double. It is never read here.
+ *
+ * The legacy fallback rides `layoutViewport` over the measured ratio (9186/2 = 4593 exactly) and is
+ * only reachable on a Chrome old enough to answer with no css-prefixed rects at all — where
+ * devicePixelsPerCssPx above has already fallen back to 1 and contentClip is already handing Chrome
+ * the DEVICE-px contentSize as a clip. The division is what keeps this offset in whatever frame the
+ * rest of the reply put the file in, rather than correcting into a frame nothing else is using.
+ */
+function scrollOffsetCssPx(m: LayoutMetrics, devicePx: number): { x: number; y: number } {
+  const css = m.cssVisualViewport ?? m.cssLayoutViewport;
+  if (css) return { x: css.pageX ?? 0, y: css.pageY ?? 0 };
+  const legacy = m.layoutViewport;
+  if (legacy) return { x: (legacy.pageX ?? 0) / devicePx, y: (legacy.pageY ?? 0) / devicePx };
+  return { x: 0, y: 0 };
 }
 /**
  * Chrome's per-side encode limit. MEASURED against Chrome/151.0.7922.76, clip width x height in
@@ -497,7 +535,26 @@ export function planTiledCapture(
   return { tiled: true, bandCount: Math.max(1, Math.ceil(clip.height / bandHeightCss)), bandHeightCss };
 }
 
-async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
+/**
+ * The element's content box, in CSS px and VIEWPORT-RELATIVE — which is the frame
+ * `DOM.getBoxModel` answers in, measured rather than assumed: on a 10,000 css px document scrolled
+ * to y=4593, the quad for an element whose real document position is y=5000 came back at y=407,
+ * matching `getBoundingClientRect().top` to the pixel. NOT a capture clip; see documentClip below
+ * for the frame conversion that has to happen before this can be one.
+ *
+ * THE SCROLL IS DELIBERATE, AND IT IS NOT WHAT MAKES THE CLIP CORRECT. With captureBeyondViewport
+ * (hardcoded true in capture()) Chrome renders the whole document, so nothing here has to be on
+ * screen to be captured, and the REJECTED ALTERNATIVE was to drop this call entirely and read the
+ * box model where the page already sat. Measured consequence of dropping it, on a fixture whose
+ * target only fills itself from an IntersectionObserver: with the scroll, the capture reads
+ * "LAZY CONTENT LOADED"; without it, the same capture returns the element's "NOT LOADED
+ * (placeholder)" state in the right region — because captureBeyondViewport renders what the DOM
+ * currently IS (the tab still reported the placeholder text afterwards, scrollY 0), and never
+ * triggers a viewport-driven load. So the scroll buys lazy content, costs one round trip, and the
+ * document-frame correction below is what buys correctness. Keeping it also means the offset this
+ * scroll CREATES must be read after it settles — see capture()'s ordering.
+ */
+async function elementBox(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
   const backendNodeId = await backendNodeIdOf(conn, loc);
   await conn.send("DOM.scrollIntoViewIfNeeded", { backendNodeId }).catch(() => undefined);
   const box = await conn.send<{ model: { content: number[] } }>("DOM.getBoxModel", { backendNodeId });
@@ -509,6 +566,36 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
   const width = Math.ceil(Math.max(...xs) - minX), height = Math.ceil(Math.max(...ys) - minY);
   if (width <= 0 || height <= 0) throw driverError("page-error", "resolved element has zero area");
   return { x: minX, y: minY, width, height };
+}
+/**
+ * A viewport-relative element box -> the document-absolute clip `Page.captureScreenshot` actually
+ * wants. THE BUG THIS FIXES, measured on Chrome/151.0.7922.76: the box model's own x/y used to be
+ * handed straight to the capture, so a `--selector` clip returned the wrong region of the page
+ * whenever bringing the element into view required a scroll. On a 10,000 css px document with the
+ * target at y=5000, `DOM.scrollIntoViewIfNeeded` left the page at scrollY 4593 and the element at
+ * viewport y=407 — and the capture came back as document[407..657], a flat slab of page background,
+ * with no part of the element in it. Starting the same call from scrollY 4950 instead, where the
+ * element already sat at viewport y=50 and the scroll was a no-op, produced document[50..300]: the
+ * document's own top banner for the first 100 css px, background below, boundary on the predicted
+ * pixel. Both are the same arithmetic — a viewport-relative number read in the document frame —
+ * and the pair is also why the old behaviour depended on where the CALLER had left the page.
+ *
+ * Adding the scroll offset is the whole correction, and it is added in CSS px because `clip` is in
+ * CSS px (a clip of {1390 x 1064} on a ratio-2 display encodes 2780x2128, i.e. the multiplier is
+ * applied by Chrome AFTER the clip, not expected in it). Mixing in the device-px twin of the offset
+ * would be the same class of bug wearing different units.
+ *
+ * `scale`, `renderWidth`/`renderHeight` and `tile` all ride this same corrected rect and needed no
+ * changes of their own: scale only ever rides clip.scale, a render size reflows the document before
+ * anything here is measured, and the band walker starts from clip.y and walks in CSS px.
+ */
+function documentClip(
+  box: { x: number; y: number; width: number; height: number },
+  m: LayoutMetrics,
+  devicePx: number,
+): { x: number; y: number; width: number; height: number } {
+  const scroll = scrollOffsetCssPx(m, devicePx);
+  return { x: box.x + scroll.x, y: box.y + scroll.y, width: box.width, height: box.height };
 }
 /**
  * Chrome capabilities. network.responseBodyPostHoc is deliberately NOT declared: the Network
@@ -1044,12 +1131,20 @@ class CdpPageDriver implements PageDriver {
     // (on a ratio-2 display) hangs Page.captureScreenshot and leaves the tab stuck at the content
     // size, no flags required. Auto-tiling has to know the projection anyway, so one round trip now
     // decides all three outcomes — one shot, bands, or a refusal — instead of none of them.
+    //
+    // AND THE ELEMENT BOX IS READ FIRST, BEFORE THE METRICS. That ordering is load-bearing, not
+    // style: elementBox calls DOM.scrollIntoViewIfNeeded, which MOVES the scroll offset that
+    // documentClip then has to add. Metrics read before the scroll carry the OLD offset (measured:
+    // 0 on a freshly navigated tab where the scroll then lands at 4593), and correcting by a stale
+    // offset is the same bug with a smaller error. Read after, and one round trip still serves both
+    // the projection and the correction — no second Page.getLayoutMetrics for the element path.
+    const box = opts?.clip ? await elementBox(this.conn, opts.clip) : undefined;
     const metrics = await layoutMetrics(this.conn);
     const devicePx = devicePixelsPerCssPx(metrics);
     // The rect this capture covers, ALWAYS computed even when it is not sent. For the plain path
     // this is the clip Chrome infers for itself (measured byte-identical to fullPage, see
     // contentClip), so projecting it is projecting what Chrome is really about to encode.
-    const clip = opts?.clip ? await elementClip(this.conn, opts.clip) : contentClip(metrics);
+    const clip = box ? documentClip(box, metrics, devicePx) : contentClip(metrics);
     // Which calls put a clip ON THE WIRE is unchanged, and that is what keeps a fitting capture
     // byte-for-byte what it was: the plain no-clip call still sends no clip at all, and only the
     // element / fullPage / scale / render-size paths synthesize one (clip.scale being the only
