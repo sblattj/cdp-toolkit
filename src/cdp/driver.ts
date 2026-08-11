@@ -292,11 +292,99 @@ async function backendNodeIdOf(conn: CdpConnection, loc: ElementLocator): Promis
   }
   return searchLocate(conn, "xpath" in loc ? loc.xpath : loc.text);
 }
-async function fullPageClip(conn: CdpConnection): Promise<{ x: number; y: number; width: number; height: number }> {
-  const m = await conn.send<{ cssContentSize?: { width: number; height: number }; contentSize?: { width: number; height: number } }>("Page.getLayoutMetrics");
+/**
+ * The Page.getLayoutMetrics reply, read off a live browser rather than guessed. Measured shape,
+ * Chrome/151.0.7922.76 on a deviceScaleFactor-2 display (2026-08-10):
+ *   layoutViewport   {pageX:0,pageY:0,clientWidth:2780,clientHeight:2128}
+ *   visualViewport   {offsetX,offsetY,pageX,pageY,clientWidth:2780,clientHeight:2128,scale:1,zoom:1}
+ *   contentSize      {x,y,width:2780,height:2128}
+ *   cssLayoutViewport{pageX:0,pageY:0,clientWidth:1390,clientHeight:1064}
+ *   cssVisualViewport{offsetX,offsetY,pageX,pageY,clientWidth:1390,clientHeight:1064,scale:1,zoom:1}
+ *   cssContentSize   {x,y,width:1390,height:1064}
+ * The css* rects are CSS px, the non-css twins the SAME rect in device px, so their ratio is the
+ * live device-pixel multiplier (2 here). Every field is optional on this type because the css*
+ * family is the newer half of the reply and an older Chrome answers with only the legacy names.
+ */
+interface LayoutMetrics {
+  layoutViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+  visualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+  contentSize?: { width: number; height: number };
+  cssLayoutViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+  cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+  cssContentSize?: { width: number; height: number };
+}
+async function layoutMetrics(conn: CdpConnection): Promise<LayoutMetrics> {
+  return conn.send<LayoutMetrics>("Page.getLayoutMetrics");
+}
+/**
+ * The rect a capture with no element clip covers — for `fullPage`, and ALSO for the plain
+ * no-clip-no-fullPage call, because on this driver those two are the same picture. Measured, not
+ * assumed: captureBeyondViewport is hardcoded true just below, so a no-clip capture of a 1390x3250
+ * css-px document at scroll y=1200 returned 2780x6500 device px from the document ORIGIN — the
+ * same 72490 bytes, sha256 ab46801c…, as the same page captured with fullPage:true.
+ *
+ * That is why a scaled plain capture synthesizes THIS clip and not cssVisualViewport (which the
+ * metrics reply also carries: pageX/pageY = the scroll offset, clientWidth/clientHeight = the
+ * VISIBLE 1390x1064). Clipping to the visual viewport would make `scale` do two things at once —
+ * multiply the resolution AND silently crop 3250 css px of document down to 1064 — so `--scale 3`
+ * would return a different picture than `--scale 1`, not a bigger one. Here scale only ever
+ * multiplies: 2780x6500 at scale 1 -> 5560x13000 at scale 2, same framing.
+ */
+function contentClip(m: LayoutMetrics): { x: number; y: number; width: number; height: number } {
   const size = m.cssContentSize ?? m.contentSize;
   if (!size) throw driverError("page-error", "Page.getLayoutMetrics returned no content size");
   return { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height) };
+}
+/**
+ * How many output pixels one CSS px of clip becomes BEFORE `scale` is applied — the display's (or
+ * emulation override's) device-pixel multiplier, read as the ratio between the device-px and CSS-px
+ * copies of the same viewport rect rather than from window.devicePixelRatio (no extra round trip,
+ * same source of truth as the capture itself). Measured: clip {100x100, scale:1} on a ratio-2
+ * display returns a 200x200 PNG, so this factor really does multiply into the encoded size.
+ * Falls back to 1 when a metrics reply carries only one of the two rects.
+ */
+function devicePixelsPerCssPx(m: LayoutMetrics): number {
+  const css = m.cssVisualViewport?.clientWidth ?? m.cssLayoutViewport?.clientWidth;
+  const dev = m.visualViewport?.clientWidth ?? m.layoutViewport?.clientWidth;
+  if (!css || !dev) return 1;
+  const ratio = dev / css;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+}
+/**
+ * Chrome's per-side encode limit. MEASURED against Chrome/151.0.7922.76, clip width x height in
+ * CSS px at the given scale on a device-pixel-ratio-2 display, so the encoded size is
+ * ceil(css * scale * ratio):
+ *   1024x100 @8  -> 16384x1600 encoded: OK in ~1s
+ *   1025x100 @8  -> 16400x1600 encoded: Page.captureScreenshot NEVER ANSWERS (killed at 45s, and
+ *                   again at 180s on a fresh tab) — 16 px over the cap and the command just hangs
+ *   100x1024 @8  -> 1600x16384 encoded: OK in ~1s     (same cap on the other axis)
+ *   100x1025 @8  -> 1600x16400 encoded: hangs the same way
+ *   100x1064 @16 -> 3200x34048 encoded: fails fast with the opaque CDP error
+ *                   "Page.captureScreenshot: Unable to capture screenshot"
+ * So the failure is not a silent clamp — but it is either a wedged command or an error naming no
+ * dimension, which is why this is refused BEFORE the capture, with the numbers spelled out.
+ *
+ * And the cost of just letting Chrome try is worse than a failed call: captureBeyondViewport
+ * (hardcoded true below) RESIZES the page to the clip for the duration of the capture, and a
+ * capture that never returns never puts it back. After the 1025x100 @8 hang above, that tab was
+ * left reporting window.innerWidth/innerHeight of 8200x800 — the clip's own css size — and every
+ * later screenshot on it timed out too. A refusal here is what keeps a caller's tab intact.
+ */
+const MAX_ENCODED_SIDE_PX = 16384;
+function assertClipEncodable(clip: { width: number; height: number }, scale: number, devicePx: number): void {
+  const outWidth = Math.ceil(clip.width * scale * devicePx);
+  const outHeight = Math.ceil(clip.height * scale * devicePx);
+  if (outWidth <= MAX_ENCODED_SIDE_PX && outHeight <= MAX_ENCODED_SIDE_PX) return;
+  // Floor to 2dp: a rounded-UP suggestion would be a scale that fails the same way.
+  const fits = Math.floor((MAX_ENCODED_SIDE_PX / (Math.max(clip.width, clip.height) * devicePx)) * 100) / 100;
+  throw driverError(
+    "page-error",
+    `screenshot scale ${scale} would encode ${outWidth}x${outHeight} px (clip ${clip.width}x${clip.height} css px x scale ${scale} x ` +
+      `device pixel ratio ${devicePx}), past Chrome's ${MAX_ENCODED_SIDE_PX} px per-side limit; ` +
+      (fits >= 0.01
+        ? `the largest scale that fits this clip is ${fits}.`
+        : `this clip is already past the limit at scale 1 — capture a smaller region.`),
+  );
 }
 async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
   const backendNodeId = await backendNodeIdOf(conn, loc);
@@ -342,11 +430,16 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * is declared for BiDi: Firefox's browsingContext.downloadWillBegin/downloadEnd exist but there is
  * no BiDi command to redirect a download to a chosen directory, and BiDi has no permission-granting
  * command at all outside the optional `permissions` module this driver does not negotiate.
+ * screenshot.scale rides Page.captureScreenshot's clip.scale, a per-CALL output multiplier that
+ * leaves page emulation untouched (the deviceScaleFactor workaround does not: it re-lays-out the
+ * page and persists until cleared). It is a PARAM-level capability like input.html5Drag, so
+ * take_screenshot stays universal and only the `scale` argument is gated; WebDriver BiDi's
+ * browsingContext.captureScreenshot has no scale parameter at all, so it is honestly Chrome-only.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
-  "screenshot.fullPage", "screenshot.element", "network.intercept",
+  "screenshot.fullPage", "screenshot.element", "screenshot.scale", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag",
   "browser.downloads", "browser.permissions", "worker.targets",
@@ -724,8 +817,21 @@ class CdpPageDriver implements PageDriver {
     const quality = format === "jpeg" ? (opts?.quality ?? 80) : undefined;
     const params: Record<string, unknown> = { format, captureBeyondViewport: true };
     if (quality != null) params.quality = quality;
-    if (opts?.clip) params.clip = { ...(await elementClip(this.conn, opts.clip)), scale: 1 };
-    else if (opts?.fullPage) params.clip = { ...(await fullPageClip(this.conn)), scale: 1 };
+    // scale absent (or exactly 1) must leave this call byte-for-byte what it was: clip.scale stays
+    // 1 on the element/fullPage paths and the plain no-clip path still sends NO clip at all.
+    const scale = opts?.scale ?? 1;
+    // ONE Page.getLayoutMetrics serves both the clip and the device-px projection below; the
+    // scale-1 no-clip path skips it entirely, so no path gains a round trip it did not have.
+    const metrics = opts?.fullPage || scale !== 1 ? await layoutMetrics(this.conn) : undefined;
+    let clip: { x: number; y: number; width: number; height: number } | undefined;
+    if (opts?.clip) clip = await elementClip(this.conn, opts.clip);
+    // `metrics` is defined exactly when fullPage was asked for OR a scale has to be carried, and
+    // both want the same rect (see contentClip): the second case is only synthesizing the clip
+    // Chrome would have inferred anyway, because clip.scale is the only place scale can ride.
+    else if (metrics) clip = contentClip(metrics);
+    if (clip) params.clip = { ...clip, scale };
+    // Guarded here, not in the tool layer: the clip is only known once it has been measured.
+    if (clip && metrics && scale !== 1) assertClipEncodable(clip, scale, devicePixelsPerCssPx(metrics));
     const { data } = await this.conn.send<{ data: string }>("Page.captureScreenshot", params);
     return { data: new Uint8Array(Buffer.from(data, "base64")), format };
   }
@@ -1266,4 +1372,10 @@ export { CdpBrowserDriver, CdpPageDriver };
  *     startBodyCapture / emulate's networkConditions branch), never eagerly by page(), so a
  *     body is only readable for a request that occurred after something armed capture first.
  *     That is arming by another name, not "not armed in advance".
+ *   - screenshot.scale rides clip.scale, so a scaled no-clip capture has to synthesize the clip
+ *     Page.captureScreenshot otherwise infers (contentClip, off Page.getLayoutMetrics — measured
+ *     to be the same picture as fullPage, because captureBeyondViewport is always true here).
+ *     Output px is ceil(cssPx * scale * devicePixelRatio) — the ratio multiplies in, measured —
+ *     and anything past 16384 px a side is refused BEFORE the call, because Chrome's own answer
+ *     there is either a hang or an error naming no dimension (see MAX_ENCODED_SIDE_PX).
  * ---------------------------------------------------------------------------- */

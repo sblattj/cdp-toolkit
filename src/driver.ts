@@ -133,6 +133,7 @@ export type Capability =
   | "emulate.networkConditions" // throttled or offline conditions
   | "screenshot.fullPage" // one-shot full scrollable page, not just the viewport
   | "screenshot.element" // capture clipped to a single element
+  | "screenshot.scale" // per-capture output-pixel multiplier; no permanent emulation change
   | "network.intercept" // fulfill, fail, or continue a matched request
   | "network.responseBodyPostHoc" // read a body for a request not armed in advance
   | "snapshot.accessibilityTree" // native a11y dump, not a DOM-walk approximation
@@ -344,6 +345,7 @@ export interface ScreenshotOptions {
   quality?: number;
   fullPage?: boolean; // requires "screenshot.fullPage"
   clip?: ElementLocator; // requires "screenshot.element"
+  scale?: number; // requires "screenshot.scale"; absent or 1 leaves the capture byte-for-byte as it was
 }
 
 /** Each optional field names the Capability it requires, if any. */

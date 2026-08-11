@@ -772,6 +772,18 @@ class BidiPageDriver implements PageDriver {
   }
 
   async screenshot(opts?: ScreenshotOptions): Promise<{ data: Uint8Array; format: "png" | "jpeg" }> {
+    // ADR-001 param-level gap, same shape as drag's mode:"html5" (see resolveDragMode in
+    // ../shared-tools.ts): browsingContext.captureScreenshot has NO scale parameter — its only
+    // knobs are origin, format and clip — so a scale asked for here is refused outright rather
+    // than silently captured at 1x, which would hand back an image the caller never asked for.
+    if (opts?.scale !== undefined && opts.scale !== 1) {
+      throw driverError(
+        "unsupported",
+        `screenshot scale ${opts.scale} is not supported by this backend (WebDriver BiDi's ` +
+          "browsingContext.captureScreenshot has no scale parameter). Call emulate with " +
+          `deviceScaleFactor:${opts.scale} first and capture at scale 1, or use --browser chrome.`,
+      );
+    }
     const format = opts?.format ?? "png";
     const params: BrowsingContextCaptureScreenshotParameters = {
       context: this.contextId,
@@ -1226,6 +1238,10 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     this one. Neither insertText route synthesizes a <br> or a block break.
  *   - trace.performance / heap.snapshot / audit.lighthouse: not declared, Chrome-only domains with
  *     no BiDi equivalent at all.
+ *   - screenshot.scale: not declared. browsingContext.captureScreenshot's parameters are context,
+ *     origin, format and clip — no scale anywhere, and its clip types (box/element) carry no
+ *     multiplier either. A `scale` other than 1 is a refusal in screenshot() (ADR-001 param-level
+ *     gap, like drag's html5 mode), pointing at emulate's deviceScaleFactor as the real workaround.
  *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
  *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
  *     emulation have no verified-working BiDi path in this environment, so emulate() never claims
