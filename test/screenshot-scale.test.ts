@@ -22,16 +22,19 @@
  *    the one they wanted. Proved against the REAL bidi capability set, not a hand-written one.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserDriver, Capability, PageDriver, PageInfo, ScreenshotOptions, ScreenshotResult } from "../src/driver.ts";
 import {
-  REQUIRED_CAPABILITIES, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, viewportRecordFile, writeViewportRecord,
+  REQUIRED_CAPABILITIES, clearViewportRecord, isDriverError, isTiledCapture, readViewportRecord, renderRestoreFailureNote, viewportRecordFile, writeViewportRecord,
 } from "../src/driver.ts";
-import { imagePixelSize, resolveRenderSize, resolveScreenshotScale, takeScreenshot } from "../src/shared-tools.ts";
-import { CdpPageDriver, createCdpDriver } from "../src/cdp/driver.ts";
-import { createFirefoxDriver } from "../src/bidi/driver.ts";
+import { imagePixelSize, resolveRenderSize, resolveScreenshotScale, resolveTileMode, takeScreenshot } from "../src/shared-tools.ts";
+import { CdpPageDriver, createCdpDriver, planTiledCapture } from "../src/cdp/driver.ts";
+import { BidiPageDriver, createFirefoxDriver } from "../src/bidi/driver.ts";
+import type { BidiConnection } from "../src/bidi/client.ts";
+import { crc32 } from "../src/png.ts";
 import { toolAvailability } from "../src/capabilities.ts";
 import type { CdpConnection } from "../src/client.ts";
 import type { Target } from "../src/types.ts";
@@ -513,5 +516,436 @@ describe("screenshot.scale capability (ADR-001: a PARAM gap, not a whole-tool on
     expect(toolAvailability("firefox").available).toContain("take_screenshot");
     // A whole-tool requirement here would delete a working tool from Firefox.
     expect(REQUIRED_CAPABILITIES.take_screenshot).toBeUndefined();
+  });
+});
+
+/* ------------------------------------- tiling ------------------------------------- */
+
+/**
+ * take_screenshot's `tile`: a capture too big for one image, taken as vertical bands and stitched.
+ * Four properties carry this slice, and none of them is "the option is plumbed through".
+ *
+ * 1. THE BAND ARITHMETIC IS THE WHOLE FEATURE, and it is invisible in a small test. clip.y advances
+ *    in CSS PX while the encode limit is in DEVICE px — measured: a marker at css y=4000-4008 lands
+ *    at the same css position at scale 1 and at scale 2, only at twice the resolution. So the band
+ *    height is floor(cap / (scale x devicePixelRatio)) and the offset is NOT multiplied by either.
+ *    Multiply the offset by the device pixel ratio and every seam skips a screenful; forget the
+ *    ratio in the height and every band is over the cap and hangs. planTiledCapture is pure so both
+ *    mistakes are caught here rather than on a 140,000 px page.
+ * 2. WIDTH IS REFUSED, NOT TRUNCATED. Bands stack vertically because PNG concatenates scanlines;
+ *    there is no horizontal join. A projection too wide has to say so and name the knobs that fix
+ *    it, because a silently 16384-px-wide capture of a wider page is a wrong picture that looks
+ *    exactly like a right one.
+ * 3. THE DEFAULT PATH IS GUARDED NOW. The plain capture (no fullPage, no scale, no render size) used
+ *    to skip Page.getLayoutMetrics, so the encode guard could not run — and that path already
+ *    captures the FULL document, because captureBeyondViewport is hardcoded true. Live-fired against
+ *    Chrome/151.0.7922.76 on HEAD: a plain take_screenshot of a 9000 css px page timed out and left
+ *    the tab reporting innerWidth/innerHeight 1390x9000, with no flags passed at all.
+ * 4. TWO COMBINATIONS CANNOT BE SERVED, and they refuse before a band is captured: JPEG (there is no
+ *    lossless JPEG concatenation) and returnBase64 (base64 of a hundreds-of-MB image, into the
+ *    caller's response).
+ *
+ * The live proof — 2780x281964 from 18 bands in 18s, byte-identical common-path captures, and a
+ * 2-band stitch that decodes to the same RGBA sha256 as the single shot it replaced — is in this
+ * branch's commit message.
+ */
+
+describe("planTiledCapture (the band arithmetic, pure)", () => {
+  const CAP = 16384;
+  test("auto leaves a capture that FITS alone: one shot, no bands", () => {
+    expect(planTiledCapture({ width: 1390, height: 3000 }, 1, 2, undefined)).toEqual({ tiled: false, bandCount: 1, bandHeightCss: 3000 });
+    // Exactly at the cap is still a fit: 8192 x 2 = 16384, and 16384 encodes in ~1s (measured).
+    expect(planTiledCapture({ width: 1390, height: 8192 }, 1, 2, undefined).tiled).toBe(false);
+  });
+  test("one css px past the cap is banded", () => {
+    const plan = planTiledCapture({ width: 1390, height: 8193 }, 1, 2, undefined);
+    expect(plan).toEqual({ tiled: true, bandCount: 2, bandHeightCss: 8192 });
+  });
+  test("the live-fired case: 1390x140982 css at scale 1, ratio 2 -> 18 bands of 8192", () => {
+    expect(planTiledCapture({ width: 1390, height: 140982 }, 1, 2, undefined)).toEqual({
+      tiled: true, bandCount: 18, bandHeightCss: 8192,
+    });
+  });
+  test("band height tracks scale AND the device pixel ratio, never just one of them", () => {
+    expect(planTiledCapture({ width: 100, height: 99999 }, 1, 1, undefined).bandHeightCss).toBe(16384);
+    expect(planTiledCapture({ width: 100, height: 99999 }, 1, 2, undefined).bandHeightCss).toBe(8192);
+    expect(planTiledCapture({ width: 100, height: 99999 }, 2, 2, undefined).bandHeightCss).toBe(4096);
+    expect(planTiledCapture({ width: 100, height: 99999 }, 4, 2, undefined).bandHeightCss).toBe(2048);
+    // scale below 1 is legal and shrinks the projection, so bands get TALLER, not shorter.
+    expect(planTiledCapture({ width: 100, height: 999999 }, 0.5, 2, undefined).bandHeightCss).toBe(16384);
+  });
+  test("every band, including the last, projects to at most the cap", () => {
+    for (const [scale, devicePx, height] of [[1, 2, 140982], [3, 2, 9000], [1, 1, 40000], [1.1, 3, 50000], [0.5, 2, 999999]] as const) {
+      const plan = planTiledCapture({ width: 10, height }, scale, devicePx, undefined);
+      expect(Math.ceil(plan.bandHeightCss * scale * devicePx)).toBeLessThanOrEqual(CAP);
+      const last = height - (plan.bandCount - 1) * plan.bandHeightCss;
+      expect(Math.ceil(last * scale * devicePx)).toBeLessThanOrEqual(CAP);
+      // The bands must cover the region EXACTLY: a short last band leaves the page's tail off the
+      // image, a full-height one clips past the document.
+      expect((plan.bandCount - 1) * plan.bandHeightCss + last).toBe(height);
+      expect(last).toBeGreaterThan(0);
+      expect(last).toBeLessThanOrEqual(plan.bandHeightCss);
+    }
+  });
+  test("tile:false never bands, however far past the cap the projection is", () => {
+    expect(planTiledCapture({ width: 1390, height: 140982 }, 1, 2, false).tiled).toBe(false);
+    // ... including a width that tiling itself would refuse: at tile:false the encode guard owns
+    // the refusal, so this must not throw a second, different message from here.
+    expect(() => planTiledCapture({ width: 9000, height: 100 }, 8, 2, false)).not.toThrow();
+  });
+  test("tile:true splits a region that would have fitted — one band is not a tiling", () => {
+    // The flag exists so the banded path is testable on an ordinary page. Returning bandCount 1
+    // here would make tile:true a no-op on exactly the pages someone would use it to check seams.
+    expect(planTiledCapture({ width: 1390, height: 3000 }, 1, 2, true)).toEqual({ tiled: true, bandCount: 2, bandHeightCss: 1500 });
+    expect(planTiledCapture({ width: 1390, height: 3001 }, 1, 2, true)).toEqual({ tiled: true, bandCount: 2, bandHeightCss: 1501 });
+    // A region already past the cap is split at the cap, not halved: tile:true is not "split more".
+    expect(planTiledCapture({ width: 1390, height: 140982 }, 1, 2, true).bandHeightCss).toBe(8192);
+    // A 1 css px region cannot be halved into two whole pixels, and says so by staying at one band.
+    expect(planTiledCapture({ width: 10, height: 1 }, 1, 2, true)).toEqual({ tiled: true, bandCount: 1, bandHeightCss: 1 });
+  });
+  test("a projection too WIDE is refused by name: width cannot be tiled", () => {
+    const tooWide = () => planTiledCapture({ width: 1390, height: 140982 }, 8, 2, undefined);
+    expect(tooWide).toThrow(/22240 px WIDE/);
+    expect(tooWide).toThrow(/width cannot be tiled/);
+    // Both real fixes, with numbers a caller can act on rather than "try something smaller".
+    expect(tooWide).toThrow(/Lower scale \(at most 5\.89\)/);
+    expect(tooWide).toThrow(/renderWidth at most 1024 css px/);
+  });
+  test("the width refusal is a DriverError with a code, not a bare Error", () => {
+    const err = (() => {
+      try {
+        planTiledCapture({ width: 9000, height: 100 }, 4, 2, undefined);
+        return undefined;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(isDriverError(err)).toBe(true);
+    expect((err as { code?: string }).code).toBe("page-error");
+  });
+  test("a scale so large that ONE css px is past the cap is caught by the WIDTH check first", () => {
+    // Which is why the driver's own sub-1-band-height guard is documented as unreachable rather
+    // than tested as a live branch: any clip is at least 1 css px wide (both clip builders ceil,
+    // and a zero-area element is already refused), so scale x ratio past the cap fails the width
+    // check before a band height is ever computed. Asserting the unreachability is honest; a test
+    // pretending to reach it would not be.
+    expect(() => planTiledCapture({ width: 1, height: 100 }, 20000, 2, true)).toThrow(/40000 px WIDE/);
+  });
+});
+
+/* ---------------------- the CDP driver's own banding, on the wire ---------------------- */
+
+/** A tall document: 1390x140982 css px at device pixel ratio 2, the live-fired case. */
+const METRICS_TALL = {
+  cssVisualViewport: { clientWidth: 1390, clientHeight: 1064 },
+  visualViewport: { clientWidth: 2780, clientHeight: 2128 },
+  cssContentSize: { width: 1390, height: 140982 },
+};
+/** A short document: same viewport, 3000 css px of content. Fits at scale 1 on a ratio-2 display. */
+const METRICS_SHORT = {
+  cssVisualViewport: { clientWidth: 1390, clientHeight: 1064 },
+  visualViewport: { clientWidth: 2780, clientHeight: 2128 },
+  cssContentSize: { width: 1390, height: 3000 },
+};
+function tilingConn(metrics: object) {
+  return stubCdpConn((method) => (method === "Page.getLayoutMetrics" ? metrics : { data: "" }));
+}
+/** Pull every band and count them, the way the real consumer (the stitcher) does. */
+async function drainBands(capture: { bands: AsyncIterable<Uint8Array> }): Promise<number> {
+  let n = 0;
+  for await (const _ of capture.bands) n += 1;
+  return n;
+}
+
+describe("CdpPageDriver.screenshot: banding on the wire", () => {
+  test("a tall document is captured as 18 bands whose clip.y walks the document in CSS px", async () => {
+    const { conn, calls } = tilingConn(METRICS_TALL);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-tile"), FAKE_CDP_BROWSER);
+    const result = await driver.screenshot({}, async (capture) => {
+      expect(capture.bandCount).toBe(18);
+      expect(capture.bandHeightCss).toBe(8192);
+      expect(capture.format).toBe("png");
+      return drainBands(capture);
+    });
+    expect(isTiledCapture(result)).toBe(true);
+    const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+    expect(shots.length).toBe(18);
+    // CSS px, unmultiplied: 0, 8192, 16384 ... A ratio-2 multiplication here would put band 2 at
+    // 16384 and skip 8192 css px of page on every seam.
+    expect(shots.map((c) => (c.params?.clip as { y: number }).y).slice(0, 4)).toEqual([0, 8192, 16384, 24576]);
+    const heights = shots.map((c) => (c.params?.clip as { height: number }).height);
+    expect(heights.slice(0, 17)).toEqual(Array(17).fill(8192));
+    // The LAST band is the remainder, and the bands sum to the document exactly.
+    expect(heights[17]).toBe(140982 - 17 * 8192);
+    expect(heights.reduce((a, b) => a + b, 0)).toBe(140982);
+    // Every band is a full-width PNG at the same x and width, or the stitcher refuses them.
+    for (const c of shots) {
+      expect(c.params?.format).toBe("png");
+      expect(c.params?.captureBeyondViewport).toBe(true);
+      expect(c.params?.clip).toMatchObject({ x: 0, width: 1390, scale: 1 });
+    }
+  });
+  test("bands are LAZY: nothing is captured until the consumer pulls, and stopping early stops Chrome", async () => {
+    const { conn, calls } = tilingConn(METRICS_TALL);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-lazy"), FAKE_CDP_BROWSER);
+    await driver.screenshot({}, async (capture) => {
+      // Accumulating all 18 first would work here and blow up on a 1.4 GB image; the streaming
+      // stitcher only helps if the driver is streaming too.
+      expect(calls.filter((c) => c.method === "Page.captureScreenshot").length).toBe(0);
+      let seen = 0;
+      for await (const _ of capture.bands) {
+        seen += 1;
+        expect(calls.filter((c) => c.method === "Page.captureScreenshot").length).toBe(seen);
+        if (seen === 3) break;
+      }
+      return seen;
+    });
+    expect(calls.filter((c) => c.method === "Page.captureScreenshot").length).toBe(3);
+  });
+  test("scale multiplies the band height down, and rides clip.scale on every band", async () => {
+    const { conn, calls } = tilingConn(METRICS_SHORT);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-tile-scale"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ scale: 3 }, drainBands);
+    const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+    // 16384 / (3 x 2) = 2730 css px per band; 3000 css px of document is 2 bands.
+    expect(shots.length).toBe(2);
+    expect(shots.map((c) => c.params?.clip)).toEqual([
+      { x: 0, y: 0, width: 1390, height: 2730, scale: 3 },
+      { x: 0, y: 2730, width: 1390, height: 270, scale: 3 },
+    ]);
+  });
+  test("a capture that FITS is byte-for-byte the old call: one shot, and NO clip key at all", async () => {
+    const { conn, calls } = tilingConn(METRICS_SHORT);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-plain"), FAKE_CDP_BROWSER);
+    const result = await driver.screenshot({}, async () => "must not be called");
+    expect(isTiledCapture(result)).toBe(false);
+    const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+    expect(shots.length).toBe(1);
+    expect(shots[0]?.params).toEqual({ format: "png", captureBeyondViewport: true });
+    expect("clip" in (shots[0]?.params ?? {})).toBe(false);
+  });
+  test("but the metrics ARE fetched now, on that same plain path — this is the closed wedge gap", async () => {
+    const { conn, calls } = tilingConn(METRICS_SHORT);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-plain-metrics"), FAKE_CDP_BROWSER);
+    await driver.screenshot({}, async () => 0);
+    expect(calls.filter((c) => c.method === "Page.getLayoutMetrics").length).toBe(1);
+  });
+  test("tile:false on an over-cap page refuses BEFORE any capture, with the encode guard's message", async () => {
+    const { conn, calls } = tilingConn(METRICS_TALL);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-notile"), FAKE_CDP_BROWSER);
+    await expect(driver.screenshot({ tile: false }, async () => 0)).rejects.toThrow(/2780x281964 px .*past Chrome's 16384 px per-side limit/);
+    expect(calls.filter((c) => c.method === "Page.captureScreenshot").length).toBe(0);
+  });
+  test("a caller that cannot take bands gets that same refusal, never a capture Chrome would hang on", async () => {
+    const { conn, calls } = tilingConn(METRICS_TALL);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-noconsumer"), FAKE_CDP_BROWSER);
+    await expect(driver.screenshot({})).rejects.toThrow(/past Chrome's 16384 px per-side limit/);
+    expect(calls.filter((c) => c.method === "Page.captureScreenshot").length).toBe(0);
+  });
+  test("tile:true with no band consumer is a caller mistake, and says which", async () => {
+    const { conn } = tilingConn(METRICS_SHORT);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-noconsumer-true"), FAKE_CDP_BROWSER);
+    await expect(driver.screenshot({ tile: true })).rejects.toThrow(/needs a caller that can consume bands/);
+  });
+  test("an element clip taller than the cap is tiled too, from the element's own x/y", async () => {
+    const { conn, calls } = stubCdpConn((method) => {
+      if (method === "Page.getLayoutMetrics") return METRICS_TALL;
+      if (method === "Runtime.evaluate") return { result: { objectId: "obj-1" } };
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 99 } };
+      // A 1200x40000 css px element at (40,12) — taller than the cap on its own.
+      if (method === "DOM.getBoxModel") return { model: { content: [40, 12, 1240, 12, 1240, 40012, 40, 40012] } };
+      return { data: "" };
+    });
+    const driver = new CdpPageDriver(conn, fakeTarget("T-el"), FAKE_CDP_BROWSER);
+    await driver.screenshot({ clip: { css: "#c" } }, drainBands);
+    const shots = calls.filter((c) => c.method === "Page.captureScreenshot");
+    // 40000 css px tall / 8192 = 5 bands, starting at the element's own y (12), not at 0.
+    expect(shots.length).toBe(5);
+    expect(shots.map((c) => (c.params?.clip as { y: number }).y)).toEqual([12, 8204, 16396, 24588, 32780]);
+    expect(shots.map((c) => (c.params?.clip as { x: number }).x)).toEqual(Array(5).fill(40));
+    const heights = shots.map((c) => (c.params?.clip as { height: number }).height);
+    expect(heights.reduce((a, b) => a + b, 0)).toBe(40000);
+  });
+  test("a JPEG banded capture is refused by the driver too, but only once a band is actually pulled", async () => {
+    // The user-facing refusal is shared-tools.ts's (it names the fix); this backstop must not
+    // pre-empt it, which it did when the check ran before the consumer — live-fired, and the
+    // caller saw 'got format "jpeg"' with no advice.
+    const { conn } = tilingConn(METRICS_TALL);
+    const driver = new CdpPageDriver(conn, fakeTarget("T-jpeg"), FAKE_CDP_BROWSER);
+    await expect(driver.screenshot({ format: "jpeg" }, async (capture) => {
+      throw new Error(`consumer ran first, ${capture.bandCount} bands offered`);
+    })).rejects.toThrow(/consumer ran first, 18 bands offered/);
+    await expect(driver.screenshot({ format: "jpeg" }, drainBands)).rejects.toThrow(/PNG-only/);
+  });
+});
+
+/* ------------------------ the tool layer: bands in, one file out ------------------------ */
+
+/** A real, complete, decodable PNG: filter-0 rows of a deterministic pattern. Small enough to
+ *  build inline, real enough that src/png.ts's stitcher accepts it and produces a valid file. */
+function realPng(width: number, height: number, seed: number): Uint8Array {
+  const bpr = width * 3;
+  const raw = Buffer.alloc(height * (1 + bpr));
+  for (let y = 0; y < height; y++) {
+    const off = y * (1 + bpr);
+    raw[off] = 0; // filter type None
+    for (let x = 0; x < width; x++) {
+      raw[off + 1 + x * 3] = (seed * 40 + y * 3) & 0xff;
+      raw[off + 2 + x * 3] = (x * 17) & 0xff;
+      raw[off + 3 + x * 3] = (seed + x + y) & 0xff;
+    }
+  }
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body) >>> 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type: truecolour RGB
+  return new Uint8Array(Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]));
+}
+
+/** A driver whose capture always bands, handing the tool layer real PNGs to stitch. */
+function stubTilingDriver(capabilities: ReadonlySet<Capability>, bandHeights: number[], width = 40) {
+  const shotCalls: ScreenshotOptions[] = [];
+  const pulled: number[] = [];
+  const page = {
+    info: INFO,
+    async screenshot(opts: ScreenshotOptions | undefined, consume: (c: unknown) => Promise<unknown>) {
+      shotCalls.push(opts ?? {});
+      const total = bandHeights.reduce((a, b) => a + b, 0);
+      async function* gen(): AsyncGenerator<Uint8Array> {
+        for (const [i, h] of bandHeights.entries()) {
+          pulled.push(i);
+          yield realPng(width, h, i + 1);
+        }
+      }
+      const consumed = await consume({
+        bands: gen(), bandCount: bandHeights.length, bandHeightCss: bandHeights[0],
+        clip: { x: 0, y: 0, width, height: total }, format: "png",
+      });
+      return { tiled: true, format: "png", bandCount: bandHeights.length, bandHeightCss: bandHeights[0], consumed };
+    },
+    async release(): Promise<void> {},
+  };
+  const driver = { scheme: "cdp", capabilities, async page(): Promise<PageDriver> { return page as unknown as PageDriver; } };
+  return { driver: driver as unknown as BrowserDriver, shotCalls, pulled };
+}
+
+describe("resolveTileMode", () => {
+  test("omitted is AUTO, and costs no capability on any backend", () => {
+    expect(resolveTileMode(undefined, FIREFOX_CAPS, "png", undefined)).toBeUndefined();
+    expect(resolveTileMode(undefined, CHROME_CAPS, "png", undefined)).toBeUndefined();
+    // Auto with jpeg/base64 is legal: they only collide if the projection actually needs bands,
+    // and that is not known until the driver has measured the page.
+    expect(resolveTileMode(undefined, CHROME_CAPS, "jpeg", true)).toBeUndefined();
+  });
+  test("false passes through everywhere, and never asks for a capability", () => {
+    expect(resolveTileMode(false, FIREFOX_CAPS, "jpeg", true)).toBe(false);
+    expect(resolveTileMode(false, CHROME_CAPS, "png", undefined)).toBe(false);
+  });
+  test("true needs screenshot.tile, and names the workaround when the backend lacks it", () => {
+    expect(resolveTileMode(true, CHROME_CAPS, "png", undefined)).toBe(true);
+    expect(() => resolveTileMode(true, FIREFOX_CAPS, "png", undefined)).toThrow(/not supported by this backend/);
+    expect(() => resolveTileMode(true, FIREFOX_CAPS, "png", undefined)).toThrow(/--browser chrome/);
+  });
+  test("true + jpeg and true + returnBase64 are refused, each naming its own fix", () => {
+    expect(() => resolveTileMode(true, CHROME_CAPS, "jpeg", undefined)).toThrow(/PNG-only/);
+    expect(() => resolveTileMode(true, CHROME_CAPS, "jpeg", undefined)).toThrow(/format:"png"/);
+    expect(() => resolveTileMode(true, CHROME_CAPS, "png", true)).toThrow(/'returnBase64' cannot be combined/);
+    expect(() => resolveTileMode(true, CHROME_CAPS, "png", true)).toThrow(/Read the file at the returned path/);
+  });
+  test("a non-boolean is refused rather than coerced", () => {
+    expect(() => resolveTileMode("yes" as unknown as boolean, CHROME_CAPS, "png", undefined)).toThrow(/must be true, false, or omitted/);
+  });
+});
+
+describe("takeScreenshot() tiled wiring", () => {
+  const TILE_PATH = join(tmpdir(), "cdp-toolkit-tile.test.png");
+  async function shootTiled(driver: BrowserDriver, args: Record<string, unknown> = {}) {
+    return takeScreenshot(driver, { savePath: TILE_PATH, ...args });
+  }
+  afterAll(async () => {
+    await rm(TILE_PATH, { force: true });
+  });
+
+  test("pipes the driver's bands into the stitcher and reports the STITCHER's measured size", async () => {
+    const { driver, pulled } = stubTilingDriver(CHROME_CAPS, [30, 30, 7]);
+    const result = await shootTiled(driver, { tile: true });
+    expect(result.tiled).toBe(true);
+    expect(result.bands).toBe(3);
+    expect(pulled).toEqual([0, 1, 2]); // every band captured, in order
+    // 30 + 30 + 7: the height is the one the stitcher actually wrote, not 3 x the band height.
+    expect({ width: result.width, height: result.height }).toEqual({ width: 40, height: 67 });
+    expect(result.format).toBe("png");
+    expect(result.path).toBe(TILE_PATH);
+    // The file on disk really is that image — read back with the SAME decoder the one-shot path uses.
+    const onDisk = new Uint8Array(await readFile(TILE_PATH));
+    expect(imagePixelSize(onDisk)).toEqual({ width: 40, height: 67 });
+    expect(result.bytes).toBe(onDisk.byteLength);
+  });
+  test("a one-shot capture carries NEITHER new field: absent means not tiled", async () => {
+    const { driver } = stubDriver(CHROME_CAPS, pngHeader(2780, 2128));
+    const result = await shoot(driver);
+    expect("tiled" in result).toBe(false);
+    expect("bands" in result).toBe(false);
+  });
+  test("tile reaches the driver only when it was given, so the default call is unchanged", async () => {
+    const { driver: autoDriver, shotCalls: autoCalls } = stubDriver(CHROME_CAPS, pngHeader(10, 10));
+    await shoot(autoDriver);
+    expect("tile" in (autoCalls[0] ?? {})).toBe(false);
+    const { driver: offDriver, shotCalls: offCalls } = stubDriver(CHROME_CAPS, pngHeader(10, 10));
+    await shoot(offDriver, { tile: false });
+    expect(offCalls[0]?.tile).toBe(false);
+  });
+  test("AUTO + jpeg refuses from the consumer, before a single band is captured", async () => {
+    const { driver, pulled } = stubTilingDriver(CHROME_CAPS, [30, 30]);
+    await expect(shootTiled(driver, { format: "jpeg" })).rejects.toThrow(/PNG-only/);
+    // The count and the region ride along, so the refusal explains WHY this capture needed bands.
+    await expect(shootTiled(driver, { format: "jpeg" })).rejects.toThrow(/needs 2 bands \(40x60 css px/);
+    expect(pulled).toEqual([]);
+  });
+  test("AUTO + returnBase64 refuses the same way, for the size reason rather than the format one", async () => {
+    const { driver, pulled } = stubTilingDriver(CHROME_CAPS, [30, 30]);
+    await expect(shootTiled(driver, { returnBase64: true })).rejects.toThrow(/'returnBase64' cannot be combined with a tiled capture/);
+    expect(pulled).toEqual([]);
+  });
+  test("a render size applied around a tiled capture still rides back on the result", async () => {
+    const { driver } = stubTilingDriver(CHROME_CAPS, [20, 20]);
+    // The stub's screenshot() echoes no render fields, so this pins the tool layer's own guard:
+    // renderSize is reported from the DRIVER's answer, never from what was asked for.
+    const result = await shootTiled(driver, { tile: true, renderWidth: 900, renderHeight: 700 });
+    expect(result.tiled).toBe(true);
+    expect("renderSize" in result).toBe(false);
+  });
+});
+
+describe("screenshot.tile capability (ADR-001: a PARAM gap, and an UNMEASURED one)", () => {
+  test("only Chrome declares it, and take_screenshot stays available on both backends", () => {
+    expect(CHROME_CAPS.has("screenshot.tile")).toBe(true);
+    expect(FIREFOX_CAPS.has("screenshot.tile")).toBe(false);
+    expect(toolAvailability("chrome").available).toContain("take_screenshot");
+    expect(toolAvailability("firefox").available).toContain("take_screenshot");
+    expect(REQUIRED_CAPABILITIES.take_screenshot).toBeUndefined();
+  });
+  test("the BiDi driver refuses tile:true itself, saying it is unmeasured rather than impossible", async () => {
+    // A real BidiPageDriver over a connection that would throw if touched: the refusal has to
+    // happen before any browsingContext.captureScreenshot is attempted.
+    const conn = { send() { throw new Error("no BiDi command should be sent"); } } as unknown as BidiConnection;
+    const page = new BidiPageDriver(conn, "ctx-1", INFO, { scheme: "bidi" } as unknown as BrowserDriver);
+    await expect(page.screenshot({ tile: true })).rejects.toThrow(/not supported by this backend/);
+    await expect(page.screenshot({ tile: true })).rejects.toThrow(/was not driven for it/);
+    await expect(page.screenshot({ tile: true })).rejects.toThrow(/--browser chrome/);
   });
 });

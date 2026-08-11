@@ -31,6 +31,7 @@ import {
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
   type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
+  type BandConsumer, type CaptureDelivery,
 } from "../driver.ts";
 import { assertLeaseOk } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
@@ -293,6 +294,11 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * above already rides, applied for one capture and undone afterwards. Refusing it would be dishonest
  * in the opposite direction — claiming a missing primitive this driver demonstrably has. Contrast
  * screenshot.scale, absent because captureScreenshot genuinely has no scale parameter.
+ * screenshot.tile is absent for a THIRD reason, neither "has it" nor "no such parameter": the
+ * primitive plausibly exists (clip:{type:"box"}) but nothing about band tiling has been measured on
+ * this backend, and the Chrome declaration rests entirely on measurement. An undeclared capability
+ * that turns out to work is a follow-up; a declared one that silently mis-stitches is a wrong image
+ * the caller cannot tell from a right one.
  */
 const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "emulate.deviceMetrics", "screenshot.fullPage", "screenshot.element", "screenshot.renderSize", "network.intercept", "locate.xpath",
@@ -790,7 +796,7 @@ class BidiPageDriver implements PageDriver {
    * window (CDP's clear does not, for an override another session set), and whether it reflows
    * synchronously the way setDeviceMetricsOverride was measured to.
    */
-  async screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
+  async screenshot<T>(opts?: ScreenshotOptions, _consumeBands?: BandConsumer<T>): Promise<CaptureDelivery<T>> {
     const renderSize =
       opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
         ? { width: opts.renderWidth, height: opts.renderHeight }
@@ -851,6 +857,24 @@ class BidiPageDriver implements PageDriver {
         `screenshot scale ${opts.scale} is not supported by this backend (WebDriver BiDi's ` +
           "browsingContext.captureScreenshot has no scale parameter). Call emulate with " +
           `deviceScaleFactor:${opts.scale} first and capture at scale 1, or use --browser chrome.`,
+      );
+    }
+    // Same ADR-001 param-level shape, and the reason is HONESTY rather than a missing primitive.
+    // browsingContext.captureScreenshot does take clip:{type:"box",x,y,width,height}, so a banded
+    // capture is probably implementable here — but Firefox was not launched for this change, so
+    // every property band tiling depends on is unmeasured on this backend: whether a box clip
+    // renders content outside the viewport at all, whether clip.y is CSS px, whether fixed elements
+    // repeat per band, whether seams are pixel-exact. Each of those was measured on Chrome before
+    // the Chrome path was declared. Shipping an unverified twin would put a silently-wrong stitch in
+    // front of a caller, so this refuses and says why. `tile:false` and the default (auto, which
+    // never bands here) ask this backend for nothing and are untouched.
+    if (opts?.tile === true) {
+      throw driverError(
+        "unsupported",
+        "screenshot tile:true is not supported by this backend: band tiling is declared only where the band " +
+          "arithmetic has been measured against a real browser, and Firefox was not driven for it " +
+          '(browsingContext.captureScreenshot\'s clip:{type:"box"} is the primitive it would ride, untested). ' +
+          "Capture a smaller region or a single element, or use --browser chrome for a tiled capture.",
       );
     }
     const format = opts?.format ?? "png";
@@ -1342,6 +1366,13 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     Firefox is next driven: whether a null viewport reverts to the real window (CDP's clear does
  *     NOT, for an override another session set), and whether setViewport reflows synchronously the
  *     way Emulation.setDeviceMetricsOverride was measured to on Chrome.
+ *   - screenshot.tile: not declared, and unlike screenshot.scale this is an UNMEASURED gap rather
+ *     than a missing parameter. captureScreenshot does take clip:{type:"box"}, so bands are probably
+ *     implementable — but every property band tiling rests on (does a box clip render past the
+ *     viewport, is clip.y CSS px, do fixed elements repeat per band, are seams pixel-exact) was
+ *     measured on Chrome and on nothing else, and Firefox was not launched here. `tile:true` is a
+ *     refusal in screenshot() naming --browser chrome; the default (auto) never bands on this
+ *     backend, so it is unchanged.
  *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
  *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
  *     emulation have no verified-working BiDi path in this environment, so emulate() never claims

@@ -141,6 +141,7 @@ export type Capability =
   | "screenshot.element" // capture clipped to a single element
   | "screenshot.scale" // per-capture output-pixel multiplier; no permanent emulation change
   | "screenshot.renderSize" // emulate a viewport for the duration of ONE capture, then put the old one back
+  | "screenshot.tile" // capture past the backend's one-image encode limit as vertical bands, stitched losslessly
   | "network.intercept" // fulfill, fail, or continue a matched request
   | "network.responseBodyPostHoc" // read a body for a request not armed in advance
   | "snapshot.accessibilityTree" // native a11y dump, not a DOM-walk approximation
@@ -371,6 +372,92 @@ export interface ScreenshotOptions {
    */
   renderWidth?: number; // requires "screenshot.renderSize"
   renderHeight?: number; // requires "screenshot.renderSize"
+  /**
+   * Whether this capture may be taken as vertical BANDS and stitched, instead of as one image.
+   * Three-valued, and the middle value is the default:
+   *
+   *   undefined  AUTO. One shot when the projected output fits under the backend's per-image encode
+   *              limit, banded when it does not. A capture that fits is byte-for-byte the call it
+   *              always was — the same params on the wire, no clip synthesized that was not there
+   *              before — so auto costs the common path nothing but the layout-metrics round trip
+   *              the decision itself needs.
+   *   false      NEVER band. A capture past the limit is REFUSED by the encode guard instead. This
+   *              is the escape hatch back to the exact pre-tiling behaviour.
+   *   true       ALWAYS band, even when one shot would have fitted. Mainly so the banded path is
+   *              directly testable on an ordinary page; see the driver for why "always" is made to
+   *              mean at least two bands rather than a one-band no-op.
+   *
+   * AUTO IS THE DEFAULT BECAUSE THE ALTERNATIVE IS A WEDGED TAB, not because banding is free.
+   * Measured (see MAX_ENCODED_SIDE_PX in ../cdp/driver.ts): a plain capture of a document past the
+   * limit does not fail fast — Page.captureScreenshot never answers, and because captureBeyondViewport
+   * resizes the page to the clip for the length of the capture, the tab is left stuck at that size
+   * with every later screenshot timing out too.
+   *
+   * Requires Capability "screenshot.tile" only for `true`. `undefined` and `false` ask a backend for
+   * nothing it cannot already do.
+   */
+  tile?: boolean; // `true` requires "screenshot.tile"
+}
+
+/**
+ * A capture too big for one image, handed to the tool layer band by band.
+ *
+ * LAZY BY CONTRACT, not by convenience: the Nth band's Page.captureScreenshot runs only when the
+ * consumer pulls the Nth band, so a driver never holds two bands at once and a whole 1.4 GB image
+ * never exists in memory. Accumulating the bands into an array first would typecheck, work on a
+ * small page, and defeat the entire point of the streaming stitcher on a large one.
+ *
+ * VERTICAL ONLY, AND THAT IS A SCOPE DECISION RATHER THAN AN OVERSIGHT. Bands stack top to bottom
+ * because that is the one direction a PNG can be concatenated without decoding it whole: scanlines
+ * are the unit, so appending rows is cheap and appending columns is not. A region whose projected
+ * WIDTH alone is past the limit is therefore refused, naming the width, rather than silently
+ * truncated or split into a grid this stitcher cannot reassemble.
+ */
+export interface BandedCapture {
+  /** The bands, top to bottom, produced one at a time. */
+  bands: AsyncIterable<Uint8Array>;
+  /** How many bands the sequence will yield. Known before the first one is captured. */
+  bandCount: number;
+  /** Height of every band but the last, in CSS px. The last is the remainder. */
+  bandHeightCss: number;
+  /** The whole region being tiled, CSS px, in document coordinates. */
+  clip: { x: number; y: number; width: number; height: number };
+  /** Always "png": the stitch is a PNG-scanline concatenation, and there is no lossless JPEG one. */
+  format: "png";
+}
+
+/**
+ * The tool layer's half of a banded capture: consume the bands and return whatever was made of
+ * them. Called at most once per capture, BEFORE the first band is taken, so a consumer that cannot
+ * accept a banded capture at all (it was asked for JPEG, or for base64 of a 300 MB image) refuses
+ * by throwing here and no band is ever captured.
+ *
+ * This is why the driver takes a callback rather than returning the iterable: a banded capture may
+ * hold a viewport override for its whole duration, and the driver can only put that back once it
+ * knows the consumer is finished. Handing the iterable out would end the driver's call while the
+ * page was still emulated.
+ */
+export type BandConsumer<T> = (capture: BandedCapture) => Promise<T>;
+
+/** What a banded capture returns in place of bytes: the consumer's own answer, plus how it was split. */
+export interface TiledScreenshotResult<T> {
+  tiled: true;
+  format: "png";
+  bandCount: number;
+  bandHeightCss: number;
+  /** Whatever the BandConsumer returned — for take_screenshot, the stitcher's measured report. */
+  consumed: T;
+  /** Same three render-size fields a one-shot capture carries, same meaning. */
+  renderSize?: { width: number; height: number };
+  renderRestored?: boolean;
+  renderRestoreError?: string;
+}
+
+/** One capture, delivered whole or in bands. Discriminate with isTiledCapture. */
+export type CaptureDelivery<T> = ScreenshotResult | TiledScreenshotResult<T>;
+
+export function isTiledCapture<T>(delivery: CaptureDelivery<T>): delivery is TiledScreenshotResult<T> {
+  return (delivery as { tiled?: unknown }).tiled === true;
 }
 
 /**
@@ -796,8 +883,16 @@ export interface PageDriver {
   /* rendering */
   /** Returns raw image bytes. Artifact naming and writing stay in the tool. Under
    *  renderWidth/renderHeight it also reports the emulated size it ran at and whether the previous
-   *  viewport was put back — see ScreenshotResult. */
-  screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult>;
+   *  viewport was put back — see ScreenshotResult.
+   *
+   *  `consumeBands` is how a caller says it can accept a capture too big to encode as one image
+   *  (see BandedCapture). Omitting it is a real and honest state, not a shortcut: a caller with
+   *  nowhere to put a band sequence gets the encode guard's refusal instead of a wedged tab, which
+   *  is exactly the pre-tiling behaviour. Supplying it lets the driver band the capture when the
+   *  projection demands it (the default) or when `tile:true` asks for it. The driver calls it at
+   *  most once and awaits it, so the whole capture — every band — is finished before this method
+   *  resolves and before any viewport override is put back. */
+  screenshot<T>(opts?: ScreenshotOptions, consumeBands?: BandConsumer<T>): Promise<CaptureDelivery<T>>;
   /** Apply overrides. Returns the field names actually applied. An implementation that applies
    *  device metrics MUST record them with writeViewportRecord (and clear the record under
    *  clearOverrides), or a later render-size capture will restore by clearing and destroy them. */

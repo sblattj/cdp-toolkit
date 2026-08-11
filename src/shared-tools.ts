@@ -36,8 +36,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
-  BrowserCookie, BrowserDriver, Capability, DragDestination, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
+  BandedCapture, BrowserCookie, BrowserDriver, Capability, DragDestination, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
 } from "./driver.ts";
+import { isTiledCapture } from "./driver.ts";
+import { stitchPngBandsToFile } from "./png.ts";
 import type { TargetSelector } from "./types.ts";
 import {
   assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, listLeases, releaseLeaseFor, requireLease,
@@ -1122,6 +1124,70 @@ export function resolveRenderSize(
   return { width: renderWidth, height: renderHeight };
 }
 
+/**
+ * take_screenshot's `tile`, and the fourth backend gate in this file (resolveDragMode,
+ * resolveScreenshotScale and resolveRenderSize are the first three, and this follows their shape).
+ *
+ * THREE-VALUED, AND THE DEFAULT IS AUTO — the one decision in this feature that is not a preference.
+ * A capture past the backend's per-image encode limit does not fail politely: measured on
+ * Chrome/151.0.7922.76, Page.captureScreenshot never answers and the tab is left resized to the
+ * clip with every later screenshot timing out. Whole-page capture is what take_screenshot is for, so
+ * the default has to be the one that returns the whole page: one shot when it fits, bands when it
+ * does not. `false` is the escape hatch back to the exact pre-tiling behaviour (refuse rather than
+ * band), `true` forces the banded path so it is directly testable.
+ *
+ * ONLY `true` COSTS A CAPABILITY. Auto asks a backend for nothing it cannot do — a driver without
+ * "screenshot.tile" simply never bands, exactly as it behaved before this feature — so gating auto
+ * would delete the default behaviour on Firefox for no gain. Exported for the unit tests.
+ */
+export function resolveTileMode(
+  tile: boolean | undefined,
+  capabilities: ReadonlySet<Capability>,
+  format: "png" | "jpeg",
+  returnBase64: boolean | undefined,
+): boolean | undefined {
+  if (tile === undefined) return undefined;
+  if (typeof tile !== "boolean") throw new SharedToolError(`take_screenshot: 'tile' must be true, false, or omitted for automatic (got ${JSON.stringify(tile)})`);
+  if (!tile) return false;
+  if (!capabilities.has("screenshot.tile")) {
+    throw new SharedToolError(
+      "take_screenshot: 'tile' is not supported by this backend (band tiling is declared only where the band arithmetic was measured against a real browser; " +
+        "Firefox was not driven for it). Capture a smaller region or a single element, or use --browser chrome for a tiled capture.",
+    );
+  }
+  // Asked for explicitly, so refuse explicitly and BEFORE a socket is opened. The same two
+  // combinations reached by AUTO are refused with the same words, one layer later — see
+  // tiledCaptureRefusal's call site inside takeScreenshot.
+  if (format !== "png") throw tiledCaptureRefusal("format");
+  if (returnBase64) throw tiledCaptureRefusal("base64");
+  return true;
+}
+
+/**
+ * The two things a tiled capture cannot also be, in one place so the explicit (`tile:true`, refused
+ * before a socket is opened) and the automatic (refused the instant the driver offers bands, before
+ * the first one is captured) paths cannot drift into two different explanations of the same wall.
+ *
+ * `banded` is present only on the automatic path, where the driver has already measured what it
+ * would take: naming the band count and the region turns "you cannot have this" into "you cannot
+ * have this because your page is this big".
+ */
+function tiledCaptureRefusal(reason: "format" | "base64", banded?: BandedCapture): SharedToolError {
+  const because = banded
+    ? ` This capture needs ${banded.bandCount} bands (${banded.clip.width}x${banded.clip.height} css px is past what one image can encode).`
+    : "";
+  if (reason === "format") {
+    return new SharedToolError(
+      "take_screenshot: a tiled capture is PNG-only — bands are stitched by concatenating PNG scanlines, and there is no lossless " +
+        `JPEG equivalent to concatenate.${because} Pass format:"png", or lower scale / narrow the region until one JPEG fits.`,
+    );
+  }
+  return new SharedToolError(
+    "take_screenshot: 'returnBase64' cannot be combined with a tiled capture — a tiled image runs to hundreds of megabytes and base64 " +
+      `inflates it by a third, into the caller's response.${because} Read the file at the returned path instead, or capture a region small enough for one shot.`,
+  );
+}
+
 /** PNG: an 8-byte signature, then an IHDR chunk whose payload opens with two big-endian uint32s. */
 function pngPixelSize(b: Uint8Array, view: DataView): { width: number; height: number } | undefined {
   if (b.length < 24) return undefined;
@@ -1198,6 +1264,16 @@ export interface ScreenshotToolResult {
   scale: number;
   width?: number;
   height?: number;
+  /**
+   * Present, and true, ONLY when this capture was taken as bands and stitched. Auto-tiling is
+   * silent about nothing: a caller who never asked for tiling still learns their image came from
+   * `bands` separate captures, which is what makes the lazy-content caveat theirs to reason about
+   * (a page that only loads content on real scroll renders blank in bands past the first viewport —
+   * a property of the page, not of the stitch, but invisible unless the tiling is reported).
+   */
+  tiled?: true;
+  /** How many captures the image was assembled from. Present only alongside `tiled`. */
+  bands?: number;
   /** The emulated viewport the capture ran at. */
   renderSize?: { width: number; height: number };
   /** False means the page is STILL emulated at renderSize: the caller has to put it back. */
@@ -1211,7 +1287,7 @@ export async function takeScreenshot(
   args: {
     target?: TargetSelector; format?: "png" | "jpeg"; quality?: number; fullPage?: boolean;
     uid?: DriverUid; selector?: string; savePath?: string; returnBase64?: boolean; scale?: number;
-    renderWidth?: number; renderHeight?: number;
+    renderWidth?: number; renderHeight?: number; tile?: boolean;
   } = {},
 ): Promise<ScreenshotToolResult> {
   if ((args.uid !== undefined && args.uid !== "") && args.selector) throw new SharedToolError("provide exactly one of uid or selector, not both");
@@ -1222,28 +1298,41 @@ export async function takeScreenshot(
   // rejected call cannot be the one that leaves a page mutated.
   const scale = resolveScreenshotScale(args.scale, driver.capabilities);
   const renderSize = resolveRenderSize(args.renderWidth, args.renderHeight, driver.capabilities);
+  const tile = resolveTileMode(args.tile, driver.capabilities, format, args.returnBase64);
   return withPage(driver, args.target, async (page) => {
     const clip = args.uid !== undefined || args.selector ? locatorOf(args) : undefined;
+    const ext = format === "jpeg" ? "jpg" : "png";
+    // Named BEFORE the capture, because a banded capture writes straight to its destination as the
+    // bands arrive — there is never a complete image in memory to name a file after. The one-shot
+    // path names it at the same moment for the same reason a single path is easier to trust than
+    // two; the only visible effect is that the default filename's stamp is the capture's start.
+    const path = args.savePath ?? join(ARTIFACT_DIR, `screenshot-${page.info.id.slice(0, 8)}-${stamp()}.${ext}`);
+    // The tool layer owns files, the driver owns the protocol: the driver decides that this capture
+    // has to be banded and produces the bands, and this callback is the only thing that knows where
+    // they go. It runs BEFORE the first band is captured, which is what lets the two combinations a
+    // stitched capture cannot serve refuse without a single wasted Page.captureScreenshot.
+    const stitch = async (banded: BandedCapture) => {
+      if (format !== "png") throw tiledCaptureRefusal("format", banded);
+      if (args.returnBase64) throw tiledCaptureRefusal("base64", banded);
+      return stitchPngBandsToFile(banded.bands, path);
+    };
     const shot = await page.screenshot({
       format, quality: args.quality, fullPage: args.fullPage, scale,
       ...(clip ? { clip } : {}),
       ...(renderSize ? { renderWidth: renderSize.width, renderHeight: renderSize.height } : {}),
-    });
-    const { data, format: outFormat } = shot;
-    if (data.byteLength === 0) throw new SharedToolError("captureScreenshot returned empty data");
-    await mkdir(ARTIFACT_DIR, { recursive: true });
-    const ext = outFormat === "jpeg" ? "jpg" : "png";
-    const path = args.savePath ?? join(ARTIFACT_DIR, `screenshot-${page.info.id.slice(0, 8)}-${stamp()}.${ext}`);
-    await writeFile(path, Buffer.from(data));
-    const size = imagePixelSize(data);
-    const result: ScreenshotToolResult = {
-      path, bytes: data.byteLength, format: outFormat, target: target3(page.info), scale,
-    };
-    // Absent beats invented: undecodable bytes leave width/height off the result entirely.
-    if (size) {
-      result.width = size.width;
-      result.height = size.height;
-    }
+      ...(tile !== undefined ? { tile } : {}),
+    }, stitch);
+    const result: ScreenshotToolResult = isTiledCapture(shot)
+      ? {
+          // width/height/bytes come from the STITCHER, which is the only thing that ever saw the
+          // whole image: re-reading a several-hundred-MB PNG off disk to decode an IHDR this call
+          // already computed would be slower and no more true. Still measured, never projected —
+          // the stitcher patches the IHDR with the rows it actually wrote.
+          path, bytes: shot.consumed.bytes, format: "png", target: target3(page.info), scale,
+          width: shot.consumed.width, height: shot.consumed.height,
+          tiled: true, bands: shot.consumed.bands,
+        }
+      : await writeOneShot(shot.data, shot.format, path, target3(page.info), scale, args.returnBase64);
     // What actually happened to the page, reported from the DRIVER's answer rather than from what
     // was asked for. renderRestored:false means the caller's tab is still emulated at renderSize
     // and they have to fix it — the one outcome that must never be swallowed, so it rides back on
@@ -1253,9 +1342,33 @@ export async function takeScreenshot(
       result.renderRestored = shot.renderRestored ?? false;
       if (shot.renderRestoreError !== undefined) result.renderRestoreError = shot.renderRestoreError;
     }
-    if (args.returnBase64) result.base64 = Buffer.from(data).toString("base64");
     return result;
   });
+}
+
+/** The one-shot half of takeScreenshot: bytes in hand, so the file is written here and the size is
+ *  DECODED from those bytes. Unchanged from before tiling existed, split out only so the tiled arm
+ *  above reads as the one difference it is. */
+async function writeOneShot(
+  data: Uint8Array,
+  outFormat: "png" | "jpeg",
+  path: string,
+  target: { id: string; url: string; title: string },
+  scale: number,
+  returnBase64: boolean | undefined,
+): Promise<ScreenshotToolResult> {
+  if (data.byteLength === 0) throw new SharedToolError("captureScreenshot returned empty data");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, Buffer.from(data));
+  const size = imagePixelSize(data);
+  const result: ScreenshotToolResult = { path, bytes: data.byteLength, format: outFormat, target, scale };
+  // Absent beats invented: undecodable bytes leave width/height off the result entirely.
+  if (size) {
+    result.width = size.width;
+    result.height = size.height;
+  }
+  if (returnBase64) result.base64 = Buffer.from(data).toString("base64");
+  return result;
 }
 
 export async function emulate(

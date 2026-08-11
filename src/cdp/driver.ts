@@ -18,7 +18,8 @@ import {
   type SetCookieParams,
   type DragDestination, type DragOptions,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
-  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
+  type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
+  type BandConsumer, type BandedCapture, type CaptureDelivery, type TiledScreenshotResult,
 } from "../driver.ts";
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -412,6 +413,90 @@ function assertClipEncodable(
         : ` — capture a smaller region or drop fullPage.`),
   );
 }
+/** The encoded size a clip projects to, the one number every guard and every band decision is made
+ *  on. `scale` and the device pixel ratio BOTH multiply — measured, see devicePixelsPerCssPx. */
+function projectedSide(cssLength: number, scale: number, devicePx: number): number {
+  return Math.ceil(cssLength * scale * devicePx);
+}
+
+/**
+ * How the capture is split, decided before a single Page.captureScreenshot is sent. Pure and
+ * exported so the arithmetic is unit-testable without a browser: getting it wrong is invisible in
+ * a small test and catastrophic on a 140,000 px page.
+ *
+ * BAND HEIGHT IS IN CSS PX AND SO IS clip.y, and that is MEASURED, not assumed. A ruler page with
+ * a marker at CSS y=4000-4008, clipped {y:3980,height:40}, put the marker at the same CSS position
+ * at scale 1 and at scale 2 — the output was simply twice the resolution. So a band advances by
+ * bandHeightCss regardless of scale or device pixel ratio; multiplying the offset by either would
+ * skip or repeat that factor's worth of page on every seam.
+ *
+ * WHY `tile:true` ON A FITTING REGION STILL SPLITS IN TWO. The flag exists so the banded path can
+ * be exercised on an ordinary page. A band height derived only from the cap would return ONE band
+ * for any page small enough to be convenient to test, i.e. `tile:true` would be a no-op on exactly
+ * the pages someone would use it to check seams with. So an explicit `true` also halves a region
+ * that already fits. It stays lossless either way (the stitcher is byte-exact; a seam is not a
+ * resample), and the result reports the band count honestly.
+ */
+export interface TilePlan {
+  tiled: boolean;
+  /** How many Page.captureScreenshot calls. 1 when not tiled. */
+  bandCount: number;
+  /** CSS-px height of every band but the last; the last is the remainder. */
+  bandHeightCss: number;
+}
+export function planTiledCapture(
+  clip: { width: number; height: number },
+  scale: number,
+  devicePx: number,
+  tile: boolean | undefined,
+): TilePlan {
+  const untiled: TilePlan = { tiled: false, bandCount: 1, bandHeightCss: clip.height };
+  if (tile === false) return untiled;
+  const fits =
+    projectedSide(clip.width, scale, devicePx) <= MAX_ENCODED_SIDE_PX &&
+    projectedSide(clip.height, scale, devicePx) <= MAX_ENCODED_SIDE_PX;
+  if (fits && tile !== true) return untiled;
+  // WIDTH CANNOT BE TILED, and this refusal is the deliberate edge of the feature's scope. The
+  // stitcher concatenates PNG scanlines, so it can only grow the image downward; a too-wide
+  // capture would need a grid and a horizontal join it cannot do. Refusing names the two knobs
+  // that actually shrink a width — the alternative, silently capturing 16384 px of a wider page,
+  // would hand back a truncated picture indistinguishable from a complete one.
+  const outWidth = projectedSide(clip.width, scale, devicePx);
+  if (outWidth > MAX_ENCODED_SIDE_PX) {
+    const maxCssWidth = Math.floor(MAX_ENCODED_SIDE_PX / (scale * devicePx));
+    throw driverError(
+      "page-error",
+      `this capture is ${outWidth} px WIDE (clip ${clip.width} css px x scale ${scale} x device pixel ratio ${devicePx}), ` +
+        `past Chrome's ${MAX_ENCODED_SIDE_PX} px per-side limit, and width cannot be tiled: bands are stitched ` +
+        `vertically only. Lower scale (at most ${Math.floor((MAX_ENCODED_SIDE_PX / (clip.width * devicePx)) * 100) / 100}), ` +
+        `or set renderWidth at most ${maxCssWidth} css px, or clip to a narrower element.`,
+    );
+  }
+  // The largest band whose PROJECTION still fits: ceil(h x scale x devicePx) <= cap. The loop is a
+  // floating-point backstop — floor() alone is right for every integer ratio, but a fractional
+  // scale x ratio can land a hair above the cap after ceil(), and a band one pixel over is not an
+  // off-by-one, it is the hang this whole feature exists to avoid. Measured by mutation: dropping
+  // devicePx from the floor() alone changes NOTHING, because the loop walks the value back down to
+  // the same answer (slowly, one px at a time). The loop is the correctness; the floor is the speed.
+  let bandHeightCss = Math.floor(MAX_ENCODED_SIDE_PX / (scale * devicePx));
+  while (bandHeightCss > 1 && projectedSide(bandHeightCss, scale, devicePx) > MAX_ENCODED_SIDE_PX) bandHeightCss -= 1;
+  // UNREACHABLE AS THINGS STAND, and said so rather than presented as a live branch: a band height
+  // below 1 needs scale x devicePx past the cap, and every clip is at least 1 css px wide (both
+  // clip builders ceil, and a zero-area element is refused before this), so the width check above
+  // has already thrown. Kept because it is the invariant the loop depends on — a zero band height
+  // would make bandCount infinite — not because a caller can get here today.
+  if (bandHeightCss < 1) {
+    throw driverError(
+      "page-error",
+      `scale ${scale} at device pixel ratio ${devicePx} projects a single css pixel to ${scale * devicePx} device px, ` +
+        `past the ${MAX_ENCODED_SIDE_PX} px limit — no band height can fit. Lower scale.`,
+    );
+  }
+  // An explicit `true` on a region that already fits: split it for real (see the header).
+  if (tile === true && clip.height <= bandHeightCss) bandHeightCss = Math.max(1, Math.ceil(clip.height / 2));
+  return { tiled: true, bandCount: Math.max(1, Math.ceil(clip.height / bandHeightCss)), bandHeightCss };
+}
+
 async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
   const backendNodeId = await backendNodeIdOf(conn, loc);
   await conn.send("DOM.scrollIntoViewIfNeeded", { backendNodeId }).catch(() => undefined);
@@ -466,11 +551,18 @@ async function elementClip(conn: CdpConnection, loc: ElementLocator): Promise<{ 
  * browsingContext.setViewport is a real equivalent and the Firefox driver declares it too. Both
  * drivers already declare emulate.deviceMetrics on the very same primitive, so a backend that could
  * not honour this would be a backend that cannot emulate a viewport at all.
+ * screenshot.tile rides the SAME clip.scale primitive as screenshot.scale, sent once per band with
+ * clip.y walked down the document, plus ../png.ts's stitcher. It is declared here and NOT for BiDi,
+ * for the honest reason rather than a protocol one: band tiling was measured against a real Chrome
+ * (fixed and sticky elements do not repeat per band, seams are pixel-exact, clipped bands are
+ * scroll-independent, and clip.y/clip.height stay CSS px while scale only changes resolution), and
+ * no Firefox was driven to measure the same for browsingContext.captureScreenshot's clip:{type:"box"}.
+ * Declaring an unmeasured tiling would be claiming a capability on the strength of a spec reading.
  */
 const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "trace.performance", "heap.snapshot", "audit.lighthouse", "emulate.cpuThrottling",
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
-  "screenshot.fullPage", "screenshot.element", "screenshot.scale", "screenshot.renderSize", "network.intercept",
+  "screenshot.fullPage", "screenshot.element", "screenshot.scale", "screenshot.renderSize", "screenshot.tile", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag",
   "browser.downloads", "browser.permissions", "worker.targets",
@@ -868,13 +960,19 @@ class CdpPageDriver implements PageDriver {
    * that tab (innerHeight stuck at the content height) and is expensive to even diagnose. When the
    * restore ITSELF fails there is no result to carry the bad news, so the fact is appended to the
    * error message instead — the caller's page really is still emulated and silence would be a lie.
+   *
+   * A BANDED CAPTURE HOLDS THE OVERRIDE FOR ITS WHOLE LENGTH, deliberately. capture() awaits the
+   * band consumer, so this method does not reach its restore until the last band has been captured
+   * AND written. That is the only correct ordering: every band has to be rendered at the same
+   * emulated viewport, and putting the viewport back halfway would reflow the document under the
+   * remaining bands and stitch two different layouts into one image.
    */
-  async screenshot(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
+  async screenshot<T>(opts?: ScreenshotOptions, consumeBands?: BandConsumer<T>): Promise<CaptureDelivery<T>> {
     const renderSize =
       opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
         ? { width: opts.renderWidth, height: opts.renderHeight }
         : undefined;
-    if (!renderSize) return this.capture(opts);
+    if (!renderSize) return this.capture(opts, consumeBands);
     // Read BEFORE applying ours: our own setDeviceMetricsOverride overwrites the browser's state
     // and there is no CDP command that reads a device-metrics override back out.
     const previous = await readViewportRecord(this.browser.scheme, this.info.id);
@@ -886,10 +984,10 @@ class CdpPageDriver implements PageDriver {
       deviceScaleFactor: previous?.deviceScaleFactor ?? 0,
       mobile: previous?.mobile ?? false,
     });
-    let shot: ScreenshotResult | undefined;
+    let shot: CaptureDelivery<T> | undefined;
     let captureError: unknown;
     try {
-      shot = await this.capture(opts);
+      shot = await this.capture(opts, consumeBands);
     } catch (e) {
       captureError = e;
     }
@@ -919,18 +1017,18 @@ class CdpPageDriver implements PageDriver {
       }
       throw captureError;
     }
-    const result: ScreenshotResult = { ...shot, renderSize, renderRestored: restoreError === undefined };
+    // Object.assign onto the result we just built, rather than a spread: `shot` is a union
+    // (bytes or bands) and mutating it keeps whichever arm it is, discriminant and all.
+    const result = Object.assign(shot, { renderSize, renderRestored: restoreError === undefined });
     if (restoreError !== undefined) result.renderRestoreError = restoreError;
     return result;
   }
   /** The capture itself, with no viewport emulation of its own. Split out so screenshot()'s restore
    *  wraps EVERY way this can fail, the throwing paths included. */
-  private async capture(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
+  private async capture<T>(opts?: ScreenshotOptions, consumeBands?: BandConsumer<T>): Promise<CaptureDelivery<T>> {
     await this.ensureDomain("Page");
     const format = opts?.format ?? "png";
     const quality = format === "jpeg" ? (opts?.quality ?? 80) : undefined;
-    const params: Record<string, unknown> = { format, captureBeyondViewport: true };
-    if (quality != null) params.quality = quality;
     // scale absent (or exactly 1) must leave this call byte-for-byte what it was: clip.scale stays
     // 1 on the element/fullPage paths and the plain no-clip path still sends NO clip at all.
     const scale = opts?.scale ?? 1;
@@ -938,35 +1036,109 @@ class CdpPageDriver implements PageDriver {
       opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
         ? { width: opts.renderWidth, height: opts.renderHeight }
         : undefined;
-    // ONE Page.getLayoutMetrics serves both the clip and the device-px projection below; the
-    // plain scale-1 no-clip path skips it entirely, so no pre-existing path gains a round trip it
-    // did not have. A render size ALWAYS fetches it, because the guard below is the only thing
-    // standing between a reflowed-taller document and a wedged tab, and it cannot run without the
-    // measured rect.
-    const metrics = opts?.fullPage || scale !== 1 || renderSize ? await layoutMetrics(this.conn) : undefined;
-    let clip: { x: number; y: number; width: number; height: number } | undefined;
-    if (opts?.clip) clip = await elementClip(this.conn, opts.clip);
-    // `metrics` is defined exactly when fullPage was asked for OR a scale/render size has to be
-    // carried, and all want the same rect (see contentClip): those cases only synthesize the clip
-    // Chrome would have inferred anyway, because clip.scale is the only place scale can ride.
-    else if (metrics) clip = contentClip(metrics);
-    if (clip) params.clip = { ...clip, scale };
+    // ONE Page.getLayoutMetrics, now fetched on EVERY capture, and the plain path's round trip is
+    // bought deliberately. It used to be skipped when nothing needed a clip — which meant the guard
+    // below never ran there, and that path is NOT the viewport capture it reads as:
+    // captureBeyondViewport is hardcoded true, so a plain take_screenshot already captures the whole
+    // document. MEASURED consequence of the old skip: a plain capture of any page past ~8192 css px
+    // (on a ratio-2 display) hangs Page.captureScreenshot and leaves the tab stuck at the content
+    // size, no flags required. Auto-tiling has to know the projection anyway, so one round trip now
+    // decides all three outcomes — one shot, bands, or a refusal — instead of none of them.
+    const metrics = await layoutMetrics(this.conn);
+    const devicePx = devicePixelsPerCssPx(metrics);
+    // The rect this capture covers, ALWAYS computed even when it is not sent. For the plain path
+    // this is the clip Chrome infers for itself (measured byte-identical to fullPage, see
+    // contentClip), so projecting it is projecting what Chrome is really about to encode.
+    const clip = opts?.clip ? await elementClip(this.conn, opts.clip) : contentClip(metrics);
+    // Which calls put a clip ON THE WIRE is unchanged, and that is what keeps a fitting capture
+    // byte-for-byte what it was: the plain no-clip call still sends no clip at all, and only the
+    // element / fullPage / scale / render-size paths synthesize one (clip.scale being the only
+    // place scale can ride).
+    const sendsClip = opts?.clip !== undefined || opts?.fullPage === true || scale !== 1 || renderSize !== undefined;
+    // A caller with nowhere to put bands cannot be given any: it gets the encode guard's refusal
+    // instead, which is the pre-tiling behaviour and still keeps the tab alive.
+    if (opts?.tile === true && !consumeBands) {
+      throw driverError("unsupported", "screenshot tile:true needs a caller that can consume bands; this one passed no band consumer");
+    }
+    const plan = planTiledCapture(clip, scale, devicePx, consumeBands ? opts?.tile : false);
+    if (plan.tiled) return this.captureTiled(clip, plan, scale, format, consumeBands!);
     // Guarded here, not in the tool layer: the clip is only known once it has been measured.
     //
-    // DELIBERATELY NOT CONDITIONED ON scale !== 1 ANY MORE, and this was a live-fire bug, not a
-    // tidy-up. `--fullPage --renderWidth 420 --renderHeight 900` at scale 1 on a 4-column grid page
-    // reflowed the document from 2880 to 10800 css px tall, projected to 840x21600 device px, sailed
-    // past this guard because the scale was 1, and WEDGED the tab: innerWidth/innerHeight stuck at
-    // 420x10800, exactly the failure this feature exists to prevent.
+    // DELIBERATELY NOT CONDITIONED ON scale !== 1, NOR ON A CLIP BEING SENT, and both were live-fire
+    // bugs rather than tidy-ups. `--fullPage --renderWidth 420 --renderHeight 900` at scale 1 on a
+    // 4-column grid page reflowed the document from 2880 to 10800 css px tall, projected to
+    // 840x21600 device px, sailed past this guard because the scale was 1, and WEDGED the tab. The
+    // no-clip default path wedged it the same way for the same reason: no clip sent, so no guard.
+    // Guard the PROJECTION, never the knob that happened to motivate the guard.
     //
     // And the restore could not save it. Measured with CDP_TIMEOUT_MS=8000: the capture timed out
     // client-side, the restore ran and SUCCEEDED (the error carried no restore-failure note), and
     // the page was still 420x10800 afterwards — because the timeout is only local, Chrome's capture
     // is still running, and it re-resizes the page after the restore lands. A finally cannot beat a
     // command that is still executing, so this pre-flight refusal is the only real protection.
-    if (clip && metrics) assertClipEncodable(clip, scale, devicePixelsPerCssPx(metrics), renderSize);
+    assertClipEncodable(clip, scale, devicePx, renderSize);
+    const params: Record<string, unknown> = { format, captureBeyondViewport: true };
+    if (quality != null) params.quality = quality;
+    if (sendsClip) params.clip = { ...clip, scale };
     const { data } = await this.conn.send<{ data: string }>("Page.captureScreenshot", params);
     return { data: new Uint8Array(Buffer.from(data, "base64")), format };
+  }
+  /** Hand the consumer a lazy band sequence and wait for it to finish with it. */
+  private async captureTiled<T>(
+    clip: { x: number; y: number; width: number; height: number },
+    plan: TilePlan,
+    scale: number,
+    format: "png" | "jpeg",
+    consumeBands: BandConsumer<T>,
+  ): Promise<TiledScreenshotResult<T>> {
+    const capture: BandedCapture = {
+      bands: this.bands(clip, plan, scale, format),
+      bandCount: plan.bandCount,
+      bandHeightCss: plan.bandHeightCss,
+      clip,
+      format: "png",
+    };
+    const consumed = await consumeBands(capture);
+    return { tiled: true, format: "png", bandCount: plan.bandCount, bandHeightCss: plan.bandHeightCss, consumed };
+  }
+  /**
+   * The bands themselves, one Page.captureScreenshot at a time and only when pulled.
+   *
+   * clip.y advances in CSS px and the last band is the REMAINDER, not a full band: asking for a
+   * full-height last band would extend the clip past the document, and the sum of the band heights
+   * has to be the region's height exactly or the stitched image is taller than the page.
+   *
+   * No scroll management, deliberately: measured on this Chrome, the identical clip captured at
+   * three different real scroll positions produced three byte-identical PNGs, so a band is a pure
+   * function of its clip. Nothing here has to move, restore, or even read the page's scroll.
+   */
+  private async *bands(
+    clip: { x: number; y: number; width: number; height: number },
+    plan: TilePlan,
+    scale: number,
+    format: "png" | "jpeg",
+  ): AsyncGenerator<Uint8Array> {
+    // Backstop, and it lives INSIDE the generator on purpose: shared-tools.ts refuses format:"jpeg"
+    // with a message naming the fix, from the band consumer, which runs before the first band is
+    // pulled. Checking earlier than this made the driver's terse message win over the tool layer's
+    // useful one (live-fired: `--format jpeg` on a 140,982 px page reported "got format jpeg" and
+    // nothing about what to do). Here it only fires for a consumer that ACCEPTED a jpeg banded
+    // capture, which no shipping caller does — it exists so a future one cannot get a sequence of
+    // JPEGs that the PNG stitcher would reject with a confusing parse error instead.
+    if (format !== "png") {
+      throw driverError("unsupported", `a tiled capture is PNG-only (bands are stitched as PNG scanlines); got format "${format}"`);
+    }
+    const bottom = clip.y + clip.height;
+    for (let i = 0; i < plan.bandCount; i++) {
+      const y = clip.y + i * plan.bandHeightCss;
+      const height = Math.min(plan.bandHeightCss, bottom - y);
+      const { data } = await this.conn.send<{ data: string }>("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: true,
+        clip: { x: clip.x, y, width: clip.width, height, scale },
+      });
+      yield new Uint8Array(Buffer.from(data, "base64"));
+    }
   }
   // Adapted from src/tools/emulation.ts `emulate`.
   async emulate(opts: EmulationOptions): Promise<{ applied: string[] }> {
@@ -1576,4 +1748,12 @@ export { CdpBrowserDriver, CdpPageDriver };
  *     with CDP_TIMEOUT_MS=8000: the restore SUCCEEDED and the tab was still 420x10800). The
  *     pre-flight refusal is the only real protection; an already-wedged tab is recovered by an
  *     explicit emulate{width,height}, verified.
+ *   - screenshot.tile rides the same clip primitive, sent once per band with clip.y walked down the
+ *     document in CSS px (measured: clip.y/clip.height are CSS px at every scale), the bands piped
+ *     into ../png.ts's streaming stitcher by the tool layer. Page.getLayoutMetrics is now fetched on
+ *     EVERY capture, including the plain default one, because the projection is what decides one
+ *     shot vs bands vs refusal — and because the plain path was the one place the encode guard could
+ *     not run, which made a plain take_screenshot of a long page a tab-wedger with no flags set.
+ *     Vertical only: a projection too WIDE is refused by name, since PNG scanline concatenation
+ *     cannot join columns.
  * ---------------------------------------------------------------------------- */
