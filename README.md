@@ -159,6 +159,8 @@ cdp clear_mocks --all true
 # Run any tool by its MCP name; args come from --json and/or --key value flags.
 cdp <tool> [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
 cdp --list                                   # list every available tool name
+cdp --help                                   # top-level usage
+cdp take_screenshot --help                   # that tool's arguments, from its schema — touches no browser
 
 cdp list_pages
 cdp navigate_page --target index:0 --url https://example.com
@@ -189,6 +191,8 @@ cdp lighthouse_audit --url https://example.com --json '{"categories":["performan
 ```
 
 **Argument parsing:** the first positional token is the tool name. `--json '<obj>'` merges a JSON object into the args (applied first). `--target <sel>` sets `args.target`. Repeated `--key value` pairs become `args.key`, coerced (`true`/`false` → boolean, numeric strings → number, else string); a bare `--flag` is `true`. Explicit flags override keys from `--json`. Output is `JSON.stringify(result, null, 2)` on stdout (exit 0); on any throw, `{"error":"<message>"}` goes to stderr and the process exits 1.
+
+**`--help`/`-h`** are recognized anywhere in argv, ahead of every other flag, and are never treated as a tool argument or a tool name — as of 1.9.3, `<tool> --help` used to run the tool instead. With no tool named, `cdp --help` prints the usage above. With a tool named, `cdp <tool> --help` prints that tool's arguments (name, type, required/optional, description) read from its schema, and exits 0 having made no CDP connection, taken no lease, and written no file.
 
 ### Programmatic use
 

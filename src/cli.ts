@@ -27,6 +27,7 @@ import { resolveBrowserKind, stripBrowserFlag, startFirefoxSession } from "./bac
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
+import { MANIFEST } from "./manifest.ts";
 
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
@@ -34,6 +35,8 @@ Usage:
   bun run src/cli.ts <tool> [--browser chrome|firefox] [--target <sel>] [--json '<obj>'] [--<key> <value> ...]
   bun run src/cli.ts --list [--browser chrome|firefox]
   bun run src/cli.ts --capabilities [--browser chrome|firefox]
+  bun run src/cli.ts --help | -h                 # this message
+  bun run src/cli.ts <tool> --help | -h           # that tool's arguments, sourced from its schema
 
 Examples:
   bun run src/cli.ts list_pages
@@ -43,6 +46,11 @@ Examples:
   bun run src/cli.ts take_screenshot --target url:example --fullPage true
   bun run src/cli.ts --browser firefox take_snapshot
   bun run src/cli.ts --capabilities --browser firefox
+  bun run src/cli.ts take_screenshot --help
+
+--help/-h is recognised ANYWHERE in argv, before any tool dispatch: it never touches the
+browser (no CDP connection, no lease, no file written) and is never passed through as a tool
+argument, even when it appears after a tool name.
 
 Backend selection: --browser chrome|firefox, else the CDP_BROWSER env var, else "chrome" (default,
 zero behavior change for existing users). Firefox is LAUNCHED per invocation (it cannot be attached
@@ -74,12 +82,13 @@ interface ParsedArgs {
   tool?: string;
   list: boolean;
   capabilities: boolean;
+  help: boolean;
   args: Record<string, unknown>;
 }
 
 /** Parse process argv (already sliced to drop the runtime + script, and with --browser already stripped). */
 function parseArgv(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { list: false, capabilities: false, args: {} };
+  const out: ParsedArgs = { list: false, capabilities: false, help: false, args: {} };
   // Collect flag pairs separately so --json can be merged BEFORE individual
   // flags override it, regardless of token order.
   let jsonObj: Record<string, unknown> | undefined;
@@ -93,6 +102,16 @@ function parseArgv(argv: string[]): ParsedArgs {
     }
     if (token === "--capabilities") {
       out.capabilities = true;
+      continue;
+    }
+    // Recognised ANYWHERE in argv (not just as the first token), and BEFORE the
+    // generic "--key value" branch below, so --help/-h can never be swallowed as
+    // a tool argument (the bug: `take_screenshot --help` used to run the tool
+    // with args.help=true; `-h` doesn't even start with "--", so without this
+    // explicit check it fell through to the positional branch and, if a tool
+    // name was already set, was silently dropped and the tool ran anyway).
+    if (token === "--help" || token === "-h") {
+      out.help = true;
       continue;
     }
     if (token.startsWith("--")) {
@@ -132,10 +151,78 @@ function isToolName(name: string): name is ToolName {
   return Object.prototype.hasOwnProperty.call(TOOLS, name);
 }
 
+/** A JSON-Schema property shape narrow enough for the fields --help prints. */
+interface HelpProp {
+  type?: string | string[];
+  enum?: unknown[];
+  description?: string;
+}
+
+/** "string", "string|array" (a union type array), or an enum rendered as "png|jpeg". */
+function formatType(prop: HelpProp | undefined): string {
+  if (!prop) return "any";
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) return prop.enum.map(String).join("|");
+  if (Array.isArray(prop.type)) return prop.type.join("|");
+  return prop.type ?? "any";
+}
+
+/**
+ * Print one tool's usage sourced ENTIRELY from MANIFEST's inputSchema (src/manifest.ts) — the
+ * same JSON Schema the MCP server advertises via tools/list. This is a read of that single
+ * source of truth, not a second hand-maintained argument list that could drift from it.
+ */
+function printToolHelp(name: ToolName): void {
+  const spec = MANIFEST.find((t) => t.name === name);
+  if (!spec) {
+    // Every TOOLS entry has a MANIFEST entry (auditCoverage() in mcp.ts warns otherwise); this
+    // is a defensive fallback, not an expected path.
+    process.stdout.write(`${name}\n`);
+    return;
+  }
+  const required = new Set(spec.inputSchema.required ?? []);
+  const props = (spec.inputSchema.properties ?? {}) as Record<string, HelpProp>;
+  const keys = Object.keys(props);
+
+  const lines = [spec.name, "", spec.description, ""];
+  if (keys.length === 0) {
+    lines.push("Arguments: none.");
+  } else {
+    lines.push("Arguments:");
+    for (const key of keys) {
+      const prop = props[key];
+      const reqTag = required.has(key) ? "required" : "optional";
+      lines.push(`  --${key} <${formatType(prop)}> (${reqTag})`);
+      if (prop?.description) lines.push(`      ${prop.description}`);
+    }
+  }
+  lines.push("", `Usage: cdp ${spec.name} [--target <sel>] [--json '<obj>'] [--<key> <value> ...]`);
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 async function main(): Promise<number> {
   const rawArgv = process.argv.slice(2);
   const browser = resolveBrowserKind(rawArgv);
   const parsed = parseArgv(stripBrowserFlag(rawArgv));
+
+  // --help/-h short-circuits BEFORE any availability lookup or backend touch — no CDP
+  // connection, no lease, no file written. This must be the very first thing checked in
+  // main(), ahead of --list/--capabilities, so a --help gesture can never be downgraded
+  // into a real dispatch by any branch below it.
+  if (parsed.help) {
+    if (!parsed.tool) {
+      process.stdout.write(`${USAGE}\n`);
+      return 0;
+    }
+    if (!isToolName(parsed.tool)) {
+      process.stderr.write(
+        `${JSON.stringify({ error: `unknown tool '${parsed.tool}'. Run --list to see all ${TOOL_NAMES.length} tools.` })}\n`,
+      );
+      return 1;
+    }
+    printToolHelp(parsed.tool);
+    return 0;
+  }
+
   const availability = toolAvailability(browser);
   const availableSet = new Set(availability.available);
 
