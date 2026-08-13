@@ -891,14 +891,11 @@ export const MANIFEST: ToolSpec[] = [
           "description": "CSS selector for the file input element (resolved via document.querySelector). Provide exactly one of uid or selector."
         },
         "files": {
-          "type": [
-            "string",
-            "array"
-          ],
+          "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Absolute path, or array of absolute paths, to the file(s) to attach to the <input type=file>. Accepts a single string or an array of strings."
+          "description": "Absolute path(s) to the file(s) to attach to the <input type=file>, as an array of absolute paths. A single path must be wrapped in an array (e.g. [\"/tmp/a.pdf\"]). Declared array-only because some model APIs (Google Gemini function calling) reject union-typed parameters."
         }
       },
       "required": [

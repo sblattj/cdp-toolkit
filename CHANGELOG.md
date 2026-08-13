@@ -5,6 +5,16 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.6] - 2026-08-13
+
+**Fix: `upload_file`'s `files` parameter is now declared array-only in the tool manifest** (was
+`"type": ["string","array"]`). Google's Gemini function-calling API rejects union-typed parameter
+schemas — the `any_of` branch's untyped `items` fails its `$type == Type.ARRAY` predicate — which
+hard-fails the entire `GenerateContentRequest` and kills any Gemini-backed agent session the
+moment this manifest is included in its toolset (observed as subagents returning empty results on
+every dispatch). Runtime behavior is unchanged: the handler still accepts and wraps a bare string
+for direct CDP/CLI callers; MCP/model callers now pass `[path]` per the declared schema.
+
 ## [1.9.5] - 2026-08-11
 
 **Documentation and stale code-comment clarifications; NO behavior changes since 1.9.4.** Two
