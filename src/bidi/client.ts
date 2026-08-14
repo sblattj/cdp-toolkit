@@ -88,6 +88,17 @@ export class BidiConnection {
     return this.refCount;
   }
 
+  /**
+   * True while this connection still has a live socket. Goes false once the
+   * socket closes (ws.onclose) or dispose() runs — both set `closed` and
+   * reject all in-flight calls. getConnection uses this to skip and evict a
+   * dead cached connection so the next call re-dials a fresh session instead
+   * of reusing a socket that can only reject with "connection not open".
+   */
+  get isOpen(): boolean {
+    return !this.closed && this.ws !== undefined;
+  }
+
   connect(): Promise<this> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl);

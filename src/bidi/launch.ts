@@ -22,7 +22,7 @@
  * node:os and node:path.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,7 +58,14 @@ function resolveBinary(): string {
     "firefox",
   ];
   for (const c of candidates) {
-    if (c) return c;
+    if (!c) continue;
+    // An ABSOLUTE candidate (FIREFOX_BIN, the macOS app path) is only usable if it exists on this
+    // box — otherwise the hardcoded macOS path would win on Linux and shadow the "firefox" PATH
+    // fallback, yielding ENOENT at spawn. A bare name like "firefox" is not a filesystem path, so
+    // let spawn resolve it against PATH.
+    const isAbsolute = c.startsWith("/");
+    if (isAbsolute && !existsSync(c)) continue;
+    return c;
   }
   throw new Error(
     "Firefox binary not found. Tried FIREFOX_BIN env var, " +
