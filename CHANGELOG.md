@@ -23,6 +23,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and never fell back to `firefox` on `PATH` — `ENOENT` at spawn, in launch mode only. An
   absolute candidate (`FIREFOX_BIN`, the macOS path) is now only returned if it exists on this
   box; the bare `firefox` name is left for `spawn` to resolve against `PATH`.
+- **Recorder artifact directory is now resolved per call, so `CDP_ARTIFACT_DIR` is honored at
+  runtime instead of being frozen at import time.** The buffer directory in `src/tools/recorder.ts`
+  was a module-level `const` bound the moment the module loaded, so a caller (or a test) that set
+  `CDP_ARTIFACT_DIR` afterward was ignored and `recFile`/`captureFile` still pointed at
+  `/tmp/cdp-toolkit`. On a clean CI runner that path does not exist, so the first buffer
+  `writeFile` threw `ENOENT` and the worker-capture suite failed there while passing on any box
+  where `/tmp/cdp-toolkit` happened to exist. It now reads the env var per call through a local
+  `artifactDir()` helper — the same "read per call, not at module load" pattern as `leaseDir()` in
+  `src/leases.ts` — so the directory is resolved at write time and a redirect takes effect.
 
 ## [1.9.6] - 2026-08-13
 

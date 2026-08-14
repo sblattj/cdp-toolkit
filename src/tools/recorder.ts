@@ -80,17 +80,20 @@ import {
   WORKER_EMPTY_NEEDLE_MESSAGE,
 } from "../workers.ts";
 
-/** Artifact / buffer directory (shared with the rest of the toolkit). */
-export const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
+/** Artifact / buffer directory (shared with the rest of the toolkit). Read per
+ *  call, not at module load, so a test can redirect the directory (as leases.ts). */
+function artifactDir(): string {
+  return process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
+}
 
 /** Compute the shared "latest" JSONL buffer path for a given targetId. */
 export function recFile(targetId: string): string {
-  return `${ARTIFACT_DIR}/rec-${targetId}.jsonl`;
+  return `${artifactDir()}/rec-${targetId}.jsonl`;
 }
 
 /** Compute a unique per-capture JSONL buffer path (isolates concurrent captures). */
 export function captureFile(targetId: string, captureId: string): string {
-  return `${ARTIFACT_DIR}/rec-${targetId}-${captureId}.jsonl`;
+  return `${artifactDir()}/rec-${targetId}-${captureId}.jsonl`;
 }
 
 /** Sleep helper (module runtime only; not the workflow-script sandbox). */
@@ -200,7 +203,7 @@ export async function startRecorder(target: TargetSelector, opts: RecorderOption
   const network = opts.network ?? true;
   const consoleCap = opts.console ?? true;
 
-  await mkdir(ARTIFACT_DIR, { recursive: true });
+  await mkdir(artifactDir(), { recursive: true });
   const { conn, target: resolved } = await openPage(target, { timeoutMs: opts.timeoutMs });
   const file = opts.file ?? recFile(resolved.id);
 
