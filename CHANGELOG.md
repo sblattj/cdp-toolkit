@@ -5,6 +5,25 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.7] - 2026-08-14
+
+### Fixed
+
+- **A dropped Firefox WebDriver BiDi connection is now re-dialed instead of erroring
+  permanently.** The backend memoizes one `BidiConnection` per endpoint, and `getConnection`
+  (`src/bidi/driver.ts`) returned the cached one unconditionally; once its socket dropped —
+  a Firefox restart, an idle/network drop, or a lost BiDi session slot — every later call
+  rejected forever with `connection not open`, for the entire life of the MCP server.
+  `getConnection` now evicts a dead cached connection (via a new `BidiConnection.isOpen`
+  getter) and re-creates the session on the next call, so Firefox tools recover on their own
+  instead of needing a server restart.
+- **Firefox launch mode no longer returns the hardcoded macOS Firefox path on Linux.**
+  `resolveBinary` (`src/bidi/launch.ts`) returned the first truthy candidate without checking
+  it existed, so on Linux it handed back `/Applications/Firefox.app/Contents/MacOS/firefox`
+  and never fell back to `firefox` on `PATH` — `ENOENT` at spawn, in launch mode only. An
+  absolute candidate (`FIREFOX_BIN`, the macOS path) is now only returned if it exists on this
+  box; the bare `firefox` name is left for `spawn` to resolve against `PATH`.
+
 ## [1.9.6] - 2026-08-13
 
 **Fix: `upload_file`'s `files` parameter is now declared array-only in the tool manifest** (was
