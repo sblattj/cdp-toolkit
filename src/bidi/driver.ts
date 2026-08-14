@@ -322,7 +322,13 @@ const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 const connections = new Map<string, BidiConnection>();
 async function getConnection(endpoint: string, timeoutMs?: number): Promise<BidiConnection> {
   const existing = connections.get(endpoint);
-  if (existing) { existing.retain(); return existing; }
+  if (existing && existing.isOpen) { existing.retain(); return existing; }
+  // A cached connection whose socket has died (ws.onclose fired) can only reject every
+  // send() with "connection not open" — reusing it would strand the endpoint permanently.
+  // Evict it so the code below re-dials and creates a fresh BiDi session. No cleanup is
+  // needed: a dead connection already had `closed` set and rejectAll() cleared its per-call
+  // timers, and BidiConnection holds no heartbeat/keepalive resource to leak (see client.ts).
+  if (existing) connections.delete(endpoint);
   // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
   // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
   // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
