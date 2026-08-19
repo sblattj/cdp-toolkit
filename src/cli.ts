@@ -28,6 +28,7 @@ import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
 import { MANIFEST } from "./manifest.ts";
+import { runInstaller } from "./install/wizard.ts";
 
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
@@ -210,6 +211,15 @@ function printToolHelp(name: ToolName): void {
 
 async function main(): Promise<number> {
   const rawArgv = process.argv.slice(2);
+
+  // `install` is a CLI-ONLY subcommand (the `cdp install` wizard), not an MCP tool: it is not in
+  // TOOLS/MANIFEST and never appears in --list or tools/list. Dispatch it FIRST — before --browser
+  // resolution, --help, and tool dispatch — so `cdp install --help` reaches the installer's own
+  // help rather than the global USAGE, and so nothing below can reinterpret its flags.
+  if (rawArgv[0] === "install") {
+    return await runInstaller(rawArgv.slice(1));
+  }
+
   const { kind: browser, endpoint } = resolveBackend(rawArgv);
   const parsed = parseArgv(stripConnectFlag(stripBrowserFlag(rawArgv)));
 
