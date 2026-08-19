@@ -26,7 +26,7 @@ import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
 
-const VERSION = "1.9.7";
+const VERSION = "1.10.0";
 
 // Backend + (Firefox only) attach endpoint are read once at startup (MCP has no per-call notion
 // of backend): --browser flag / CDP_BROWSER env, else "chrome" (zero behavior change for existing
@@ -50,7 +50,21 @@ function auditCoverage(): void {
   if (orphanSchema.length) console.error(`[cdp-toolkit] WARN: manifest schemas with no registered tool: ${orphanSchema.join(", ")}`);
 }
 
-const server = new Server({ name: "cdp-toolkit", version: VERSION }, { capabilities: { tools: {} } });
+// Server `instructions` (MCP initialize result): the cross-cutting conventions that
+// used to be re-stated inside every tool's schema — the target-selector grammar, the
+// lease-token model, the MV3 worker/wake arm, the origin vocabulary. Stating them ONCE
+// here (loaded a single time at init) is what let the per-tool descriptions and the
+// 42-way-duplicated `lease` param collapse to short pointers, cutting the tools/list
+// payload without losing a single behavior. Kept under Claude Code's 2KB instructions
+// cap and front-loaded (grammar + leases before origin) so nothing critical is clipped.
+const INSTRUCTIONS = [
+  "cdp-toolkit drives a real browser over Chrome DevTools Protocol (or Firefox WebDriver-BiDi): open and drive pages, click/fill/type, screenshot and accessibility-snapshot, read console + network, set cookies, emulate devices, run Lighthouse and performance traces, record screencasts. Conventions shared across its tools:",
+  "TARGET SELECTOR (the `target` param, unless a tool says otherwise): 'active' (default = first page) | 'index:N' (0-based) | 'url:<substr>' | 'title:<substr>' | 'label:<name>' (exact, from the origin ledger or a live lease) | a 32-hex '<targetId>'. Four Chrome-only tools (evaluate_script, list_network_requests, get_network_request, list_console_messages) also accept 'worker:<substr>' to reach a service/shared worker — e.g. an MV3 extension's background worker (worker:<extension-id> or worker:background.js); an idle-evicted worker is started first (see each tool's `wake`).",
+  "LEASES (the `lease` param): claim_page, and new_page{claim:true}, mint an opaque token. Omit it for a tab THIS process already holds. It is required for a tab held by ANOTHER process, or one claimed explicitly. Under CDP_REQUIRE_LEASE the gate auto-acquires a lease for any tab this process drives — no token is surfaced, so pass `target`, not `lease` — while an explicit claim:true still demands its token on every later call. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all.",
+  "ORIGIN: list_pages and list_leases tag each tab's `origin` as 'agent' (this toolkit created it) or 'unknown' — never 'human', because the toolkit cannot prove a person opened a tab. An 'agent' tab stays findable after its creator releases the lease or dies.",
+].join("\n\n");
+
+const server = new Server({ name: "cdp-toolkit", version: VERSION }, { capabilities: { tools: {} }, instructions: INSTRUCTIONS });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   // Filtered to whatever the selected backend can actually run, per REQUIRED_CAPABILITIES:

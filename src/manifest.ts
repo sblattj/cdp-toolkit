@@ -25,21 +25,21 @@ export interface ToolSpec {
 export const MANIFEST: ToolSpec[] = [
   {
     "name": "list_pages",
-    "description": "Enumerate browser page targets via the CDP browser endpoint (GET /json/list). By default returns only page-type tabs; set 'all' to also include workers and background pages. Each entry carries the targetId used as a target selector elsewhere, plus an 'origin' field recording where the tab came from: 'agent' means this toolkit created it (the entry then also carries the creating 'label' and 'createdAt'), and this stays true after the creating agent releases its lease or dies, which is what makes a stray agent tab findable later. 'unknown' means there is no creation record. It never says 'human': the toolkit cannot prove a person opened a tab, so 'unknown' is the honest word for a tab it did not create, one opened before the toolkit ran, or one whose record could not be written. A tab whose record exists but could not be read reports origin 'unknown' plus 'originUnreadable', so a broken record is never mistaken for no record. Under CDP_REQUIRE_LEASE this call also reaps abandoned agent tabs, but reap-CLOSE and lease-RECLAIMABLE (list_leases' 'stale') now fire at different times: a lease reads reclaimable the moment its TTL elapses, cheap and reversible since another agent may simply take it, while this call only CLOSES the tab, destructively, after an ADDITIONAL grace period past that TTL (CDP_REAP_GRACE_MS, default 2700000ms/45 minutes, so 60 minutes total after last use) — a tab an agent is mid-build between calls on is not destroyed out from under it. A dead-pid lease is reaped immediately regardless of grace: that process is never coming back. Closed tabs are reported in an additive 'reaped' array ({targetId,label,reason}) present only when something was actually closed; a tab with no lease is never reaped. Every entry under an active, readable lease of this backend also carries 'lease': {label, pid, idleMs, expiresAt, stale} — idleMs and expiresAt are computed fresh on every call (now-lastUsedAt and lastUsedAt+ttlMs), never read off disk, and this is unconditional on 'probe'. Set 'probe' to true to also ping each page-type target's renderer: one bounded (500ms) check per target, never more, so a single wedged tab cannot stall the listing beyond its own budget. This adds 'responsive' (true iff the ping answered in time; false on a timeout, a page-side exception, or an unreachable target — never an error for the whole call) and, where that same round trip found human-attributed input, 'humanActiveMs' (see claim_page and list_leases for what that field means and cannot prove). 'responsive' and 'humanActiveMs' are both ABSENT — never false/null — when 'probe' is not set, and 'responsive' is likewise absent on a backend that cannot answer this ping at all.",
+    "description": "Enumerate browser page targets (GET /json/list); page-type tabs only unless all=true. Each entry carries its targetId plus an origin field: 'agent' means this toolkit created it (also carries the creating label/createdAt, and stays 'agent' after the lease is released or the creator dies, making stray agent tabs findable), 'unknown' means no creation record - it never says 'human', the honest word for any tab it did not create; a record that exists but won't read adds originUnreadable. An entry under an active, readable lease also carries a 'lease' object {label,pid,idleMs,expiresAt,stale}, with idleMs and expiresAt computed fresh every call (never off disk), independent of probe. Under CDP_REQUIRE_LEASE this call also reaps abandoned agent tabs into an additive reaped array - but a lease reads reclaimable the moment its TTL elapses, while the tab is CLOSED only after a further grace (CDP_REAP_GRACE_MS, default 2700000ms/45min, so 60min total after last use); a dead-pid lease is reaped at once, a tab with no lease never. With probe, each page-type entry also gets 'responsive' (and humanActiveMs where human input is seen); both are absent, never false/null, without probe.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "all": {
           "type": "boolean",
-          "description": "Include non-page targets (service/shared workers, background pages) when true; otherwise only page-type tabs are listed."
+          "description": "Include non-page targets (service/shared workers, background pages); default false lists page-type tabs only."
         },
         "probe": {
           "type": "boolean",
-          "description": "Ping each page-type target's renderer before returning: one bounded (500ms) Runtime.evaluate per target, never more. Adds 'responsive' to every page-type entry and, where the same round trip finds human-attributed input, 'humanActiveMs'. A wedged or unreachable tab reports responsive:false rather than failing the call. Defaults to false, which is byte-identical to the pre-1.8.0 shape."
+          "description": "Ping each page-type renderer before returning, one bounded 500ms check per target and never more, so a wedged tab can't stall the listing. Adds 'responsive' (false on timeout/exception/unreachable, never an error for the whole call) and, where the same round trip finds human input, humanActiveMs. Default false. On a backend that cannot answer the ping, responsive is absent too (not false)."
         }
       },
       "required": [],
@@ -54,7 +54,7 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "url": {
           "type": "string",
@@ -62,15 +62,15 @@ export const MANIFEST: ToolSpec[] = [
         },
         "claim": {
           "type": "boolean",
-          "description": "Claim the new tab atomically as part of creating it and return a lease token alongside {targetId,url}. Default false, which is byte-identical to the pre-1.2 behavior. Under CDP_REQUIRE_LEASE the new tab is claimed and a lease returned even without claim:true, because a tab nobody holds is a tab nobody may drive; passing claim:true additionally makes the lease an explicit one, which requires its token on every later call even from this same process."
+          "description": "Claim the new tab atomically and return a lease token alongside {targetId,url}. Under CDP_REQUIRE_LEASE the tab is claimed and a lease returned even without claim:true; claim:true makes it an EXPLICIT lease that demands its token on every later call, even from this process. Default false."
         },
         "label": {
           "type": "string",
-          "description": "Agent label recorded on the lease when claim:true, surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
+          "description": "Agent label recorded on the lease when the tab is claimed; surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
         },
         "ttlMs": {
           "type": "number",
-          "description": "How long the lease taken by claim:true survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15 minutes). Every checked call refreshes it, so an active agent never expires. Ignored without claim:true."
+          "description": "How long a claimed lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it. Ignored when not claiming."
         }
       },
       "required": [],
@@ -79,17 +79,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "close_page",
-    "description": "Close a page target via Target.closeTarget. Requires an explicit, resolvable target; refuses to guess and errors if the selector matches no target.",
+    "description": "Close a page target via Target.closeTarget. Requires an explicit, resolvable target; errors rather than guessing when the selector matches nothing.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         }
       },
       "required": [
@@ -106,11 +106,11 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         }
       },
       "required": [
@@ -127,11 +127,11 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "url": {
           "type": "string",
@@ -147,7 +147,7 @@ export const MANIFEST: ToolSpec[] = [
             "back",
             "forward"
           ],
-          "description": "Traverse this tab's session history instead of loading a url: 'back' and 'forward' are the browser's Back and Forward buttons. Mutually exclusive with 'url' and 'reload' — passing two of the three is refused by name rather than resolved by precedence. Works on BOTH backends (Chrome: Page.getNavigationHistory + Page.navigateToHistoryEntry; Firefox: browsingContext.traverseHistory) and waits for the same load milestone as an ordinary navigation. Going back from the first entry, or forward from the last, is an ERROR naming the direction — never a silent success that navigated nowhere. The result carries traversed:'back'|'forward' alongside the resulting url."
+          "description": "Traverse this tab's session history instead of loading a url: 'back' and 'forward' are the browser's Back and Forward buttons. Mutually exclusive with 'url' and 'reload' — passing two of the three is refused by name, not resolved by precedence. Works on BOTH backends and waits for the same load milestone as an ordinary navigation. Going back from the first entry, or forward from the last, is an ERROR naming the direction — never a silent no-op. The result carries traversed:'back'|'forward' alongside the resulting url."
         },
         "ignoreCache": {
           "type": "boolean",
@@ -171,17 +171,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "wait_for",
-    "description": "Poll a target page until the given substring appears in document.body.innerText (Runtime.evaluate on a fixed interval), or throw on timeout. Text-substring waiting only: no aria/role/selector or event variants; throws rather than returning {found:false}.",
+    "description": "Poll the target until the substring appears in document.body.innerText (Runtime.evaluate on a fixed interval), or throw on timeout. Text-substring only -- no aria/role/selector or event variants; throws rather than returning {found:false}.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "text": {
           "type": "string",
@@ -189,11 +189,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "timeoutMs": {
           "type": "number",
-          "description": "Total time budget in milliseconds. Defaults to 15000."
+          "description": "Total time budget in ms. Default 15000."
         },
         "pollMs": {
           "type": "number",
-          "description": "Poll interval in milliseconds. Defaults to 250."
+          "description": "Poll interval in ms. Default 250."
         }
       },
       "required": [
@@ -204,37 +204,37 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "evaluate_script",
-    "description": "Run arbitrary JavaScript in the target page's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args' the 'expression' is evaluated as a raw expression; when 'args' is provided 'expression' must be a function literal (arrow or classic) invoked on globalThis with the args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. Pass 'savePath' to write the evaluated value to a JSON file instead: the response then carries only {path,bytes,type,target} and the value itself never appears in it, in any form. That is the way to read a credential (a JWT or session token out of localStorage, for example) without putting the secret into the caller's transcript. This is the one tool that can EVALUATE inside an MV3 extension's background SERVICE WORKER rather than a page (list_network_requests/get_network_request/list_console_messages OBSERVE one): pass target 'worker:<extension-id>' (Chrome only) and read chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started for you first (see 'wake').",
+    "description": "Run arbitrary JavaScript in the target's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args', 'expression' is a raw expression; with 'args' it must be a function literal (arrow or classic) invoked on globalThis with args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. savePath writes the value to a JSON file instead -- the response then carries only {path,bytes,type,target} and the value never appears in it, the way to read a credential (a JWT/session token from localStorage) without putting the secret in the transcript. This is the one tool that EVALUATES inside an MV3 extension's background SERVICE WORKER rather than OBSERVING it (Chrome, Capability 'worker.targets'): a worker: target reads chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started first (see 'wake').",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Page selector: 'active' (or omit) -> first page-type target | '<32-hex targetId>' -> exact target by id | 'index:N' -> Nth page-type target (0-based) | 'url:<substring>' -> first page whose url contains substring | 'title:<substring>' -> first page whose title contains substring | 'label:<name>' -> the page-type target with exactly this label (checked against the origin ledger and live leases) | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js) and read chrome.storage.local from it. The worker: arm is CHROME-ONLY (Capability 'worker.targets') and is accepted by four tools only — evaluate_script, list_network_requests, get_network_request and list_console_messages — never as universal grammar; an MV3 worker that has been idle-evicted is started automatically first, see 'wake'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions."
         },
         "wake": {
           "type": "boolean",
-          "description": "Only valid with a 'worker:<substring>' target, and rejected on a page target rather than ignored. Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so a wake asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything; the error then says the worker may simply be asleep."
+          "description": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions."
         },
         "expression": {
           "type": "string",
-          "description": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when 'args' is provided. REQUIRED — the code always goes in this key, never in 'function', 'code', 'js', 'script', 'fn' or 'body'; a call using one of those instead is rejected with an error naming the wrong key."
+          "description": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when provided. REQUIRED -- the code always goes in this key, never in 'function', 'code', 'js', 'script', 'fn' or 'body'; a call using one of those is rejected with an error naming the wrong key."
         },
         "awaitPromise": {
           "type": "boolean",
-          "description": "Await the result if it is a Promise (default true)."
+          "description": "Await the result if it is a Promise. Default true."
         },
         "args": {
           "type": "array",
-          "description": "Positional JSON-serializable arguments to pass to the expression, treating it as a function. No live element/page handle is bound."
+          "description": "Positional JSON-serializable arguments passed to the expression (treated as a function). No live element/page handle is bound."
         },
         "savePath": {
           "type": "string",
-          "description": "Write the evaluated value to this file as JSON and KEEP IT OUT OF THE RESPONSE: with savePath set the result is {path,bytes,type,target} only, with no copy, preview or truncation of the value. Use it to read credentials without putting them in a transcript. An absolute path (starting with /) is used as-is; a relative path is resolved under the artifact dir (/tmp/cdp-toolkit). Missing parent directories are created. Omit it to get the value back inline, exactly as before."
+          "description": "Write the evaluated value to this file as JSON and KEEP IT OUT OF THE RESPONSE: the result is {path,bytes,type,target} only, with no copy, preview or truncation of the value -- read credentials without putting them in a transcript. An absolute path (starting with /) is used as-is; a relative path resolves under the artifact dir (/tmp/cdp-toolkit); missing parents are created. Omit to get the value back inline."
         }
       },
       "required": [
@@ -245,21 +245,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_cookies",
-    "description": "Read the cookie store for the target page, INCLUDING httpOnly cookies, which document.cookie cannot see and an evaluate_script call therefore cannot reach. Each cookie carries name, value, domain, path, expires (Unix seconds, -1 for a session cookie), size, httpOnly, secure, sameSite ('strict'|'lax'|'none'|'default') and session. The read is page-scoped, not browser-wide: it returns the cookies of the resolved tab (Chrome: Network.getCookies; Firefox: storage.getCookies partitioned by that browsing context), so point at a page on the site whose cookies you want. Filter with 'domain' and/or 'name'. Pass 'savePath' to write the cookie array to a JSON file instead: the response is then {path,bytes,count,target} only, with no cookie value in it in any form, which is how to capture a session cookie without putting the credential in the caller's transcript.",
+    "description": "Read the target page's cookie store INCLUDING httpOnly cookies, which document.cookie (and therefore evaluate_script) cannot see. Page-scoped, not browser-wide: returns cookies of the resolved tab, so point at a page on the site you want. Each cookie carries name, value, domain, path, expires (Unix seconds, -1 for a session cookie), size, httpOnly, secure, sameSite ('strict'|'lax'|'none'|'default'), session. Filter with 'domain' and/or 'name'. Pass 'savePath' to write the array to a JSON file instead: the response is then {path,bytes,count,target} with no cookie value in any form, the way to capture a session cookie without putting the credential in the transcript.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "domain": {
           "type": "string",
-          "description": "Keep only cookies for this domain. A leading dot is ignored on both sides and subdomains of the given domain match too, so 'example.test' matches '.example.test' and 'app.example.test'. No wildcards."
+          "description": "Keep only cookies for this domain. A leading dot is ignored on both sides and subdomains match too, so 'example.test' matches '.example.test' and 'app.example.test'. No wildcards."
         },
         "name": {
           "type": "string",
@@ -267,7 +267,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "savePath": {
           "type": "string",
-          "description": "Write the cookie array to this file as JSON and KEEP THE VALUES OUT OF THE RESPONSE: with savePath set the result is {path,bytes,count,target} only, with no copy, preview or truncation of any cookie value. An absolute path (starting with /) is used as-is; a relative path is resolved under the artifact dir (/tmp/cdp-toolkit). Missing parent directories are created. Omit it to get the cookies back inline."
+          "description": "Write the cookie array here as JSON and KEEP THE VALUES OUT OF THE RESPONSE: the result is {path,bytes,count,target} only, with no preview or truncation of any value. An absolute path (starting with /) is used as-is; a relative path resolves under the artifact dir (/tmp/cdp-toolkit); missing parents are created. Omit to get the cookies back inline."
         }
       },
       "required": [],
@@ -276,17 +276,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "set_cookie",
-    "description": "Write one cookie into the target page's cookie store, INCLUDING an httpOnly or secure cookie, which document.cookie cannot create and an evaluate_script call therefore cannot either. Chrome uses Network.setCookie, Firefox uses storage.setCookie partitioned by the resolved browsing context. Either 'url' or 'domain' is REQUIRED: a cookie has to be attributed to a site and the call is refused with an error when neither is given, rather than guessing the current page's origin. The response is {set:true,target} and never echoes the value back, so a credential you just supplied does not land in the transcript twice. A 'set:true' is earned, not assumed: Chrome answers Network.setCookie with success:false when it declines a cookie (a domain the url does not belong to, a secure cookie on an insecure origin, an oversized value) and that refusal is raised as an error. On Firefox, 'domain' is derived from 'url' when only the url was given, because BiDi has no url parameter; a url with no host, such as about:blank or a data URL, is an error rather than a silent no-op. Read the result back with list_cookies when you need proof.",
+    "description": "Write one cookie into the target page's cookie store, INCLUDING httpOnly or secure cookies that document.cookie (and therefore evaluate_script) cannot create. Either 'url' or 'domain' is REQUIRED: the call is refused when neither is given, rather than guessing the page origin. The response is {set:true,target} and never echoes the value back. A 'set:true' is earned, not assumed: Chrome raises an error when it declines the cookie (a domain the url does not belong to, a secure cookie on an insecure origin, an oversized value). On Firefox 'domain' is derived from 'url' when only the url was given (BiDi has no url parameter), and a url with no host such as about:blank or a data URL is an error, not a silent no-op. Read the result back with list_cookies when you need proof.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "name": {
           "type": "string",
@@ -298,19 +298,19 @@ export const MANIFEST: ToolSpec[] = [
         },
         "url": {
           "type": "string",
-          "description": "The URL the cookie is set for, for example 'https://example.com/'. Chrome derives domain, path and secure from it. Firefox derives only the domain from its host. Give this or 'domain'."
+          "description": "URL the cookie is set for, e.g. 'https://example.com/'. Chrome derives domain, path and secure from it; Firefox derives only the domain from its host. Give this or 'domain'."
         },
         "domain": {
           "type": "string",
-          "description": "Cookie domain, for example 'example.com' or '.example.com' for subdomains. Give this or 'url'. When both are given, this wins on Firefox and Chrome applies its own url plus domain consistency rule."
+          "description": "Cookie domain, e.g. 'example.com' or '.example.com' for subdomains. Give this or 'url'. When both are given, this wins on Firefox and Chrome applies its own url plus domain consistency rule."
         },
         "path": {
           "type": "string",
-          "description": "Cookie path. Passed through exactly as given and NOT defaulted to '/': with a 'url' Chrome derives the path from it, so an invented default here would widen a cookie you meant to scope narrowly."
+          "description": "Cookie path, passed through exactly as given and NOT defaulted to '/': with a 'url' Chrome derives the path from it, so an invented default here would widen a cookie you meant to scope narrowly."
         },
         "expires": {
           "type": "number",
-          "description": "Expiry as Unix time in SECONDS, matching what list_cookies reports. Omit it for a session cookie, which is what both backends do when no expiry is supplied."
+          "description": "Expiry as Unix time in SECONDS, matching what list_cookies reports. Omit for a session cookie, which is what both backends do when no expiry is supplied."
         },
         "httpOnly": {
           "type": "boolean",
@@ -322,27 +322,35 @@ export const MANIFEST: ToolSpec[] = [
         },
         "sameSite": {
           "type": "string",
-          "enum": ["strict", "lax", "none", "default"],
+          "enum": [
+            "strict",
+            "lax",
+            "none",
+            "default"
+          ],
           "description": "SameSite attribute, lowercase, matching what list_cookies reports. 'default' means the attribute is not set at all."
         }
       },
-      "required": ["name", "value"],
+      "required": [
+        "name",
+        "value"
+      ],
       "additionalProperties": false
     }
   },
   {
     "name": "delete_cookies",
-    "description": "Delete the named cookie from the target page's cookie store, httpOnly cookies included. Chrome uses Network.deleteCookies, Firefox uses storage.deleteCookies with a filter, partitioned by the resolved browsing context. Both 'name' and one of 'url' or 'domain' are REQUIRED: without a site constraint the call would delete by name across the whole partition, so it is refused with an error instead. Narrow further with 'path'. The response is {deleted:true,target} and carries NO count, because neither protocol reports how many cookies it removed and a number here would be invented; call list_cookies before and after when you need a real count. 'deleted:true' means the backend accepted and performed the deletion, not that a matching cookie existed, since deleting an absent cookie is a success on both backends.",
+    "description": "Delete the named cookie from the target page's cookie store, httpOnly cookies included. Both 'name' and one of 'url' or 'domain' are REQUIRED: without a site constraint it would delete by name across the whole partition, so it is refused with an error instead. Narrow further with 'path'. The response is {deleted:true,target} and carries NO count, because neither protocol reports how many cookies it removed and a number here would be invented; call list_cookies before and after for a real count. 'deleted:true' means the backend accepted and performed the deletion, not that a matching cookie existed, since deleting an absent cookie succeeds on both backends.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "name": {
           "type": "string",
@@ -350,7 +358,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "url": {
           "type": "string",
-          "description": "Delete cookies matching this URL, for example 'https://example.com/'. Give this or 'domain'. On Firefox only the host is used, because BiDi's filter has no url field."
+          "description": "Delete cookies matching this URL, e.g. 'https://example.com/'. Give this or 'domain'. On Firefox only the host is used, because BiDi's filter has no url field."
         },
         "domain": {
           "type": "string",
@@ -361,27 +369,29 @@ export const MANIFEST: ToolSpec[] = [
           "description": "Narrow the deletion to cookies with this exact path. Omit to match any path allowed by the other constraints."
         }
       },
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "additionalProperties": false
     }
   },
   {
     "name": "take_snapshot",
-    "description": "Capture the page's accessibility tree (Accessibility.getFullAXTree) as a compact indented text tree where each line is prefixed with [uid], the node's CDP backendDOMNodeId. These uids are the stateless element references that every interaction tool (click/hover/fill/etc.) feeds back to resolve a live DOM node (via DOM.resolveNode({ backendNodeId: uid })), so run this first to discover uids.",
+    "description": "Captures the page's accessibility tree as an indented text tree, each line prefixed [uid] (a CDP backendDOMNodeId). Every interaction tool (click/hover/fill/etc.) resolves that uid via DOM.resolveNode — run this first to discover uids to act on.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default, = first page-type target) | 'index:N' (Nth page-type target, 0-based) | 'url:<substring>' | 'title:<substring>' | 'label:<name>' (exact label match, origin ledger or live lease) | '<32-hex targetId>' (exact target by id)."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "interactiveOnly": {
           "type": "boolean",
-          "description": "When true, emit only interactive/meaningful nodes flattened into a readable list; default false returns the full hierarchical a11y tree."
+          "description": "When true, emit only interactive/meaningful nodes as a flat list; default false returns the full hierarchical tree."
         }
       },
       "required": [],
@@ -390,25 +400,25 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "click",
-    "description": "Click an element via a synthetic mouse press/release at the element's scrolled-into-view bounding-rect center. Target the element with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector). clickCount:3 triple-clicks (selects a paragraph/line in most editors). 'modifiers' holds Alt/Control/Meta/Shift for the press and release, like a real modifier-click; on the Firefox backend a non-empty 'modifiers' throws (not yet supported over BiDi), so a modifier click there needs --browser chrome.",
+    "description": "Click an element via a synthetic mouse press/release at its scrolled-into-view center. Give exactly one of uid or selector. modifiers (Alt/Control/Meta/Shift) throws on the Firefox backend — use --browser chrome for a modifier-click. clickCount:3 triple-clicks (selects a line/paragraph in most editors).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the element to click, obtained from take_snapshot. Provide exactly one of uid or selector."
+          "description": "CDP backendDOMNodeId of the element to click, from take_snapshot. Exactly one of uid or selector."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the element to click (resolved via document.querySelector). Provide exactly one of uid or selector."
+          "description": "CSS selector for the element to click (document.querySelector). Exactly one of uid or selector."
         },
         "button": {
           "type": "string",
@@ -421,7 +431,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "clickCount": {
           "type": "number",
-          "description": "Number of clicks: 1 = single (default), 2 = double-click, 3 = triple-click."
+          "description": "Number of clicks: 1 (default), 2 = double-click, 3 = triple-click."
         },
         "modifiers": {
           "type": "array",
@@ -434,7 +444,7 @@ export const MANIFEST: ToolSpec[] = [
               "Shift"
             ]
           },
-          "description": "Modifier keys held for the click's press and release, e.g. ['Shift'] for a shift-click. Not supported on the Firefox backend: passing a non-empty array there throws."
+          "description": "Modifier keys held for the click's press and release, e.g. ['Shift']. Non-empty on the Firefox backend throws — not supported over BiDi."
         }
       },
       "required": [],
@@ -443,25 +453,25 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "hover",
-    "description": "Hover the mouse over an element by dispatching a mouseMoved event at its scrolled-into-view center, firing framework hover handlers. Target with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector).",
+    "description": "Hovers the mouse over an element by dispatching a mouseMoved event at its scrolled-into-view center, firing framework hover handlers. Give exactly one of uid or selector.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the element to hover, obtained from take_snapshot. Provide exactly one of uid or selector."
+          "description": "CDP backendDOMNodeId of the element to hover, from take_snapshot. Exactly one of uid or selector."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the element to hover (resolved via document.querySelector). Provide exactly one of uid or selector."
+          "description": "CSS selector for the element to hover (document.querySelector). Exactly one of uid or selector."
         }
       },
       "required": [],
@@ -470,21 +480,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "drag",
-    "description": "Drag from a source element to a destination. 'from' takes exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector. The destination is exactly one of 'to' (an element via uid/selector, or an absolute viewport point via x+y) or 'by' ({dx,dy} offset from the source point — sliders, map panning, resize handles). mode:'mouse' (default) dispatches synthetic mouse press/move/release: right for widgets built on raw pointer events, and Chrome does turn it into a real drag, but WHICH drag events reach the page depends on where the interpolated pointer path happens to land — measured on Chrome 151, the default steps:2 delivers ZERO dragover events, so an HTML5 drop zone written the standard way (preventDefault inside dragover) refuses the drop entirely. mode:'html5' performs the drag deterministically instead: Chrome's drag interception hands back the DragData the page's own dragstart built, and the toolkit replays it as dragEnter/dragOver/drop exactly at the destination, so a draggable=\"true\" / dataTransfer drop zone works regardless of the pointer path. mode:'html5' is CHROME-ONLY: it requires capability 'input.html5Drag' and is rejected with a clear error under the Firefox backend, where the tool itself remains available for mouse-mode drags. 'steps' (default 2) sets how many interpolated mouse-move events are dispatched between source and destination; raise it for DnD libraries with a movement threshold or per-frame sampling.",
+    "description": "Drags from a source element to a destination or by an offset. mode:'mouse' (default) dispatches synthetic mouse press/move/release; at the default steps:2 an HTML5 drop zone (dragover preventDefault) gets ZERO dragover events and refuses the drop. mode:'html5' replays real dragstart/dragEnter/dragOver/drop with the page's own dataTransfer instead — deterministic regardless of pointer path, but CHROME-ONLY (rejected with a clear error on the Firefox backend). 'from' takes uid or selector; destination is exactly one of 'to' (uid/selector/x+y) or 'by' ({dx,dy} offset — sliders, map panning, resize handles).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "from": {
           "type": "object",
-          "description": "Source element to drag from. Provide exactly one of uid or selector.",
+          "description": "Source element to drag from. Exactly one of uid or selector.",
           "properties": {
             "uid": {
               "type": "number",
@@ -499,7 +509,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "to": {
           "type": "object",
-          "description": "Where the drag ends: exactly one of uid, selector, or x+y. Mutually exclusive with 'by'; exactly one of to/by is required.",
+          "description": "Where the drag ends: exactly one of uid, selector, or x+y. Mutually exclusive with 'by'; exactly one of to/by required.",
           "properties": {
             "uid": {
               "type": "number",
@@ -522,7 +532,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "by": {
           "type": "object",
-          "description": "Drag by an offset from the source element's center instead of to a destination: at least one of dx/dy, the other defaults to 0. Mutually exclusive with 'to'; exactly one of to/by is required. Use for sliders (by:{dx:40}), map panning, and resize handles.",
+          "description": "Offset from the source element's center: at least one of dx/dy (other defaults to 0). Mutually exclusive with 'to'; exactly one of to/by required. For sliders (by:{dx:40}), map panning, resize handles.",
           "properties": {
             "dx": {
               "type": "number",
@@ -541,11 +551,11 @@ export const MANIFEST: ToolSpec[] = [
             "mouse",
             "html5"
           ],
-          "description": "'mouse' (default): synthetic mouse press/move/release, right for widgets built on raw pointer events. Chrome does turn this into a real HTML5 drag too, but WHICH drag events reach the page depends on the interpolated pointer path: at the default steps:2, an HTML5 drop zone written the standard way (preventDefault inside dragover) sees zero dragover events and refuses the drop. 'html5': real HTML5 drag-and-drop (dragstart/dragEnter/dragOver/drop with the page's own dataTransfer), deterministic regardless of pointer path. 'html5' is CHROME-ONLY and is rejected with a clear error under the Firefox backend."
+          "description": "'mouse' (default): synthetic mouse press/move/release — at steps:2 an HTML5 drop zone sees zero dragover events and refuses the drop. 'html5': real HTML5 drag-and-drop, deterministic regardless of pointer path, CHROME-ONLY (rejected on Firefox)."
         },
         "steps": {
           "type": "number",
-          "description": "Number of interpolated mouse-move events dispatched between the source and destination points, evenly spaced, the last landing exactly on the destination. Integer 1-500, default 2 (midpoint then destination). Raise it for DnD libraries with a movement threshold or per-frame sampling."
+          "description": "Number of interpolated mouse-move events between source and destination, evenly spaced, last landing on the destination. Integer 1-500, default 2. Raise for DnD libraries with a movement threshold or per-frame sampling."
         }
       },
       "required": [
@@ -556,41 +566,41 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "scroll",
-    "description": "Dispatch a wheel/scroll event at an anchor point: provide at most one of 'uid', 'selector', or 'x'+'y'; omit all three to scroll at the viewport center. An element anchor ('uid' or 'selector') is scrolled into view first, the same as click/hover. At least one of 'deltaX'/'deltaY' is required; positive 'deltaY' scrolls DOWN and positive 'deltaX' scrolls RIGHT (wheel-event convention). Chrome dispatches Input.dispatchMouseEvent{type:'mouseWheel'}; Firefox dispatches WebDriver BiDi's 'wheel' input source. Returns the resolved anchor point ({x,y}) plus the delta actually dispatched.",
+    "description": "Dispatches a wheel/scroll event at an anchor point — element (uid/selector) or x+y, scrolled into view first if an element; omit all three for viewport center. At least one of deltaX/deltaY required: positive deltaY scrolls DOWN, positive deltaX scrolls RIGHT (wheel-event convention — easy to invert). Returns the resolved anchor {x,y} plus the delta actually dispatched.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the element to scroll into view and anchor at, obtained from take_snapshot. Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+          "description": "CDP backendDOMNodeId of the element to scroll into view and anchor at, from take_snapshot. At most one of uid, selector, or x+y."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the element to scroll into view and anchor at (resolved via document.querySelector). Provide at most one of uid, selector, or x+y; omit all three to scroll at the viewport center."
+          "description": "CSS selector for the element to anchor at (document.querySelector). At most one of uid, selector, or x+y."
         },
         "x": {
           "type": "number",
-          "description": "Absolute viewport x-coordinate to anchor the scroll at. Must be given together with 'y'. Provide at most one of uid, selector, or x+y."
+          "description": "Absolute viewport x-coordinate to anchor at; must be given with y. At most one of uid, selector, or x+y."
         },
         "y": {
           "type": "number",
-          "description": "Absolute viewport y-coordinate to anchor the scroll at. Must be given together with 'x'. Provide at most one of uid, selector, or x+y."
+          "description": "Absolute viewport y-coordinate to anchor at; must be given with x. At most one of uid, selector, or x+y."
         },
         "deltaX": {
           "type": "number",
-          "description": "Horizontal scroll delta; positive scrolls RIGHT. At least one of deltaX/deltaY is required."
+          "description": "Horizontal scroll delta; positive scrolls RIGHT. At least one of deltaX/deltaY required."
         },
         "deltaY": {
           "type": "number",
-          "description": "Vertical scroll delta; positive scrolls DOWN. At least one of deltaX/deltaY is required."
+          "description": "Vertical scroll delta; positive scrolls DOWN. At least one of deltaX/deltaY required."
         }
       },
       "required": [],
@@ -599,17 +609,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "dispatch_mouse",
-    "description": "Dispatch exactly one raw mouse event ('move', 'down', or 'up') at absolute viewport coordinates: the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself to reach anything a physical mouse can do that click/drag's fixed sequences cannot — canvas drag-painting, marquee/rubber-band selection, a custom widget with its own hit-testing. Chrome-only (capability 'input.raw'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "description": "Dispatches one raw mouse event (move/down/up) at absolute viewport coordinates — the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself for anything click/drag's fixed sequences can't reach: canvas drag-painting, marquee/rubber-band selection, custom hit-testing widgets. Chrome-only: absent from tools/list under the Firefox backend, never present-and-throwing.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "action": {
           "type": "string",
@@ -622,11 +632,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "x": {
           "type": "number",
-          "description": "Viewport x-coordinate. Required on every call: CDP has no notion of a 'current pointer position' to default from."
+          "description": "Viewport x-coordinate. Required every call — CDP has no 'current pointer position' to default from."
         },
         "y": {
           "type": "number",
-          "description": "Viewport y-coordinate. Required on every call."
+          "description": "Viewport y-coordinate. Required every call."
         },
         "button": {
           "type": "string",
@@ -639,7 +649,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "clickCount": {
           "type": "number",
-          "description": "Click-run length for a 'down' or 'up' event (2 = the second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1."
+          "description": "Click-run length for a 'down' or 'up' event (2 = second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1."
         },
         "modifiers": {
           "type": "array",
@@ -665,17 +675,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "wait_for_download",
-    "description": "Wait for a file download to finish and return it as a real file on disk: {path,suggestedFilename,bytes,url,target}. The file is written under the artifact dir's downloads/ folder and renamed from Chrome's internal guid to the page's own filename, collision-suffixed (report.csv, report-1.csv, ...). ORDERING RULE, and it is not optional: download capture must be ARMED BEFORE the click that starts the download — call wait_for_download{arm:true} first (it arms and returns immediately, reporting {armed:true,downloadPath,pending}), then click, then call wait_for_download to collect the finished file. This is Chrome's behavior, not a preference: the download-behavior override is per-connection state that Chrome REVERTS the moment the arming client disconnects, and an unarmed headless Chrome denies the download outright, so a download triggered before anything armed is lost with no file anywhere. SIDE EFFECT, browser-global: arming redirects EVERY download in this browser (all tabs, all origins) into the toolkit's downloads directory for as long as this server runs, and downloads no longer land in the user's normal Downloads folder. Because the arm lives on a connection this server process holds open, this is an MCP-server capability: under the one-shot CLI the connection dies with the process and nothing is captured. Chrome-only (capability 'browser.downloads'): absent from tools/list under the Firefox backend, never present-and-throwing, because WebDriver BiDi has no command to redirect a download to a chosen directory.",
+    "description": "Wait for a file download to finish and return it as a real file on disk: {path,suggestedFilename,bytes,url,target}, written under the artifact dir's downloads/. ORDERING RULE, not optional: capture must be ARMED BEFORE the click that starts the download — call wait_for_download{arm:true} first (returns {armed:true,downloadPath,pending}), then click, then call again to collect the file. The download-behavior override is per-connection state Chrome REVERTS the moment the arming client disconnects, and an unarmed headless Chrome denies the download outright, so one triggered before arming is lost. SIDE EFFECT, browser-global: arming redirects EVERY download in this browser (all tabs, all origins) into the toolkit's downloads dir until this server exits — they no longer land in the user's normal Downloads folder. The arm lives on a connection this server holds open (an MCP-server capability): under the one-shot CLI the connection dies with the process and nothing is captured. Chrome-only (capability 'browser.downloads'): absent from tools/list under Firefox.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'. A download is browser-scoped, so this names the tab for the lease check and for the echoed target, not which download is returned."
+          "description": "Names the tab for the lease check and the echoed target — a download is browser-scoped, so this does not pick which download is returned. Grammar: server instructions."
         },
         "arm": {
           "type": "boolean",
@@ -683,7 +693,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "timeoutMs": {
           "type": "number",
-          "description": "How long to wait for a download to complete, in milliseconds. Default 30000. Ignored with arm:true. A download that already completed and was not yet collected is returned immediately, so this only bounds the wait for a download still in flight."
+          "description": "How long to wait for a download to complete, in milliseconds. Default 30000. Ignored with arm:true. A download that already completed and was not yet collected is returned immediately, so this only bounds the wait for one still in flight."
         }
       },
       "required": [],
@@ -692,17 +702,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "grant_permissions",
-    "description": "Grant browser permissions for an origin up front, so a page asking for geolocation / notifications / clipboard gets an answer instead of showing a prompt no agent can click. 'permissions' takes CDP PermissionType values ('geolocation', 'notifications', 'clipboardReadWrite', 'camera', 'microphone', 'midi', ...); an unknown name is refused by Chrome with the bad value in the message. Returns {granted,origin,target}, or {reset:true,target} for a reset-only call. Grants are keyed by ORIGIN, not by tab: every tab on that origin is affected, including ones opened later. reset:true clears this server's previous grants first (or instead, when no permissions are given) — note CDP's reset is not origin-scoped, so it clears them for every origin at once. The grant lives on a connection this server process holds open and Chrome DISCARDS IT when that connection closes, so this is an MCP-server capability: under the one-shot CLI the grant dies with the process. Chrome-only (capability 'browser.permissions'): absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "description": "Grant browser permissions for an origin up front, so a page asking for geolocation / notifications / clipboard gets an answer instead of a prompt no agent can click. 'permissions' takes CDP PermissionType values ('geolocation','notifications','clipboardReadWrite','camera',...); an unknown name is refused by Chrome, quoting the bad value. Returns {granted,origin,target}, or {reset:true,target} for a reset-only call. Grants are keyed by ORIGIN, not by tab: every tab on that origin is affected, including ones opened later. reset:true clears this server's previous grants first (or instead, when no permissions are given) — CDP's reset is not origin-scoped, so it clears them for every origin at once. The grant lives on a connection this server holds open and Chrome DISCARDS IT when that connection closes: an MCP-server capability, so under the one-shot CLI the grant dies with the process. Chrome-only (capability 'browser.permissions'): absent from tools/list under Firefox, never present-and-throwing.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'. Used for the lease check and, when 'origin' is omitted, as the source of the origin to grant for."
+          "description": "Also the origin source when 'origin' is omitted. Grammar: server instructions."
         },
         "permissions": {
           "type": "array",
@@ -726,29 +736,29 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "fill",
-    "description": "Fill an element by focusing it, clearing existing content, then inserting 'value' via Input.insertText (atomic paste-like commit, not per-character keystrokes). Target with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector).",
+    "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes — won't fire per-keypress handlers). Give exactly one of uid or selector.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the field to fill, obtained from take_snapshot. Provide exactly one of uid or selector."
+          "description": "CDP backendDOMNodeId of the field to fill, from take_snapshot. Exactly one of uid or selector."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the field to fill (resolved via document.querySelector). Provide exactly one of uid or selector."
+          "description": "CSS selector for the field to fill (document.querySelector). Exactly one of uid or selector."
         },
         "value": {
           "type": "string",
-          "description": "The text value to set; the field is cleared first so this overwrites existing content."
+          "description": "Text value to set; the field is cleared first, overwriting existing content."
         }
       },
       "required": [
@@ -759,17 +769,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "fill_form",
-    "description": "Fill multiple form fields in one call; each field is focused, cleared, then set via Input.insertText. Each field in the non-empty 'fields' array takes exactly one of uid (a CDP backendDOMNodeId from take_snapshot) or selector, plus its string value.",
+    "description": "Fills multiple form fields in one call; each is focused, cleared, then set via Input.insertText (overwrites existing content, same as fill). Each entry in the non-empty 'fields' array takes exactly one of uid or selector plus a string value.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "fields": {
           "type": "array",
@@ -805,29 +815,29 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "type_text",
-    "description": "Focus an element and append 'text' via Input.insertText without clearing first (closest to typing). Target with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector' (a CSS selector).",
+    "description": "Focuses an element and appends text via Input.insertText without clearing first — closest primitive to typing, but still atomic (not per-character keystrokes). Give exactly one of uid or selector.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the element to type into, obtained from take_snapshot. Provide exactly one of uid or selector."
+          "description": "CDP backendDOMNodeId of the element to type into, from take_snapshot. Exactly one of uid or selector."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the element to type into (resolved via document.querySelector). Provide exactly one of uid or selector."
+          "description": "CSS selector for the element to type into (document.querySelector). Exactly one of uid or selector."
         },
         "text": {
           "type": "string",
-          "description": "The text to insert; appended to existing content rather than overwriting it."
+          "description": "Text to insert; appended to existing content rather than overwriting it."
         }
       },
       "required": [
@@ -838,25 +848,25 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "press_key",
-    "description": "Dispatch a keyDown/keyUp pair for a single key with optional modifiers. 'key' is a named key (Enter, Tab, Escape, ArrowDown, Backspace, etc.) or a single printable character; the named-key table is curated (no F-keys/numpad/IME).",
+    "description": "Dispatches a keyDown/keyUp pair for one key with optional modifiers. 'key' is a named key (Enter, Tab, Escape, ArrowDown, Backspace, etc.) or a single printable character — the named-key table is curated, with no F-keys, numpad, or IME support.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "key": {
           "type": "string",
-          "description": "Key to press: a named key like 'Enter', 'Tab', 'Escape', 'ArrowDown', 'Backspace', or a single printable character. Required."
+          "description": "Key to press: a named key (Enter, Tab, Escape, ArrowDown, Backspace, ...) or a single printable character."
         },
         "modifiers": {
           "type": "array",
-          "description": "Optional modifier names held during the press: 'Control'/'Ctrl', 'Shift', 'Alt', 'Meta'/'Cmd'.",
+          "description": "Modifier names held during the press: 'Control'/'Ctrl', 'Shift', 'Alt', 'Meta'/'Cmd'.",
           "items": {
             "type": "string"
           }
@@ -870,32 +880,32 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "upload_file",
-    "description": "Attach one or more files to an <input type=file> element via DOM.setFileInputFiles. Target the input with exactly one of 'uid' (a CDP backendDOMNodeId from take_snapshot) or 'selector'; 'files' is an absolute path or array of absolute paths.",
+    "description": "Attaches one or more files to an <input type=file> element via DOM.setFileInputFiles. Give exactly one of uid or selector for the input; 'files' is an array of absolute path(s) — wrap a single path in an array too.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "uid": {
           "type": "number",
-          "description": "CDP backendDOMNodeId of the file input element, obtained from take_snapshot. Provide exactly one of uid or selector."
+          "description": "CDP backendDOMNodeId of the file input element, from take_snapshot. Exactly one of uid or selector."
         },
         "selector": {
           "type": "string",
-          "description": "CSS selector for the file input element (resolved via document.querySelector). Provide exactly one of uid or selector."
+          "description": "CSS selector for the file input element (document.querySelector). Exactly one of uid or selector."
         },
         "files": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Absolute path(s) to the file(s) to attach to the <input type=file>, as an array of absolute paths. A single path must be wrapped in an array (e.g. [\"/tmp/a.pdf\"]). Declared array-only because some model APIs (Google Gemini function calling) reject union-typed parameters."
+          "description": "Absolute path(s) to attach to the <input type=file>, as an array — wrap a single path too, e.g. [\"/tmp/a.pdf\"]. Array-only because some model APIs (Google Gemini function calling) reject union-typed parameters."
         }
       },
       "required": [
@@ -906,17 +916,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "take_screenshot",
-    "description": "Capture the viewport (default), the full scrollable page (fullPage), or a single element (uid or selector, exactly one and mutually exclusive) via raw CDP Page.captureScreenshot — as one image when it fits, or as vertical bands stitched losslessly into one PNG when it does not (see tile). Writes a PNG/JPEG under /tmp/cdp-toolkit (override with savePath; its directory is created for you) and returns {path,bytes,format,target,scale} plus width/height MEASURED from the encoded bytes, which are omitted rather than guessed when the bytes cannot be decoded; renderSize/renderRestored (+renderRestoreError) accompany a renderWidth/renderHeight capture, tiled/bands a banded one. Raw base64 is only included when returnBase64 is set, and is refused on a banded capture. quality applies to jpeg only. Every capture costs one Page.getLayoutMetrics round trip, because Chrome does not refuse an oversized capture politely: past 16384 device px per side Page.captureScreenshot can simply never answer, and captureBeyondViewport leaves the tab resized to the clip, so the size is checked before the capture rather than after.",
+    "description": "Captures the viewport (default), the full scrollable page (fullPage), or one element (uid or selector, mutually exclusive) via CDP Page.captureScreenshot. Past 16384 device px per side Chrome can hang rather than refuse, so size is checked first via Page.getLayoutMetrics; an oversized capture is auto-tiled into vertical bands stitched losslessly into one PNG (see tile) instead of wedging the tab. Writes PNG/JPEG to /tmp/cdp-toolkit (override savePath, dir auto-created); returns {path,bytes,format,target,scale} plus width/height measured from the encoded bytes (omitted if undecodable). renderSize/renderRestored(+renderRestoreError) accompany a renderWidth/renderHeight capture, tiled/bands a banded one. returnBase64 adds raw bytes to the result but is refused on a banded capture. quality applies to jpeg only.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector. undefined or 'active' -> first page target; '<32-hex targetId>' -> exact target by id; 'index:N' -> Nth page target (0-based); 'url:<substring>' -> first page whose url contains substring; 'title:<substring>' -> first page whose title contains substring; 'label:<name>' -> the page with exactly this label (origin ledger or live lease)."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "format": {
           "type": "string",
@@ -924,35 +934,35 @@ export const MANIFEST: ToolSpec[] = [
             "png",
             "jpeg"
           ],
-          "description": "Image format. Defaults to png. quality applies only to jpeg."
+          "description": "Image format, default png. quality applies only to jpeg."
         },
         "quality": {
           "type": "number",
-          "description": "JPEG quality 0-100 (default 80). Ignored for png."
+          "description": "JPEG quality 0-100, default 80; ignored for png."
         },
         "fullPage": {
           "type": "boolean",
-          "description": "Capture the full scrollable content height computed from Page.getLayoutMetrics, not just the viewport."
+          "description": "Capture the full scrollable height (via Page.getLayoutMetrics), not just the viewport."
         },
         "scale": {
           "type": "number",
-          "description": "Output-pixel multiplier for this one capture: greater than 0, at most 8, default 1. Output px = ceil(css px x scale x devicePixelRatio), so on a ratio-2 display scale 3 is 6x the CSS size; the page is never told anything changed (devicePixelRatio and innerWidth/innerHeight read identically before and after). Chrome only (capability screenshot.scale) — WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter, so under Firefox call emulate with deviceScaleFactor first and capture at scale 1. A projection past Chrome's 16384 device px per side is refused before the browser is dialled, naming the largest scale that fits."
+          "description": "Output-pixel multiplier for this capture only (0<scale<=8, default 1): output px = ceil(css px x scale x devicePixelRatio); the page is never told anything changed. Chrome only (screenshot.scale) — Firefox BiDi has no scale param, use emulate{deviceScaleFactor} then scale:1. A projection over 16384 device px/side is refused up front, naming the largest scale that fits."
         },
         "renderWidth": {
           "type": "number",
-          "description": "Emulate this viewport width, in CSS px (integer, 1-16384), for the length of ONE capture, then put the previous viewport back. REQUIRED together with renderHeight. Not the same knob as scale: scale re-renders the same layout at more pixels, this changes what the page BELIEVES, so media queries flip and the document re-lays-out — which is how you capture a responsive page at 1920x1080 from a tab that is not that size. Declared by BOTH backends (capability screenshot.renderSize). The restore can only put back an override this toolkit itself applied: one set by the DevTools UI, another client, or a pre-1.9.2 build is invisible and gets reset to the real device. The result reports renderSize and renderRestored; renderRestored:false means the tab is STILL emulated and you have to fix it with emulate."
+          "description": "Emulates this viewport width (CSS px, 1-16384) for one capture, then restores it. Required with renderHeight. Unlike scale, this changes what the page believes (media queries re-flow) — e.g. capture a responsive page at 1920x1080 from a differently-sized tab. Restore only works for an override this toolkit itself set; check result.renderRestored (false = still emulated, fix via emulate). Works on both backends (capability screenshot.renderSize)."
         },
         "renderHeight": {
           "type": "number",
-          "description": "Emulate this viewport height, in CSS px (integer, 1-16384), for the length of one capture. Required together with renderWidth — a viewport is two numbers, and honouring one while inventing the other would render at a size you never named and never see in the result. Note a narrow renderWidth reflows most documents TALLER, which is the usual way a render-size capture trips the 16384-device-px encode limit."
+          "description": "Emulates this viewport height (CSS px, 1-16384) for one capture. Required with renderWidth — a viewport is two numbers. A narrow renderWidth often reflows pages TALLER, which is the usual way a render-size capture trips the 16384px encode limit."
         },
         "tile": {
           "type": "boolean",
-          "description": "Whether this capture may be taken as vertical bands and stitched into one lossless PNG. Three-valued: omitted = AUTO (one shot when the projected output fits under Chrome's 16384 device px per side, bands when it does not — this is why a whole-page capture of a very long page now returns a file instead of hanging and wedging the tab); false = never band, refuse instead (the pre-1.9.2 behaviour); true = always band, even when one shot would have fitted. Only true costs a capability (screenshot.tile, Chrome only; Firefox was never driven for the band arithmetic). A banded capture is PNG-only and cannot also returnBase64, and only HEIGHT is tiled — a projected WIDTH past the limit is refused, not split, because bands are stitched by concatenating scanlines. Bands are a faithful crop of one document render: fixed and sticky elements do not repeat per band and seams are pixel-exact, but content the page only loads on real scroll (lazy images, virtualized lists) renders blank in bands the real viewport never reached, which is a property of the page and not of the stitch."
+          "description": "Whether to allow vertical-band stitching: omitted=AUTO (band only if a single shot wouldn't fit), false=never band (refuse instead), true=always band (Chrome-only capability). Banded output is PNG-only, can't returnBase64, and only bands on HEIGHT (oversized WIDTH is refused, not split). Bands are a faithful crop, but lazy/virtualized content the real viewport never scrolled to renders blank."
         },
         "uid": {
           "type": "number",
-          "description": "Element to clip to: a CDP backendDOMNodeId obtained from take_snapshot. Mutually exclusive with selector."
+          "description": "Element to clip to: a backendDOMNodeId from take_snapshot. Mutually exclusive with selector."
         },
         "selector": {
           "type": "string",
@@ -960,11 +970,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "savePath": {
           "type": "string",
-          "description": "Override the output file path. Default: /tmp/cdp-toolkit/screenshot-<id>-<stamp>.<ext>, where the stamp is the capture's START (a banded capture writes as it goes and has no finished image to name a file after). The destination directory is created from this path's own dirname, so a savePath outside /tmp/cdp-toolkit works."
+          "description": "Override the output path (default /tmp/cdp-toolkit/screenshot-<id>-<stamp>.<ext>, stamped at capture START). Directory is created from this path's dirname."
         },
         "returnBase64": {
           "type": "boolean",
-          "description": "Also return the raw base64 image bytes in the result, in addition to writing the file. Refused on a banded capture (see tile): a stitched image runs to hundreds of megabytes and base64 inflates it by a third, into the caller's response — read the file at the returned path instead."
+          "description": "Also return raw base64 bytes in the result. Refused on a banded capture (see tile) — a stitched image can run to hundreds of MB; read the file at the returned path instead."
         }
       },
       "required": [],
@@ -973,41 +983,41 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "emulate",
-    "description": "Apply any subset of Chrome emulation overrides in one call: device metrics (width/height together, plus deviceScaleFactor/mobile), userAgent, cpuThrottlingRate (>=1), emulated media type + mediaFeatures, and networkConditions. Pass clearOverrides:true to reset every override to the browser default (ignores all other fields); as of 1.9.2 that genuinely clears a device-metrics override set by a DIFFERENT process (Emulation.clearDeviceMetricsOverride is a no-op unless the clearing connection also set the override, so the driver re-asserts the tab's current size on its own connection first, then clears — and throws rather than answering cleared:true if it cannot verify that). Non-metrics overrides are session-scoped and reset when the per-call connection closes; device-metrics overrides persist on the target until cleared or the renderer navigates/reloads.",
+    "description": "Applies any subset of Chrome emulation overrides in one call: device metrics (width+height together, +deviceScaleFactor/mobile), userAgent, cpuThrottlingRate(>=1), media type+features, networkConditions. Device-metrics overrides PERSIST on the target until cleared or the renderer navigates/reloads; every other override is session-scoped and resets when this call's connection closes. clearOverrides:true resets everything (ignoring other fields) and, as of 1.9.2, genuinely clears a device-metrics override set by a DIFFERENT process — Chrome's clearDeviceMetricsOverride is normally a no-op unless the clearing connection also set the override, so the driver re-asserts the tab's current size first, then clears, throwing rather than reporting cleared:true if it can't verify.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "width": {
           "type": "number",
-          "description": "Device-metrics viewport width in CSS pixels. Must be supplied together with height."
+          "description": "Device-metrics viewport width in CSS px. Must be paired with height."
         },
         "height": {
           "type": "number",
-          "description": "Device-metrics viewport height in CSS pixels. Must be supplied together with width."
+          "description": "Device-metrics viewport height in CSS px. Must be paired with width."
         },
         "deviceScaleFactor": {
           "type": "number",
-          "description": "Device pixel ratio (DPR) for the device-metrics override; 0 uses the platform default."
+          "description": "Device pixel ratio for the device-metrics override; 0 = platform default."
         },
         "mobile": {
           "type": "boolean",
-          "description": "Whether to emulate a mobile device (affects viewport meta handling, scrollbars, etc.) for the device-metrics override."
+          "description": "Emulate a mobile device (viewport meta, scrollbars, etc.) for the device-metrics override."
         },
         "userAgent": {
           "type": "string",
-          "description": "User-Agent string to override via Emulation.setUserAgentOverride."
+          "description": "User-Agent string override (Emulation.setUserAgentOverride)."
         },
         "cpuThrottlingRate": {
           "type": "number",
-          "description": "CPU throttling multiplier: 1 = no throttle, 2 = 2x slower, etc. Must be >= 1."
+          "description": "CPU throttling multiplier: 1=none, 2=2x slower, etc. Must be >=1."
         },
         "media": {
           "type": "string",
@@ -1015,7 +1025,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "mediaFeatures": {
           "type": "array",
-          "description": "Emulated media features, e.g. [{ name: 'prefers-color-scheme', value: 'dark' }].",
+          "description": "Emulated media features, e.g. [{name:'prefers-color-scheme', value:'dark'}].",
           "items": {
             "type": "object",
             "properties": {
@@ -1037,7 +1047,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "networkConditions": {
           "type": "object",
-          "description": "Network condition overrides applied via Network.emulateNetworkConditions.",
+          "description": "Network overrides applied via Network.emulateNetworkConditions.",
           "properties": {
             "offline": {
               "type": "boolean",
@@ -1064,7 +1074,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "clearOverrides": {
           "type": "boolean",
-          "description": "Reset every override (device metrics, UA, CPU, media, network) to the browser default; ignores all other fields when true."
+          "description": "Reset every override (metrics, UA, CPU, media, network) to browser default; ignores all other fields when true."
         }
       },
       "required": [],
@@ -1073,33 +1083,33 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "resize_page",
-    "description": "Set the page's device-metrics width/height (the narrow case of emulate), optionally with deviceScaleFactor and mobile, then verify by reading back window.innerWidth/innerHeight after the override is applied. Requires positive numeric width and height. The device-metrics override persists on the target until cleared or the renderer navigates/reloads.",
+    "description": "Sets the page's device-metrics width/height (the narrow case of emulate), optionally deviceScaleFactor/mobile, then verifies by reading back window.innerWidth/innerHeight after applying. Requires positive width and height. The override PERSISTS on the target until cleared (emulate{clearOverrides:true}) or the renderer navigates/reloads.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "width": {
           "type": "number",
-          "description": "Viewport width in CSS pixels (must be positive)."
+          "description": "Viewport width in CSS px (required, must be positive)."
         },
         "height": {
           "type": "number",
-          "description": "Viewport height in CSS pixels (must be positive)."
+          "description": "Viewport height in CSS px (required, must be positive)."
         },
         "deviceScaleFactor": {
           "type": "number",
-          "description": "Device pixel ratio (DPR); 0 uses the platform default."
+          "description": "Device pixel ratio; 0 = platform default."
         },
         "mobile": {
           "type": "boolean",
-          "description": "Whether to emulate a mobile device for the device-metrics override."
+          "description": "Emulate a mobile device for the device-metrics override."
         }
       },
       "required": [
@@ -1111,17 +1121,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "handle_dialog",
-    "description": "Wait for the next JavaScript dialog (alert/confirm/prompt/beforeunload) on a page and respond via Page.handleJavaScriptDialog, accepting or dismissing it. Default mode resolves with the first handled dialog or throws on timeout; set autoMs to handle every dialog opening during a fixed window and resolve with the list. The dialog must be triggered out-of-band (e.g. by clicking a button), since a blocking dialog freezes the renderer.",
+    "description": "Wait for the next JavaScript dialog (alert/confirm/prompt/beforeunload) on a page and respond via Page.handleJavaScriptDialog, accepting or dismissing it. Default mode resolves with the first handled dialog or throws on timeout; set autoMs to handle every dialog opening during a fixed window and resolve with the list. Trigger the dialog out-of-band (e.g. click a button) — a blocking dialog freezes the renderer, so it cannot be triggered inline.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (or omitted) for the first page-type target | 'index:N' (0-based) | 'url:<substring>' | 'title:<substring>' | 'label:<name>' (exact label match, origin ledger or live lease) | a 32-hex <targetId>."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "accept": {
           "type": "boolean",
@@ -1133,7 +1143,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "timeoutMs": {
           "type": "number",
-          "description": "How long to wait for the next dialog in milliseconds (default 15000)."
+          "description": "How long to wait for the next dialog, in milliseconds (default 15000)."
         },
         "autoMs": {
           "type": "number",
@@ -1148,29 +1158,29 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_console_messages",
-    "description": "Read console output (logs, warnings, exceptions) captured for the target page. By default reads the target's existing shared buffer and returns parsed console entries (empty if no capture has run); with reload:true it reloads the page and records a fresh capture window (both console+network) so a network reload never wipes console history. SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is recorded from CDP's Network domain on the worker's own session, which observes what the code ACTUALLY SENT and so needs neither of the two tricks a caller reaches for first. Both of those fail for ordinary JavaScript reasons rather than service-worker ones: a value bound at module top level is not visible from evaluate_script's global scope (plain lexical scoping, exactly the same in a page), and assigning self.fetch cannot rebind a fetch reference the module already captured. A worker's console.log arrives as Runtime.consoleAPICalled on its own session. A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
+    "description": "Read console output (logs, warnings, exceptions) captured for the target. Reads the existing shared buffer by default (empty if no capture ran); reload:true reloads and records a fresh capture (console+network together, so a network reload never wipes console history). WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker -- its console.log arrives as Runtime.consoleAPICalled, its outbound requests from CDP's Network domain on the worker's own session -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload:true means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup message can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions."
         },
         "reload": {
           "type": "boolean",
-          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer). With a worker: target there is nothing to reload: the window records for durationMs while the worker runs, and the session it holds keeps that worker from being idle-evicted until the capture stops."
+          "description": "Record fresh by reloading the page and capturing a window. Default false (read existing buffer). With a worker: target nothing reloads -- records for durationMs while the worker runs and keeps it alive until the capture stops."
         },
         "durationMs": {
           "type": "number",
-          "description": "Capture window for reload mode, in milliseconds. Default 2500."
+          "description": "Capture window for reload mode, in ms. Default 2500."
         },
         "wake": {
           "type": "boolean",
-          "description": "Worker targets only, and only when a capture is being started (reload:true). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
+          "description": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions."
         }
       },
       "required": [],
@@ -1179,17 +1189,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "get_console_message",
-    "description": "Return a single console entry by zero-based index from the target's existing console buffer. Throws if the index is out of range; run list_console_messages (optionally with reload:true) first to populate the buffer.",
+    "description": "Return one console entry by zero-based index from the target's existing console buffer. Throws if the index is out of range; run list_console_messages (optionally reload:true) first to populate the buffer.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "index": {
           "type": "number",
@@ -1202,33 +1212,33 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_network_requests",
-    "description": "Return correlated network request rows (one per requestId, with status/headers/state) for the target page. By default reads the target's existing buffer; with reload:true it reloads and records a fresh both-domains capture window. Use filterUrl to keep only requests whose URL contains a substring. SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is recorded from CDP's Network domain on the worker's own session, which observes what the code ACTUALLY SENT and so needs neither of the two tricks a caller reaches for first. Both of those fail for ordinary JavaScript reasons rather than service-worker ones: a value bound at module top level is not visible from evaluate_script's global scope (plain lexical scoping, exactly the same in a page), and assigning self.fetch cannot rebind a fetch reference the module already captured. A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
+    "description": "Return correlated network rows (one per requestId; status/headers/state) for the target. Reads the existing buffer by default; reload:true records a fresh both-domains capture window. filterUrl keeps only URLs containing a substring. WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker's outbound requests from CDP's Network domain on the worker's own session -- what the code ACTUALLY SENT -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload:true means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup request can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions."
         },
         "reload": {
           "type": "boolean",
-          "description": "Record fresh by reloading the page and capturing for a window. Default false (read the existing buffer). With a worker: target there is nothing to reload: the window records for durationMs while the worker runs, and the session it holds keeps that worker from being idle-evicted until the capture stops."
+          "description": "Record fresh by reloading the page and capturing a window. Default false (read existing buffer). With a worker: target nothing reloads -- records for durationMs while the worker runs and keeps it alive until the capture stops."
         },
         "durationMs": {
           "type": "number",
-          "description": "Capture window for reload mode, in milliseconds. Default 2500."
+          "description": "Capture window for reload mode, in ms. Default 2500."
         },
         "filterUrl": {
           "type": "string",
-          "description": "Only return requests whose URL contains this substring."
+          "description": "Return only requests whose URL contains this substring."
         },
         "wake": {
           "type": "boolean",
-          "description": "Worker targets only, and only when a capture is being started (reload:true). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
+          "description": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions."
         }
       },
       "required": [],
@@ -1237,21 +1247,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "get_network_request",
-    "description": "Return one network request (matched by exact requestId, else by url substring) including status/headers. Requires at least one of requestId or url (throws otherwise). With includeBody:true the body fetch drives a fresh capture (a reload for a page, a listen window for a worker) and is matched by url ONLY (a fresh capture re-mints requestIds, so a carried-over requestId cannot fetch a body, so it returns metadata plus bodyUnavailableReason). SERVICE WORKERS (Chrome only, Capability 'worker.targets'): pass target 'worker:<extension-id>' to watch an MV3 extension's BACKGROUND SERVICE WORKER. The outbound request that worker makes to your backend is recorded from CDP's Network domain on the worker's own session, which observes what the code ACTUALLY SENT and so needs neither of the two tricks a caller reaches for first. Both of those fail for ordinary JavaScript reasons rather than service-worker ones: a value bound at module top level is not visible from evaluate_script's global scope (plain lexical scoping, exactly the same in a page), and assigning self.fetch cannot rebind a fetch reference the module already captured. A worker capture has no reload to drive it: reload:true means 'listen for durationMs while the worker runs', so trigger the worker's work (another tool call, an extension message, an alarm) during the window; a worker woken by the call has already run its top-level code by the time the recorder attaches, so a request it makes at startup can be missed. SIDE EFFECT, deliberate and documented: the recording holds a CDP session on the worker, and that KEEPS THE WORKER ALIVE for as long as the capture runs — an MV3 worker is otherwise idle-evicted within seconds — and Chrome resumes evicting it once the capture stops.",
+    "description": "Return one network request (matched by exact requestId, else url substring) with status/headers. Requires requestId or url (throws otherwise). includeBody:true drives a fresh capture (page reload, or worker listen window) matched by url ONLY -- a fresh capture re-mints requestIds, so a carried-over requestId returns metadata plus bodyUnavailableReason. WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker's outbound requests from CDP's Network domain on the worker's own session -- what the code ACTUALLY SENT -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup request can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | '<targetId>' | 'index:N' | 'url:<substring>' | 'title:<substring>' | 'label:<name>' | 'worker:<substring>' -> a service/shared worker whose url contains the substring, which is how you reach an MV3 extension's background service worker (worker:<extension-id> or worker:background.js). The worker: arm is CHROME-ONLY (Capability 'worker.targets'), is refused on Firefox, and a bare worker target id works too."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions."
         },
         "requestId": {
           "type": "string",
-          "description": "Match by exact requestId (metadata only, cannot fetch a body, since reload re-mints requestIds)."
+          "description": "Match by exact requestId (metadata only; cannot fetch a body, since a reload re-mints requestIds)."
         },
         "url": {
           "type": "string",
@@ -1259,15 +1269,15 @@ export const MANIFEST: ToolSpec[] = [
         },
         "includeBody": {
           "type": "boolean",
-          "description": "Also fetch the response body; drives a fresh reload capture and must be used with the `url` selector."
+          "description": "Also fetch the response body; drives a fresh capture and requires the url selector."
         },
         "durationMs": {
           "type": "number",
-          "description": "Capture window for the reload-driven body fetch, in milliseconds. Default 2500."
+          "description": "Capture window for the body-fetch reload, in ms. Default 2500."
         },
         "wake": {
           "type": "boolean",
-          "description": "Worker targets only, and only when a capture is being started (includeBody together with url). Default true: an MV3 extension service worker is idle-evicted after seconds of inactivity and then exists in NO target listing, so the capture asks Chrome to start it (ServiceWorker.startWorker over a page session) and then re-reads the target list to confirm it actually came up. Pass false to fail fast instead of starting anything. Rejected rather than ignored on a page target, on a bare target id (Chrome re-mints a worker's target id when it restarts, so only the url-substring form can name a worker that is not running), and on a read-only call (the buffer is keyed by target id, so a woken worker's buffer would be empty)."
+          "description": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions."
         }
       },
       "required": [],
@@ -1276,24 +1286,24 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_start_trace",
-    "description": "Start a performance trace on the target page over raw CDP (Tracing.start) and park the recording connection in-process. Must be paired with performance_stop_trace WITHIN THE SAME PROCESS; for a robust cross-call trace use performance_trace instead. Throws if a trace is already in progress for the target.",
+    "description": "Starts a CDP trace recording on the target and holds the recording connection in-process; you MUST call performance_stop_trace from the SAME PROCESS to end it, or use performance_trace instead for a robust cross-call trace. Throws if a trace is already in progress for this target.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "categories": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Trace categories to include. Defaults to the timeline + user-timing + loading + disabled-by-default timeline tracks that carry LCP/LayoutShift/RunTask."
+          "description": "Trace categories to record. Defaults to timeline + user-timing + loading + disabled-by-default timeline tracks carrying LCP/LayoutShift/RunTask."
         }
       },
       "required": [],
@@ -1302,17 +1312,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_stop_trace",
-    "description": "Stop the in-process trace started by performance_start_trace, drain buffered Tracing.dataCollected events, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics}. Throws if no live trace exists in this process (e.g. start ran in a different process); use performance_trace instead. The 'target' arg is accepted only for API symmetry; at most one trace is ever live per process.",
+    "description": "Stops the in-process trace started by performance_start_trace and writes it as JSON under /tmp/cdp-toolkit, returning {path,bytes,events,metrics}. Throws if no live trace exists in THIS process (e.g. start ran in a different process) — use performance_trace instead. The target arg is accepted only for API symmetry; at most one trace is ever live per process.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         }
       },
       "required": [],
@@ -1321,17 +1331,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_analyze_insight",
-    "description": "CDP-native approximation of the DevTools insight analyzer: read a trace JSON file (bare array or {traceEvents:[...]}) at the given tracePath and return headline metrics (FCP/LCP/CLS/TBT, long tasks, layout shifts). Requires an explicit tracePath returned by performance_trace/performance_stop_trace; there is no implicit 'latest trace'. Numbers approximate DevTools (no main-thread attribution or frame-scoped LCP).",
+    "description": "Reads a trace JSON file (from performance_trace/performance_stop_trace) at tracePath and returns headline metrics: FCP/LCP/CLS/TBT, long tasks, layout shifts. Requires an EXPLICIT tracePath — there is no implicit 'latest trace'. Numbers approximate DevTools's insight analyzer (no main-thread attribution or frame-scoped LCP).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "tracePath": {
           "type": "string",
-          "description": "Filesystem path to a trace JSON file written by performance_trace or performance_stop_trace (bare array OR {traceEvents:[...]}). Required."
+          "description": "Path to a trace JSON file (bare array or {traceEvents:[...]}) written by performance_trace or performance_stop_trace. Required."
         }
       },
       "required": [],
@@ -1340,25 +1350,25 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "performance_trace",
-    "description": "PRIMARY one-shot trace: start tracing, optionally reload or navigate the page, wait durationMs (default 3000), end the trace, write the trace JSON under /tmp/cdp-toolkit, and return {path,bytes,events,metrics,target}. Holds one connection open for the whole window, so it is immune to the cross-process limitation of start/stop, and it is the recommended entry point.",
+    "description": "RECOMMENDED entry point: one-shot trace that starts tracing, optionally reloads or navigates the page, waits durationMs (default 3000ms), stops, and writes JSON under /tmp/cdp-toolkit — returns {path,bytes,events,metrics,target}. Holds one connection open for the whole window, so unlike start/stop it is NOT limited to a single process.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "durationMs": {
           "type": "number",
-          "description": "How long to record after the optional reload/navigate, in milliseconds. Default 3000."
+          "description": "How long to record after the optional reload/navigate, in ms. Default 3000."
         },
         "reload": {
           "type": "boolean",
-          "description": "Reload the page after starting the trace to capture full navigation timing."
+          "description": "Reload the page after starting the trace, to capture full navigation timing."
         },
         "navigateTo": {
           "type": "string",
@@ -1369,7 +1379,7 @@ export const MANIFEST: ToolSpec[] = [
           "items": {
             "type": "string"
           },
-          "description": "Trace categories to include. Defaults to the timeline + user-timing + loading + disabled-by-default timeline tracks that carry LCP/LayoutShift/RunTask."
+          "description": "Trace categories to record. Defaults to timeline + user-timing + loading + disabled-by-default timeline tracks carrying LCP/LayoutShift/RunTask."
         }
       },
       "required": [],
@@ -1378,17 +1388,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "start_screen_recording",
-    "description": "Start recording the target tab to video over raw CDP (Page.startScreencast), holding one persistent connection open and spooling every Page.screencastFrame to disk. Chrome emits a frame ON REPAINT, not on a clock, so the stream is variable-rate: each frame is timestamped into a ledger and stop_screen_recording turns those timestamps into per-frame display durations, which is what makes a still page hold one long frame instead of the video racing or freezing. Every frame is acked immediately (an unacked frame stalls the stream). ffmpeg is probed here, not at stop, so a missing encoder fails before a recording is captured and thrown away. Must be paired with stop_screen_recording WITHIN THE SAME PROCESS (the frames are events on this connection and cannot be re-attached from another process, so the pair works under the MCP server, not the one-process-per-call CLI). Throws if a recording is already in progress for the target; recordings on DIFFERENT targets run concurrently. Chrome only: WebDriver BiDi has no screencast primitive, so both tools are absent under --browser firefox.",
+    "description": "Starts recording the target tab to video via CDP Page.startScreencast, holding one persistent connection and spooling every frame to disk — MUST be paired with stop_screen_recording WITHIN THE SAME PROCESS (frames are connection-scoped and cannot be reattached from another process, so this only works under the MCP server, not the one-process-per-call CLI). Chrome only: WebDriver BiDi has no screencast primitive, so both tools are absent under --browser firefox. Frames arrive ON REPAINT not on a clock (variable rate); each is timestamped into a ledger that stop_screen_recording turns into per-frame display durations, so a still page holds one long frame instead of racing. ffmpeg is probed here (not at stop) so a missing encoder fails before frames are captured and thrown away. Throws if the target already has a recording in progress; different targets record concurrently.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "format": {
           "type": "string",
@@ -1396,27 +1406,27 @@ export const MANIFEST: ToolSpec[] = [
             "jpeg",
             "png"
           ],
-          "description": "Frame image format. Defaults to jpeg (far smaller per repaint); png is lossless. quality applies to jpeg only."
+          "description": "Frame format, default jpeg (much smaller per repaint); png is lossless. quality applies to jpeg only."
         },
         "quality": {
           "type": "number",
-          "description": "JPEG frame quality 0-100. Ignored for png. Omitted by default, which leaves Chrome's own default in place."
+          "description": "JPEG frame quality 0-100. Ignored for png; omitted leaves Chrome's own default."
         },
         "maxWidth": {
           "type": "number",
-          "description": "Cap the streamed frame width in pixels. Also the way to pin frame size if the viewport might change mid-recording."
+          "description": "Caps the streamed frame width in px; also pins frame size if the viewport may change mid-recording."
         },
         "maxHeight": {
           "type": "number",
-          "description": "Cap the streamed frame height in pixels."
+          "description": "Caps the streamed frame height in px."
         },
         "everyNthFrame": {
           "type": "number",
-          "description": "Capture only every Nth repaint (1 = every frame). Reduces spool size on a busy page; per-frame durations keep playback at wallclock speed either way."
+          "description": "Capture only every Nth repaint (1=every frame), to shrink spool size on a busy page; per-frame durations keep playback at wallclock speed either way."
         },
         "bringToFront": {
           "type": "boolean",
-          "description": "Activate the tab (Page.bringToFront) before recording. Default false. A fully backgrounded or occluded tab may never repaint, and a recording of one captures 0 frames."
+          "description": "Activate the tab (Page.bringToFront) before recording, default false. A backgrounded/occluded tab may never repaint, yielding a 0-frame recording."
         }
       },
       "required": [],
@@ -1425,21 +1435,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "stop_screen_recording",
-    "description": "Stop the recording started by start_screen_recording, assemble the spooled frames into an MP4 with ffmpeg using PER-FRAME durations from the ledger (frame N is held until frame N+1 painted; the last frame is held until this call), and return {path,bytes,durationMs,frameCount,encodedFrames,codec,encoder,width,height,droppedFrames,target}. Encoder ladder, probed once at start: hevc_videotoolbox then h264_videotoolbox then libx265 then libx264, with -tag:v hvc1 on HEVC so QuickTime plays it, +faststart, yuv420p, and even dimensions forced. With one recording in flight 'target' may be omitted; with several it is required, because guessing which to stop can lose another agent's recording. Throws if nothing is recording in this process, and throws rather than writing a silent empty video when 0 frames arrived. On an ffmpeg failure the spooled frames are KEPT and the spool path plus the exact command are named in the error. Encoded video tops out at 25 fps: ffmpeg's concat demuxer represents image timestamps on a 1/25s grid, so frames captured less than 40ms apart are coalesced deliberately (frameCount reports what was captured, encodedFrames what reached the video) instead of being dropped silently by ffmpeg. durationMs is the sum of the encoded durations; the file itself runs one 40ms step longer, because the concat demuxer needs the final frame repeated for its hold to count.",
+    "description": "Stops the recording started by start_screen_recording, assembling spooled frames into an MP4 via ffmpeg with PER-FRAME durations (frame N held until N+1 painted; last frame held until this call) — capped at 25fps by ffmpeg's concat demuxer, so frames under 40ms apart are deliberately coalesced (frameCount=captured, encodedFrames=what reached the video, never silently dropped). Returns {path,bytes,durationMs,frameCount,encodedFrames,codec,encoder,width,height,droppedFrames,target}; durationMs sums encoded durations, the file runs one 40ms step longer (final frame repeated). Encoder ladder (probed at start): hevc_videotoolbox>h264_videotoolbox>libx265>libx264 (+hvc1 tag, faststart, yuv420p, even dims). target: omit with one recording in flight, required with several (avoids guessing which to stop). Throws if nothing is recording in this process, or if 0 frames arrived (no silent empty video). On ffmpeg failure the spooled frames are KEPT — spool path + exact command are in the error.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Which recording to stop: 'active' (default, valid only when exactly one recording is in flight) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Which recording to stop — 'active' valid only when exactly one recording is in flight. Grammar: server instructions."
         },
         "savePath": {
           "type": "string",
-          "description": "Override the output file path. Default: /tmp/cdp-toolkit/screen-recording-<targetIdShort>-<stamp>.mp4."
+          "description": "Override the output path (default /tmp/cdp-toolkit/screen-recording-<targetIdShort>-<stamp>.mp4)."
         }
       },
       "required": [],
@@ -1448,21 +1458,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "take_heapsnapshot",
-    "description": "Capture a V8 heap snapshot of the selected page target over raw CDP (HeapProfiler.takeHeapSnapshot, accumulating addHeapSnapshotChunk events) and write it as a .heapsnapshot JSON file loadable by the DevTools Memory panel; returns {path,bytes,chunks,target} only and does not parse/summarize the snapshot. Writes under /tmp/cdp-toolkit (CDP_ARTIFACT_DIR) unless savePath is given.",
+    "description": "Captures a V8 heap snapshot of the target page over CDP and writes it as a .heapsnapshot JSON file (loadable in the DevTools Memory panel) under /tmp/cdp-toolkit unless savePath is given. Returns {path,bytes,chunks,target} only — does NOT parse or summarize the snapshot.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target page selector: 'active' (default) | 'index:N' | 'url:<substr>' | 'title:<substr>' | 'label:<name>' | '<targetId>'."
+          "description": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
         },
         "savePath": {
           "type": "string",
-          "description": "Override the output path. An absolute path (starting with /) is used as-is; a relative path is resolved under the artifact dir (/tmp/cdp-toolkit). Defaults to an auto-named take_heapsnapshot-<targetId>-<timestamp>.heapsnapshot file."
+          "description": "Override the output path. Absolute paths (starting with /) are used as-is; relative paths resolve under the artifact dir (/tmp/cdp-toolkit). Defaults to an auto-named take_heapsnapshot-<targetId>-<timestamp>.heapsnapshot file."
         }
       },
       "required": [],
@@ -1471,24 +1481,24 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "lighthouse_audit",
-    "description": "Run a Lighthouse audit against a URL by shelling out to `npx --yes lighthouse` (the toolkit's sole non-CDP tool); Lighthouse attaches to the already-running Chrome on the remote-debugging port and audits its own about:blank tab rather than any live user tab. Writes a JSON report under /tmp/cdp-toolkit and returns {path, bytes} plus per-category scores (0..1 or null).",
+    "description": "Runs a Lighthouse audit against a URL by shelling out to `npx --yes lighthouse` (the toolkit's only non-CDP tool) — it attaches to the already-running Chrome and audits its OWN about:blank tab, NOT any live user tab you've navigated. Writes a JSON report under /tmp/cdp-toolkit; returns {path,bytes} plus per-category scores (0..1 or null).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "url": {
           "type": "string",
-          "description": "The URL to audit. Required, and never points at a user tab implicitly."
+          "description": "The URL to audit. Required — never points at a user tab implicitly."
         },
         "categories": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Lighthouse categories to run (passed as --only-categories). Defaults to the full set, e.g. [\"performance\"] or [\"performance\",\"accessibility\",\"seo\"]."
+          "description": "Lighthouse categories to run (--only-categories). Defaults to the full set, e.g. [\"performance\"] or [\"performance\",\"accessibility\",\"seo\"]."
         },
         "savePath": {
           "type": "string",
@@ -1500,11 +1510,11 @@ export const MANIFEST: ToolSpec[] = [
             "desktop",
             "mobile"
           ],
-          "description": "Form factor: \"desktop\" (default, uses --preset=desktop to avoid heavy mobile throttling) or \"mobile\"."
+          "description": "\"desktop\" (default, uses --preset=desktop to avoid heavy mobile throttling) or \"mobile\"."
         },
         "timeoutMs": {
           "type": "number",
-          "description": "Overall budget for the lighthouse process in milliseconds. Default 120000."
+          "description": "Overall budget for the lighthouse process, in ms. Default 120000."
         }
       },
       "required": [
@@ -1515,21 +1525,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "mock_request",
-    "description": "Register a mock rule on a target's persistent fake-backend session (CDP Fetch domain): intercept requests whose URL matches urlPattern and fulfill them with a canned response, fail (abort) them, or continue them, optionally with fault injection (delayMs/failRate). The session survives reloads and navigations and lives until clear_mocks. Call repeatedly to mock several endpoints on the same target. Pass reload:true to apply immediately. Persistent across calls only via the MCP server (not the one-shot CLI).",
+    "description": "Register a mock rule on a target's persistent fake-backend session (CDP Fetch domain): match requests by urlPattern and fulfill with a canned response, fail (abort), or continue -- optionally with fault injection (delayMs/failRate). The session survives reloads/navigations and lives until clear_mocks; call repeatedly to mock several endpoints on one target. reload:true applies it immediately. Persistent across calls only via the MCP server, not the one-shot CLI.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target selector: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Defaults to the active page."
+          "description": "Which page's mock session. Defaults to the active page. Grammar: server instructions."
         },
         "urlPattern": {
           "type": "string",
-          "description": "CDP Fetch urlPattern glob: '*' matches any run of characters, '?' exactly one, '\\' escapes. Only matching request URLs are paused. e.g. \"*/api/users*\"."
+          "description": "CDP Fetch urlPattern glob: '*' any run of chars, '?' exactly one, '\\' escapes. Only matching URLs are paused. e.g. \"*/api/users*\"."
         },
         "action": {
           "type": "string",
@@ -1542,7 +1552,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "status": {
           "type": "number",
-          "description": "fulfill: HTTP status code for the canned response. Default 200."
+          "description": "fulfill: HTTP status for the canned response. Default 200."
         },
         "body": {
           "type": "string",
@@ -1562,7 +1572,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "method": {
           "type": "string",
-          "description": "Only mock requests with this HTTP method (e.g. \"POST\"); other methods pass through."
+          "description": "Only mock this HTTP method (e.g. \"POST\"); others pass through."
         },
         "delayMs": {
           "type": "number",
@@ -1570,11 +1580,11 @@ export const MANIFEST: ToolSpec[] = [
         },
         "failRate": {
           "type": "number",
-          "description": "Fault injection: probability 0..1 of failing a matched request regardless of action (resilience testing)."
+          "description": "Fault injection: probability 0..1 of failing a matched request regardless of action."
         },
         "reload": {
           "type": "boolean",
-          "description": "Reload the target after arming so the mock immediately catches traffic."
+          "description": "Reload the target after arming so the mock catches traffic immediately."
         }
       },
       "required": [
@@ -1585,17 +1595,17 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_mocks",
-    "description": "List active fake-backend sessions (one per target) with their rules and hit counts. Prunes sessions whose tab has closed. Use to see what is currently being mocked.",
+    "description": "List active fake-backend sessions (one per target) with their rules and hit counts. Prunes sessions whose tab has closed.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Unused filter placeholder; list_mocks returns all active sessions."
+          "description": "Unused filter placeholder; returns all active sessions."
         }
       },
       "required": [],
@@ -1610,11 +1620,11 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "lease": {
           "type": "string",
-          "description": "Opaque lease token from claim_page. Omit it for a tab this process already holds: under CDP_REQUIRE_LEASE the gate acquires a lease automatically and one acquired that way passes for any later call from the same process. Required when the tab is held by ANOTHER process, and required for a tab claimed explicitly via claim_page or new_page{claim:true}, which always demands its own token. Without CDP_REQUIRE_LEASE an unleased tab needs no token at all."
+          "description": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions."
         },
         "target": {
           "type": "string",
-          "description": "Target selector whose mock session to clear. Defaults to the active page. Ignored when all:true."
+          "description": "Which page's mock session to clear. Defaults to the active page; ignored when all:true. Grammar: server instructions."
         },
         "all": {
           "type": "boolean",
@@ -1627,29 +1637,29 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "claim_page",
-    "description": "Take exclusive ownership of a browser tab and return an opaque lease token. Two modes. FRESH TAB: with no target and no targetId, opens a new tab (optionally at url) and claims it, so 'give me my own tab' is one call. TAKEOVER: with target, claims a tab that is already open — this is how you work in a tab the human already has open when they ask you to, instead of opening your own — resolving any target selector against the live page list and never creating anything. The answer's 'opened' flag says which happened (true only when this call created the tab), and that same creation record is what release_page consults, so a tab you took over is left open when you release it. Any later tool call against a leased tab must carry the matching token in its 'lease' argument or it is refused, naming the holder. The lease is reclaimable once its owning process dies, its ttlMs elapses without use, or its tab is closed. Refused from the CLI: a CLI invocation is one process per call, so its lease would be reclaimable immediately. IS SOMEBODY ELSE IN THIS TAB: the answer also carries 'humanActiveMs', milliseconds since input that this server did not dispatch — i.e. since a person last clicked, typed, or scrolled here. null means NO DATA (the tab carries no activity beacon, which is normal the first time anyone claims a person's tab, or every input on it was this server's own); it never means 'no human'. The field is absent entirely on a backend that cannot answer. On a takeover of a tab a human used within the last 30 seconds the answer additionally carries 'contention', a warning string. THE CLAIM IS NEVER REFUSED FOR THIS: taking over a person's tab is what takeover mode is for, so by the time you read the warning you already hold the lease and the tab is yours to drive. It tells you that driving it now means fighting a live person for the keyboard and mouse, so you can open your own tab instead or ask first. Known limits: input inside a cross-origin iframe is invisible to it, and a second MCP server's clicks read as human to this one.",
+    "description": "Take exclusive ownership of a browser tab, returning an opaque lease token (needed once under CDP_REQUIRE_LEASE for any tab you drive). Two modes: FRESH TAB (no target - opens one, optionally at url, and claims it: 'give me my own tab' in one call) and TAKEOVER (target - claims an already-open tab, e.g. the human's, resolving the selector against the live page list, creating nothing). The opened flag is true only when this call created the tab, and release_page consults that record, so a taken-over tab is left open on release. Refused from the CLI (its per-call process would make the lease instantly reclaimable). The answer carries humanActiveMs, ms since input this server did not dispatch; null is NO DATA (no activity beacon, or every input was this server's own) and never means 'no human'; absent on a backend that cannot answer. On takeover of a tab a human used within 30s it adds contention, a warning - but THE CLAIM IS NEVER REFUSED FOR THIS: takeover is its purpose, you already hold the lease; it only warns you're fighting a live person, so open your own tab or ask first. Limits: input inside a cross-origin iframe is invisible, and a second MCP server's clicks read as human.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Take over an already-open tab, e.g. one the human has open, when asked to: pass any target selector — active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Resolved against the live page list only, so it NEVER opens a tab: a selector that matches nothing is an error, not a new blank tab. The tab is left open on release because the toolkit did not create it. Refused if another live process holds it, including a lease the gate acquired for that process automatically under CDP_REQUIRE_LEASE: this takes over unleased (human) tabs and never steals one from a live agent. Mutually exclusive with targetId."
+          "description": "Take over an already-open tab (e.g. one the human has open). Resolved against the LIVE page list only, so it never opens a tab — a selector matching nothing is an error. Left open on release. Refused if another live process holds it (including a lease auto-acquired under CDP_REQUIRE_LEASE): takes over unleased human tabs, never steals from a live agent. Mutually exclusive with targetId. Selector grammar: server instructions."
         },
         "targetId": {
           "type": "string",
-          "description": "Claim this already-open page target instead of opening a new tab. Must be an exact target id, not a selector. Kept for back-compat: prefer 'target', which accepts an exact id too plus every other selector form. Mutually exclusive with target."
+          "description": "Exact target id (not a selector) of an already-open page to claim instead of opening one. Back-compat only; prefer target, which also accepts an exact id. Mutually exclusive with target."
         },
         "url": {
           "type": "string",
-          "description": "When opening a fresh tab, navigate it here. Ignored when target or targetId is given, since both of those claim a tab that is already open."
+          "description": "When opening a fresh tab, navigate it here. Ignored when target or targetId is given."
         },
         "label": {
           "type": "string",
-          "description": "Agent label recorded on the lease and surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
+          "description": "Agent label recorded on the lease; surfaced in conflict errors and list_leases. Defaults to pid-<pid>."
         },
         "ttlMs": {
           "type": "number",
-          "description": "How long the lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15 minutes). Every checked call refreshes it, so an active agent never expires."
+          "description": "How long the lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it."
         }
       },
       "required": [],
@@ -1658,21 +1668,21 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "release_page",
-    "description": "Give a lease back, and close the tab if this toolkit opened it. Takes exactly one of 'lease' (the token claim_page returned) or 'target' (a selector for a tab this process holds, which is how you release a lease the gate acquired for you automatically, since that path never hands you a token). A tab with a creation record from this toolkit is closed; a tab that was already open and merely claimed is released and left alone. Override either way with 'close'. Idempotent: an already-released, reclaimed, or expired lease reports released:false, and a release that did not happen never closes anything, because by then the tab may belong to another agent. Answers {released, closed, targetId}.",
+    "description": "Give a lease back, closing the tab only if this toolkit opened it. Take exactly one of lease (the token) or target (a selector for a tab this process holds - use this to release a lease the gate acquired for you automatically, since that path never handed you a token). A tab with a creation record from this toolkit is closed; a tab that was already open and merely claimed is released and left alone - override either way with close. Idempotent: an already-released, reclaimed, or expired lease reports released:false and closes nothing (by then the tab may belong to another agent). Answers {released, closed, targetId}.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "lease": {
           "type": "string",
-          "description": "The opaque token claim_page (or new_page with claim:true) returned. Mutually exclusive with 'target'. Under CDP_REQUIRE_LEASE a lease the gate acquired for you automatically never produced a token in the first place, so give 'target' instead."
+          "description": "Token from claim_page / new_page{claim:true}. Mutually exclusive with 'target'. Under CDP_REQUIRE_LEASE an auto-acquired lease never produced a token — give 'target' instead."
         },
         "target": {
           "type": "string",
-          "description": "Target selector for a tab this process holds: active | index:N | url:<substr> | title:<substr> | label:<name> | <targetId>. Mutually exclusive with 'lease'. Refused if another process holds the tab."
+          "description": "A tab THIS process holds (grammar: server instructions). Mutually exclusive with 'lease'. Refused if another process holds the tab."
         },
         "close": {
           "type": "boolean",
-          "description": "Force the close decision instead of letting the creation ledger decide. true closes even a tab this toolkit did not open; false keeps an agent-created tab open. Omit for the default, which closes only tabs this toolkit created."
+          "description": "Force the close decision instead of letting the creation record decide: true closes even a tab this toolkit did not open; false keeps an agent-created tab open. Omit to close only tabs this toolkit created."
         }
       },
       "required": [],
@@ -1681,7 +1691,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "list_leases",
-    "description": "Enumerate every active lease for diagnosis: backend, target id, agent label, pid, createdAt, lastUsedAt, ttlMs, whether the owning process is still alive, and whether the lease is reclaimable and why. Requires no token. Never returns the lease nonce, so this cannot be used to forge a token. A row for a lease file that could not be read or parsed instead carries `unreadable` (the errno, or \"unparseable\"), with label, pid, and the timestamp fields as zero placeholders and stale always false, since stale is what marks a lease free to take and an unreadable one must never read that way. Under CDP_REQUIRE_LEASE this call reaps abandoned agent tabs exactly as list_pages does (see that tool's description for the grace period between a lease reading reclaimable and its tab actually being closed), reporting them in an additive 'reaped' array and omitting their rows from the listing. A row also carries 'humanActiveMs' — milliseconds since input this server did not dispatch, i.e. since a person last used that tab — WHERE THE TAB CAN ANSWER. The field is ABSENT rather than null when it cannot: no activity beacon on that tab, every input on it accounted for by this server, a row belonging to the other backend, a tab no longer open, or a page that would not evaluate. Absence therefore means 'no answer', never 'nobody is there'. Note that lastUsedAt measures TOOLKIT calls only, so a tab a person has been typing in for ten minutes looks perfectly idle by that field and is exactly the case humanActiveMs exists to expose. Two further fields are computed fresh on every call, never read off disk: 'idleMs' (now minus lastUsedAt) and 'expiresAt' (lastUsedAt plus ttlMs — the same value claim_page already returns under that name). Both are omitted on an 'unreadable' row, whose lastUsedAt and ttlMs are the zeroed placeholders described above.",
+    "description": "Enumerate every active lease for diagnosis - backend, target id, label, pid, createdAt, lastUsedAt, ttlMs, whether the owning process is alive, and whether the lease is reclaimable and why. No token required; it never returns the lease nonce, so it cannot be used to forge one. An unreadable or unparseable lease row instead carries unreadable, with label, pid and timestamps zeroed and stale forced false (an unreadable lease must never read as free to take). Under CDP_REQUIRE_LEASE it reaps abandoned agent tabs exactly as list_pages does, into an additive reaped array, omitting their rows. Where the tab can answer, a row also carries humanActiveMs, ms since input this server did not dispatch - note lastUsedAt tracks TOOLKIT calls only, so a tab a person has typed in for ten minutes looks idle, which is what this exposes; the field is absent, never null, when the tab cannot answer, and that absence means 'no answer', never 'nobody is there'. idleMs (now - lastUsedAt) and expiresAt (lastUsedAt + ttlMs) are computed fresh each call and omitted on an unreadable row.",
     "inputSchema": {
       "type": "object",
       "properties": {},

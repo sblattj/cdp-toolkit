@@ -5,6 +5,22 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-08-18
+
+**MCP context-rot reduction: the `tools/list` payload every consuming agent loads is cut ~24% (≈26,600 → ≈20,150 tokens), with NO change to tool behavior, names, parameters, or schema shapes** — the trim touched `description` strings only and was proven shape-identical to the prior manifest (a strip-descriptions deep-equal check gates the regeneration).
+
+### Added
+
+- **Server `instructions` block** (MCP `initialize` result). The conventions previously re-stated inside every tool schema — the target-selector grammar, the lease-token model, the Chrome-only MV3 `worker:`/`wake` arm, and the `origin` vocabulary — are now stated once here, loaded a single time at session start. Front-loaded and kept under Claude Code's 2 KB instructions cap so nothing critical is clipped.
+
+### Changed
+
+- **Deduplicated the shared parameter blurbs.** The 453-character `lease` description was copy-pasted onto 42 tools (~5,900 tokens of pure duplication) and the `target` selector was written 17 different ways; both now collapse to short, consistent pointers at the server `instructions`. Every per-tool description was tightened for signal density with each tool's load-bearing footgun front-loaded — the "declared-not-discovered" warnings are all preserved, just terser (e.g. `list_pages` 2,702 → 1,188 chars, `claim_page` 2,058 → 1,198).
+
+### Fixed
+
+- **`list_pages`'s description exceeded Claude Code's 2 KB per-description cap and was being silently truncated from the end** (dropping its `responsive`/`humanActiveMs` tail). Every tool description is now ≤ 2 KB.
+
 ## [1.9.7] - 2026-08-14
 
 ### Fixed
