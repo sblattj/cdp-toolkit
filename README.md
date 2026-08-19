@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser (and know when a human is using it too), plus a built-in network-mocking fake backend. **45 tools.**
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser (and know when a human is using it too), plus a built-in network-mocking fake backend. **45 tools.** Chrome is the flagship default; a second backend drives Firefox over WebDriver BiDi behind the same tool surface (see below).
 
 > For AI-agent developers and Claude Code / Cursor users who need **the tabs they name driven reliably**, not a Puppeteer-managed browser.
 
@@ -49,11 +49,21 @@ If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp
 - run **multiple agents against one Chrome** and need them to stop stealing each other's tabs.
 
 **Probably not, if you:**
-- need cross-browser (Firefox / WebKit), use [`playwright-mcp`](https://github.com/microsoft/playwright-mcp);
+- need **WebKit / Safari**, or a browser that is neither Chromium nor Firefox — use [`playwright-mcp`](https://github.com/microsoft/playwright-mcp). Firefox *is* supported here, as a first-class backend (see [Firefox (WebDriver BiDi)](#firefox-webdriver-bidi));
 - need Puppeteer's auto-wait/retry envelope for an unknown, changing page;
 - want one server to fan out across *all* your open tabs at once.
 
 ## Quickstart (about 30 seconds)
+
+**Fastest path — the interactive installer.** `cdp install` registers the MCP server into a harness you pick and appends a shell alias that launches your browser with its debug port open:
+
+```bash
+npx -y --package cdp-toolkit cdp install     # or `cdp install` from a clone / after a global install
+```
+
+It asks for a harness (`claude` | `codex` | `opencode`), a debug port, and a browser (`arc` | `chrome` | `firefox`), then writes an idempotent marker block into your `~/.zshrc`/`~/.bashrc`. The same flags drive it non-interactively: `--harness --browser --port --name --no-alias --yes`. The Firefox alias it writes includes `--marionette` (required for cdp-toolkit's orphaned-session auto-recovery — see [Firefox](#firefox-webdriver-bidi)). It is a CLI subcommand, **not** a 46th tool: `cdp --list` still shows 45.
+
+Prefer to wire it by hand? The manual path is three steps:
 
 ```bash
 # 1. Start Chrome/Chromium with the DevTools port open
@@ -84,6 +94,7 @@ npx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://ex
 <details>
 <summary><b>Claude Code</b></summary>
 
+Either let `cdp install` register it for you (pick `claude` at the harness prompt), or wire it by hand:
 ```bash
 claude mcp add cdp-toolkit --scope user -- npx -y cdp-toolkit   # or: bunx -y cdp-toolkit
 claude mcp get cdp-toolkit   # status (should show ✓ Connected)
@@ -214,6 +225,8 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_LEASE_TTL_MS` | `900000` | How long a tab lease survives without use before another agent can reclaim it. Refreshed on every checked call. |
 | `CDP_REQUIRE_LEASE` | off | Strict mode, MCP server only (inert under the CLI regardless of value). Turns leasing from optional into mandatory: a call against an unheld tab acquires a lease instead of driving it lease-free, and `list_pages`/`list_leases` close tabs an abandoned agent left behind. See "Parallel tabs" below. |
 | `CDP_REAP_GRACE_MS` | `2700000` | Extra grace (on top of `CDP_LEASE_TTL_MS`) before an `expired` lease's tab is actually destroyed by reap; `dead-pid` tabs are reaped immediately regardless. See "Reap" below. |
+| `CDP_FIREFOX_MARIONETTE_PORT` | `2828` | Firefox backend only. The Marionette side-channel port used to force-clear Firefox's orphaned BiDi session during orphan-session recovery (a blind `WebDriver:DeleteSession`). Only effective when that Firefox was launched with `--marionette`. See "Firefox" below. |
+| `CDP_FIREFOX_SESSION_WAIT_MS` | `10000` | Firefox backend only. How long a second process waits for a live holder to release Firefox's one BiDi session before returning the distinguishable "held by a live process" error. See "Firefox" below. |
 
 ## Firefox (WebDriver BiDi)
 
@@ -240,8 +253,10 @@ Firefox runs in one of **two modes**, and the difference between them is process
 # 1. Start YOUR Firefox with the debug port open (a separate, empty --no-remote profile
 #    is recommended so it doesn't collide with a Firefox you already have open; drop
 #    -profile/-no-remote to attach to your everyday profile instead, once nothing else
-#    is holding its BiDi session):
-firefox --remote-debugging-port 9223 --no-remote -profile /tmp/ff-attach-profile &
+#    is holding its BiDi session). --marionette enables cdp-toolkit's orphaned-session
+#    auto-recovery over the Marionette side channel; without it, a killed client's
+#    wedged session can only be cleared by restarting Firefox (see "one session" below):
+firefox --remote-debugging-port 9223 --marionette --no-remote -profile /tmp/ff-attach-profile &
 
 # 2. CLI: --connect implies --browser firefox, so it doesn't need to be passed too
 bun run src/cli.ts --connect 9223 take_snapshot
@@ -265,7 +280,7 @@ cdp --connect ws://127.0.0.1:9223/session take_snapshot   # or the full ws:// UR
 
 `<endpoint>` accepts three spellings, all normalized to a ws URL: a bare port (`9223`), `host:port` (`127.0.0.1:9223`), or a full `ws://`/`wss://` URL. `--connect`/`CDP_FIREFOX_ENDPOINT` implies the Firefox backend on its own and errors against an explicit `--browser chrome`.
 
-**On Linux, and over SSH to a remote host.** Attach is a plain loopback WebSocket, so it is byte-identical on every OS; only the *launch* half is platform-specific. On Linux the binary is `firefox` on `PATH` (or `/usr/bin/firefox`), and the same `--remote-debugging-port 9223` opens the endpoint. One catch worth stating plainly: if your everyday Firefox is already running, relaunching it with the flag just focuses the open window and opens no port (see "Attaching is not relaunching" below). To attach to your real logged-in profile, quit Firefox first and reopen it with the flag; to run beside your daily browser instead, use the separate `--no-remote -profile` instance shown above.
+**On Linux, and over SSH to a remote host.** Attach is a plain loopback WebSocket, so it is byte-identical on every OS; only the *launch* half is platform-specific. On Linux the binary is `firefox` on `PATH` (or `/usr/bin/firefox`), and the same `--remote-debugging-port 9223 --marionette` opens the endpoint (keep `--marionette` for the orphan-recovery reason above). One catch worth stating plainly: if your everyday Firefox is already running, relaunching it with the flag just focuses the open window and opens no port (see "Attaching is not relaunching" below). To attach to your real logged-in profile, quit Firefox first and reopen it with the flag; to run beside your daily browser instead, use the separate `--no-remote -profile` instance shown above.
 
 When Firefox runs on a different host than cdp-toolkit (a remote box, a container), its debug port binds to loopback *there*, so forward the port and attach to localhost:
 
@@ -280,7 +295,12 @@ For Claude Code, register the MCP server with the endpoint in one line (the env 
 claude mcp add cdp-toolkit -e CDP_FIREFOX_ENDPOINT=9223 -- npx -y cdp-toolkit
 ```
 
-**Firefox allows only one active WebDriver BiDi session at a time.** A second `session.new` against the same endpoint fails outright while a first session is open. Disposing cleanly (the normal exit path, both CLI and MCP shutdown) sends `session.end` first, which frees the slot for the next attach. A client that dies **without** disposing — a `SIGKILL`, a crash — leaves the slot occupied: Firefox does not reap an abandoned session on its own. A colliding attach against an occupied slot now fails fast with an actionable error naming the endpoint, rather than hanging forever (fixed in 1.9.4); recover by closing the other client or restarting Firefox.
+**Firefox allows only one active WebDriver BiDi session at a time.** A second `session.new` against the same endpoint fails outright while a first session is open. Disposing cleanly (the normal exit path — normal exit, `SIGINT`/`SIGTERM`, stdin close) sends `session.end` first, which frees the slot for the next process cross-process. When several cdp-toolkit processes attach to the **same** user Firefox endpoint, they now coordinate that single session slot through a file-based lease (a sibling of the tab-lease mechanism), so a collision no longer hard-wedges both sides:
+
+- **Two genuinely live processes** are serialized rather than both wedging: the second waits up to `CDP_FIREFOX_SESSION_WAIT_MS` (default `10000`ms) for the slot to free, then returns a distinguishable, fast error naming the live holder — "Firefox's single WebDriver BiDi session on `<endpoint>` is held by a LIVE process `<label>` (pid N) … wait & retry, or point this server at a different endpoint/browser" — instead of hanging.
+- **An orphaned session from a dead holder** — the classic wedge, a client `SIGKILL`ed or crashed without `session.end`, which Firefox does not reap on its own — is now **auto-recovered**: cdp-toolkit force-clears the orphaned session over the **Marionette side channel** (a blind `WebDriver:DeleteSession` on port `2828`, `CDP_FIREFOX_MARIONETTE_PORT`) **without** killing or restarting Firefox, then retries. This works **only** if that Firefox was launched with `--marionette` (verified against FF153: `--remote-debugging-port` alone does **not** start Marionette). When Marionette is absent it degrades to a clear, actionable error ("orphaned … could not be auto-cleared. Marionette recovery needs Firefox launched with `--marionette` …; otherwise restart Firefox") rather than the old dead-end.
+
+This coordinates and recovers **around** Firefox's one-session limit; it does not remove it. Two live holders still cannot share the slot at once — one is served, the other waits or is told, by name, who holds it.
 
 **Attaching is not relaunching.** The one thing that is genuinely impossible is handing a debug port to an *already-running* Firefox process after the fact: the `--remote-debugging-port` flag only takes effect on a process's original launch, so relaunching the `firefox` binary against a running instance hands off to it and exits silently, opening no port (verified against Firefox 153.0.3). That is a real, narrow limitation of the Firefox binary itself. It is not the same claim as "Firefox cannot be attached to" — a Firefox that was launched *with* the debug port open, whether by this toolkit or by your own hand, exposes a plain BiDi endpoint that any number of fresh clients can connect to later, which is exactly what `--connect`/`CDP_FIREFOX_ENDPOINT` does.
 
@@ -293,7 +313,7 @@ claude mcp add cdp-toolkit -e CDP_FIREFOX_ENDPOINT=9223 -- npx -y cdp-toolkit
 - `dispatch_mouse` (needs `input.raw`): the raw move/down/up primitive is a direct `Input.dispatchMouseEvent` wrapper with no BiDi analogue.
 - `wait_for_download`, `grant_permissions` (need `browser.downloads` / `browser.permissions`): both drive Chrome's `Browser.*` domain; WebDriver BiDi has no command to redirect a download or pre-grant a permission.
 
-Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), the `claim_page`/`release_page`/`list_leases` lease group, and the new `scroll` tool (Chrome dispatches `Input.dispatchMouseEvent{type:'mouseWheel'}`, Firefox uses BiDi's `wheel` input source — both live-verified), is available under both backends: 34 of the 45 tools.
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), the `claim_page`/`release_page`/`list_leases` lease group, and the new `scroll` tool (Chrome dispatches `Input.dispatchMouseEvent{type:'mouseWheel'}`, Firefox uses BiDi's `wheel` input source — both live-verified), is available under both backends: 34 of the 45 tools. One asymmetry to know before expecting Chrome-style concurrency: the lease group fences *tabs* on both backends, but Firefox permits only **one BiDi session per browser instance**, so multiple agents under Firefox share and serialize on that single session (coordinated by the cross-process session lease above), not the independent concurrent sessions Chrome's unlimited CDP connections allow — see "Parallel tabs" below.
 
 **Honest capability gaps, not oversold parity:**
 
@@ -406,6 +426,8 @@ Two agents pointed at the same Chrome both resolve `target: active` to whatever 
 ```
 
 Pass that token as `lease` on every later call against the tab. `new_page` with `claim: true` does the open-and-claim in one call. `release_page` gives it back and, by default, closes the tab if this toolkit opened it (see "Close on release" below). `list_leases` shows who holds what.
+
+**Firefox: the ceiling is one BiDi session per browser instance.** The `claim_page`/`release_page`/`list_leases` tab-lease group works under both backends, but a real asymmetry sits underneath it. Chrome accepts unlimited concurrent CDP connections, so "many agents, one browser" there means many genuinely independent sessions. Firefox permits only **one** WebDriver BiDi session per browser instance (see [Firefox](#firefox-webdriver-bidi)), so under Firefox "many agents, one browser" means many agents *sharing and serialized on that single session* — coordinated by the cross-process session lease, not running as independent sessions. Expect Chrome-style multi-session concurrency on Chrome only; on Firefox the tabs are still leasable, but the session beneath them is a single shared slot.
 
 **Opt in, and only ever a refusal — this is the default, with `CDP_REQUIRE_LEASE` unset.** A tab nobody claimed behaves exactly as it did before. Omitting `lease` is identical to pre-1.2 behavior in every respect: no default changed, no return shape changed, no previously legal call now needs a new argument. This is why it was 1.2 and not 2.0.
 

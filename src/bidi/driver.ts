@@ -40,11 +40,16 @@ import {
   type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
   type BandConsumer, type CaptureDelivery,
 } from "../driver.ts";
-import { assertLeaseOk } from "../leases.ts";
+import { assertLeaseOk, defaultLabel } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "../workers.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSessionUrl } from "./client.ts";
+import {
+  acquireSessionSlot, releaseSessionSlot, SessionSlotBusyError,
+  type AcquireResult, type SessionSlotHandle,
+} from "./session-lease.ts";
+import { defaultMarionettePort, forceClearOrphanSession } from "./marionette.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
 import type {
@@ -320,39 +325,174 @@ const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 // the only identity both modes share. getConnection retains a holder on every call (fresh or
 // reused); callers release() it.
 const connections = new Map<string, BidiConnection>();
+// This process's OWN Firefox BiDi session-slot ownership, keyed by endpoint (see session-lease.ts).
+// The slot LOCK is a file on disk — that is the cross-process source of truth — and this map is our
+// in-process record of which endpoints WE currently hold a live claim on, so dispose() releases
+// exactly the slots we took, and a re-dial after a dead socket reuses our own claim instead of
+// contending with our own pid. Populated in getConnection's create body; cleared on dispose() and
+// on a terminal dial failure that never established a session.
+const slotHandles = new Map<string, SessionSlotHandle>();
+// In-flight create dedup, keyed by endpoint. Two page() acquisitions can both cache-miss and call
+// getConnection concurrently; without this both would run the acquire+dial body, and the second
+// would either contend for the slot we just took (same pid → wait then SessionSlotBusyError against
+// ourselves) or open a second BiDi session. The first caller stores its create-promise here and
+// every other awaits it; cleared in a finally once the create settles.
+const connecting = new Map<string, Promise<BidiConnection>>();
+
+/**
+ * Release a slot claim we took in THIS getConnection call after a dial that never established a
+ * live session, so a later attempt re-acquires cleanly. When `owned` is true we did NOT acquire in
+ * this call (we reused a pre-existing claim — our previous socket died without dispose), so the
+ * handle predates this call and must be left intact: we still own Firefox's slot, only the socket
+ * failed to re-establish.
+ */
+async function releaseSlotOnDialFailure(endpoint: string, owned: boolean): Promise<void> {
+  if (owned) return;
+  const h = slotHandles.get(endpoint);
+  if (h) {
+    await releaseSessionSlot(h).catch(() => undefined);
+    slotHandles.delete(endpoint);
+  }
+}
+
+/**
+ * The actionable error for issue #4: Firefox is holding an orphaned BiDi session on this endpoint
+ * that Marionette recovery could NOT auto-clear (Firefox launched without --marionette, or the
+ * Marionette channel timed out / could not confirm). Distinguished from the live-busy case (issue
+ * #5, a LIVE lease holder) because here NO live process holds our lease — a session Firefox itself
+ * stranded is wedging the slot, and the fix is to enable Marionette or restart Firefox.
+ */
+function orphanNotClearedError(endpoint: string): DriverError {
+  return driverError("disconnected",
+    `Firefox holds an orphaned WebDriver BiDi session on ${endpoint} that could not be auto-cleared. ` +
+    `Marionette recovery needs Firefox launched with --marionette (default port 2828, or set ` +
+    `CDP_FIREFOX_MARIONETTE_PORT); otherwise restart Firefox to free the slot. (A client killed without ` +
+    `session.end can leave a session Firefox does not reap.)`);
+}
+
+// getConnection: the ONE Firefox-session choke point. Beyond memoizing a BidiConnection per endpoint
+// it now runs the cross-process SESSION-slot coordination (session-lease.ts) plus Marionette orphan
+// recovery (marionette.ts). Firefox serves exactly ONE WebDriver-BiDi session per browser, and it
+// never reaps an abandoned one (verified: still held 10s after an abrupt socket death). Two ills
+// follow that this closes: (#5) two LIVE processes attaching to one user-launched Firefox used to
+// hard-wedge on the raw "Maximum number of active sessions" with no way to tell a live holder from a
+// crash; the lease now names the LIVE holder and says wait-and-retry. (#4) a process killed without
+// session.end used to leave the slot occupied until Firefox restarted; when the lease shows the
+// prior holder's PID is DEAD, or Firefox itself still refuses on a re-dial, a blind Marionette
+// WebDriver:DeleteSession (which shares Firefox's one session slot) force-clears the orphan WITHOUT
+// killing the user's browser, and we retry. Marionette recovery is best-effort and degrades to a
+// clear, actionable error when Firefox has no --marionette port (the launch-mode norm).
 async function getConnection(endpoint: string, timeoutMs?: number): Promise<BidiConnection> {
   const existing = connections.get(endpoint);
   if (existing && existing.isOpen) { existing.retain(); return existing; }
   // A cached connection whose socket has died (ws.onclose fired) can only reject every
   // send() with "connection not open" — reusing it would strand the endpoint permanently.
-  // Evict it so the code below re-dials and creates a fresh BiDi session. No cleanup is
-  // needed: a dead connection already had `closed` set and rejectAll() cleared its per-call
-  // timers, and BidiConnection holds no heartbeat/keepalive resource to leak (see client.ts).
+  // Evict it so the code below re-dials and creates a fresh BiDi session. We deliberately do NOT
+  // release the session slot here: a dead socket is transient and WE still own Firefox's slot, so
+  // the create body below re-dials WITHOUT re-acquiring (its `owned` branch), avoiding a needless
+  // contention against our own pid. No other cleanup is needed: a dead connection already had
+  // `closed` set and rejectAll() cleared its per-call timers, and BidiConnection holds no
+  // heartbeat/keepalive resource to leak (see client.ts).
   if (existing) connections.delete(endpoint);
-  // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
-  // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
-  // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
-  // next handleUserPrompt call). Setting "ignore" here is what makes handleDialog() able to see
-  // and answer a live prompt at all.
-  const conn = await connectBidiSessionUrl(endpoint, {
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" } } },
-  }).catch((e: unknown) => {
-    // Firefox allows exactly ONE active BiDi session and never reaps an abandoned one (verified:
-    // still held 10s after an abrupt socket death). A client killed without session.end therefore
-    // leaves the slot occupied until Firefox restarts, and the raw wire message ("Maximum number of
-    // active sessions") tells the user nothing about how to get unstuck. Force-ending a session we
-    // do not own is not an option (there is no id to end), so this maps the error to instructions.
-    if (e instanceof BidiError && /maximum number of active sessions/i.test(e.message)) {
-      throw driverError("disconnected",
-        `Firefox already has an active WebDriver BiDi session on ${endpoint}; it allows only one. ` +
-        `Close the other client, or restart Firefox, then retry. (A previously killed client can leave a ` +
-        `session that Firefox does not reap.)`);
+
+  // Concurrency: dedup in-flight creates on this endpoint. An awaiter shares the create's outcome
+  // but needs its OWN holder — the create's connectBidiSessionUrl retains exactly once, for the
+  // caller that started it, so every other caller retains again for itself (callers all release()).
+  const inflight = connecting.get(endpoint);
+  if (inflight) {
+    const conn = await inflight;
+    conn.retain();
+    return conn;
+  }
+
+  const create = (async (): Promise<BidiConnection> => {
+    const mport = defaultMarionettePort();
+    // Do we ALREADY hold this endpoint's slot? (e.g. our previous socket died without dispose, so
+    // the eviction above kept the claim.) If so, re-dial WITHOUT re-acquiring: acquireSessionSlot
+    // against our own live pid would just poll to its wait ceiling and then throw
+    // SessionSlotBusyError against ourselves. We already own Firefox's slot; only the socket needs
+    // re-establishing (and if Firefox stranded our old session, the re-dial's retry path clears it).
+    const owned = slotHandles.has(endpoint);
+    if (!owned) {
+      // Cross-process coordination (session-lease.ts): take the endpoint's single BiDi session slot,
+      // classifying any current holder. A LIVE holder (another agent legitimately driving this
+      // Firefox) throws SessionSlotBusyError; a DEAD holder's orphan is stolen and surfaced as
+      // staleHolder so we can force-clear Firefox's stranded session before we call session.new.
+      let acq: AcquireResult;
+      try {
+        acq = await acquireSessionSlot(endpoint, { label: defaultLabel(), marionettePort: mport });
+      } catch (e) {
+        if (e instanceof SessionSlotBusyError) {
+          // Issue #5: a distinguishable LIVE holder, NOT a wedge. Map to an actionable disconnected
+          // error that names who holds the one session and why Firefox can serve only one per browser.
+          const who = e.holderLabel ? `'${e.holderLabel}' (pid ${e.holderPid})` : "another live process";
+          throw driverError("disconnected",
+            `Firefox's single WebDriver BiDi session on ${endpoint} is held by a LIVE process ${who}. ` +
+            `Firefox serves exactly ONE BiDi session per browser instance, so this server cannot take it ` +
+            `while that process is running. Wait for it to release the session and retry, or point this ` +
+            `server at a different endpoint/browser.`);
+        }
+        throw e;
+      }
+      slotHandles.set(endpoint, acq.handle);
+      if (acq.staleHolder) {
+        // Issue #4 auto-recovery: we stole a DEAD holder's lease, but Firefox itself may still hold
+        // that holder's orphaned BiDi session. Force-clear it over Marionette BEFORE dialing, or
+        // session.new below will still hit "Maximum number of active sessions". Best-effort: a false
+        // result means Firefox has no --marionette (launch mode, or the user never enabled it); we
+        // still dial, and the re-dial retry path below surfaces a clear error if the orphan persists.
+        await forceClearOrphanSession(acq.staleHolder.marionettePort ?? mport);
+      }
     }
-    throw e;
-  }); // already retained once
-  connections.set(endpoint, conn);
-  return conn;
+
+    // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
+    // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
+    // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
+    // next handleUserPrompt call). Setting "ignore" here is what makes handleDialog() able to see
+    // and answer a live prompt at all.
+    const dialOpts = {
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" as const } } },
+    };
+    let conn: BidiConnection;
+    try {
+      conn = await connectBidiSessionUrl(endpoint, dialOpts); // already retained once
+    } catch (e) {
+      if (e instanceof BidiError && /maximum number of active sessions/i.test(e.message)) {
+        // Firefox still holds a BiDi session our lease didn't account for: a FOREIGN client we don't
+        // coordinate with, OUR OWN orphan from a dead socket (the `owned` re-dial), or a pre-lease
+        // orphan. Recovery: blind Marionette force-clear, then retry the dial EXACTLY once.
+        const cleared = await forceClearOrphanSession(mport);
+        if (!cleared) {
+          await releaseSlotOnDialFailure(endpoint, owned);
+          throw orphanNotClearedError(endpoint);
+        }
+        try {
+          conn = await connectBidiSessionUrl(endpoint, dialOpts); // already retained once
+        } catch (e2) {
+          await releaseSlotOnDialFailure(endpoint, owned);
+          if (e2 instanceof BidiError && /maximum number of active sessions/i.test(e2.message)) {
+            throw orphanNotClearedError(endpoint); // cleared, yet still refused: treat as unrecoverable
+          }
+          throw e2;
+        }
+      } else {
+        // Any other dial failure never established a session: release a slot we took THIS call and
+        // rethrow unchanged (the `owned` re-dial never acquired, so its claim is left intact).
+        await releaseSlotOnDialFailure(endpoint, owned);
+        throw e;
+      }
+    }
+    connections.set(endpoint, conn);
+    return conn;
+  })();
+
+  connecting.set(endpoint, create);
+  try {
+    return await create;
+  } finally {
+    connecting.delete(endpoint);
+  }
 }
 
 /**
@@ -1333,8 +1473,17 @@ class BidiBrowserDriver implements BrowserDriver {
     for (const key of [...bidiBeaconScripts.keys()]) {
       if (key.startsWith(`${this.endpoint}:`)) bidiBeaconScripts.delete(key);
     }
+    // Drop any in-flight create record defensively: dispose() ends this endpoint's life, so a
+    // pending create must not leave a stale promise that a later getConnection would await.
+    connecting.delete(this.endpoint);
     const conn = connections.get(this.endpoint);
-    if (!conn) return;
+    if (!conn) {
+      // No live connection, but we may still hold the session slot lock (e.g. a create acquired the
+      // slot then failed to establish a session on an `owned` re-dial, which leaves the claim). A
+      // clean dispose must free it cross-process so the next process is not falsely told we're LIVE.
+      await this.releaseSessionSlotIfHeld();
+      return;
+    }
     connections.delete(this.endpoint);
     // Cleanly END the BiDi session so Firefox frees its single session slot for the next
     // attach (a launch-mode Firefox is killed anyway; this matters for attach mode where the
@@ -1343,6 +1492,19 @@ class BidiBrowserDriver implements BrowserDriver {
     // Best-effort: harmless if the socket is already gone.
     await conn.send("session.end", {}).catch(() => undefined);
     conn.dispose();
+    // Release OUR cross-process session-slot lock so the next process (this or another) can take the
+    // slot cleanly. releaseSessionSlot only unlinks a record still stamped with our (pid, createdAt),
+    // so it never clobbers a claim a later process made after stealing ours. (session-lease.ts)
+    await this.releaseSessionSlotIfHeld();
+  }
+
+  /** Free this endpoint's session-slot lock if this process holds it, and forget the handle.
+   *  Best-effort and idempotent — safe to call whether or not a live connection existed. */
+  private async releaseSessionSlotIfHeld(): Promise<void> {
+    const h = slotHandles.get(this.endpoint);
+    if (!h) return;
+    await releaseSessionSlot(h).catch(() => undefined);
+    slotHandles.delete(this.endpoint);
   }
 }
 

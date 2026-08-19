@@ -5,6 +5,26 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-18
+
+**Firefox multi-process session coordination + orphan auto-recovery, and a new `cdp install` one-command setup.** Attaching several cdp-toolkit processes to one user Firefox no longer hard-wedges on Firefox's single-BiDi-session limit, and a session orphaned by a killed client is now auto-cleared over the Marionette side channel instead of requiring a Firefox restart. Chrome behavior is unchanged. The tool surface is still 45 tools — the installer is a CLI subcommand, not a new tool.
+
+### Added
+
+- **`cdp install`** — an interactive installer that registers the MCP server into a harness you pick (Claude Code, Codex, or opencode), asks for a debug port and a browser (Arc, Chrome, or Firefox), and appends an idempotent shell alias that launches that browser with its remote-debugging port open. The Firefox alias includes `--marionette` (required for orphan auto-recovery, below). Runs non-interactively too: `--harness`/`--browser`/`--port`/`--name`/`--no-alias`/`--yes`. It is a CLI-only subcommand; `cdp --list` / `tools/list` still advertise exactly 45 tools.
+- **Cross-process Firefox session coordination** (`src/bidi/session-lease.ts`). A file-based lease — a sibling of the existing tab-lease group — serializes Firefox's single WebDriver BiDi session slot across processes attaching to the same endpoint. When the slot is held by a genuinely live process, a second process now waits up to `CDP_FIREFOX_SESSION_WAIT_MS` (default `10000`) and then returns a fast, distinguishable error naming the live holder, instead of hanging or emitting the raw "Maximum number of active sessions" wedge. (#5)
+- **Firefox orphan-session auto-recovery** (`src/bidi/marionette.ts`). A session stranded by a client that died without `session.end` — the classic wedge Firefox never reaps — is force-cleared over the Marionette side channel (a blind `WebDriver:DeleteSession` on `CDP_FIREFOX_MARIONETTE_PORT`, default `2828`) without killing or restarting Firefox, then the connection is retried. Requires the attached Firefox to have been launched with `--marionette`; when it wasn't, the toolkit degrades to a clear, actionable error rather than a permanent dead-end. (#4)
+- Environment knobs: `CDP_FIREFOX_MARIONETTE_PORT` (default `2828`) and `CDP_FIREFOX_SESSION_WAIT_MS` (default `10000`).
+
+### Fixed
+
+- **#4 — an orphaned Firefox BiDi session no longer permanently wedges the next server process.** A client killed without `session.end` left Firefox's single session slot occupied (Firefox does not reap it), so every subsequent process's first `session.new` failed with no recovery short of restarting Firefox. cdp-toolkit now detects the dead holder, force-clears the orphan over Marionette, and retries — verified end-to-end against Firefox 153 (the browser stays the same pid, never restarted).
+- **#5 — two concurrent live processes contending for Firefox's one BiDi session no longer both hard-wedge identically.** The loser now gets a fast, distinguishable, retryable signal naming the live holder, instead of an ambiguous, unrecoverable error indistinguishable from the orphan case.
+
+### Changed
+
+- **README:** Firefox is documented as a supported backend (only WebKit/Safari now routes to `playwright-mcp`); the attach examples add `--marionette`; the "many agents, one browser" section states Firefox's one-session-per-browser ceiling explicitly; the `cdp install` on-ramp and the two new env knobs are documented; the stale "restart Firefox to recover" guidance is replaced by the new coordinate-and-recover behavior.
+
 ## [1.10.0] - 2026-08-18
 
 **MCP context-rot reduction: the `tools/list` payload every consuming agent loads is cut ~24% (≈26,600 → ≈20,150 tokens), with NO change to tool behavior, names, parameters, or schema shapes** — the trim touched `description` strings only and was proven shape-identical to the prior manifest (a strip-descriptions deep-equal check gates the regeneration).
