@@ -655,7 +655,21 @@ class BidiPageDriver implements PageDriver {
     const sendOpts = opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {};
     try {
       if (reload) {
-        const r = await this.conn.send("browsingContext.reload", { context: this.contextId, ignoreCache: opts.ignoreCache === true, wait }, sendOpts);
+        // Firefox rejects ANY `ignoreCache` argument to browsingContext.reload — even an
+        // explicit `false` — with `Argument "ignoreCache" is not supported yet` (observed on
+        // Firefox 153.0.3): the server-side validator refuses the key unconditionally, it does
+        // not read its value. So the key is OMITTED from the params unless a hard reload was
+        // actually requested, and a requested hard reload fails fast HERE with a
+        // backend-capability error instead of an opaque mid-flight protocol rejection — the
+        // same doctrine as click()'s modifiers on this backend. If a future Firefox starts
+        // honoring the argument, re-verify and lift the guard.
+        if (opts.ignoreCache === true) {
+          throw driverError(
+            "unsupported",
+            "navigate: ignoreCache:true (hard reload) is not supported on the Firefox WebDriver-BiDi backend — Firefox rejects the ignoreCache argument outright. A plain reload (reload:true, no ignoreCache) works.",
+          );
+        }
+        const r = await this.conn.send("browsingContext.reload", { context: this.contextId, wait }, sendOpts);
         return { url: r.url, contextId: this.contextId, reloaded: true, waitedFor: waitUntil };
       }
       if (history) {
