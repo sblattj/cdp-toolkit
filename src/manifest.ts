@@ -151,7 +151,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "ignoreCache": {
           "type": "boolean",
-          "description": "On reload, bypass the HTTP cache (hard reload) so subresources are refetched. Ignored unless reload:true. Default false."
+          "description": "On reload, bypass the HTTP cache (hard reload) so subresources are refetched. Ignored unless reload:true. Chrome only: Firefox's WebDriver-BiDi rejects the ignoreCache argument outright, so reload+ignoreCache on Firefox throws a clear unsupported error instead (a plain reload works). Default false."
         },
         "waitUntil": {
           "type": "string",

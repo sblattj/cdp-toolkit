@@ -25,7 +25,9 @@ export interface NavigatePageArgs {
   /**
    * When reloading, bypass the HTTP cache (hard reload) so freshly-deployed,
    * non-content-hashed bundles are refetched instead of served stale. Ignored
-   * unless `reload` is true.
+   * unless `reload` is true. Chrome only: Firefox's BiDi server rejects the
+   * ignoreCache argument outright (even `false`), so the Firefox driver omits
+   * the key on plain reloads and throws a clear unsupported error when true.
    */
   ignoreCache?: boolean;
   /** Which load milestone to wait for. Defaults to 'load'. */
@@ -197,6 +199,6 @@ function delay(ms: number): Promise<void> {
  *   - Runtime.evaluate (poll document.body.innerText)
  *
  * Parity gaps vs chrome-devtools-mcp:
- *   - navigate_page: no automatic "snapshot of the new page" return; we return {url,frameId,waitedFor}. waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'). reload:true (+ignoreCache for a hard reload) covers the MCP's reload navigation type.
+ *   - navigate_page: no automatic "snapshot of the new page" return; we return {url,frameId,waitedFor}. waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'). reload:true (+ignoreCache for a hard reload, Chrome only — Firefox rejects the argument outright) covers the MCP's reload navigation type.
  *   - wait_for: only text-substring waiting (innerText.includes); no aria/role/selector or "wait for event" variants. Throws on timeout rather than returning {found:false}.
  */
