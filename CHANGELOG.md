@@ -5,6 +5,22 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-08-25
+
+**Two Firefox BiDi navigation fixes: every plain `reload:true` no longer fails, and `file://` navigation gets automation-pref parity plus an actionable error when the OS still refuses.** Chrome behavior is unchanged. The tool surface is unchanged (45 tools).
+
+### Fixed
+
+- **Every plain `reload:true` on Firefox failed with `Argument "ignoreCache" is not supported yet`.** `browsingContext.reload` was sent `ignoreCache: false` unconditionally, and Firefox's BiDi server rejects the KEY regardless of value — so the default reload path, not just hard reloads, was broken on the Firefox backend. The key is now omitted from the params entirely on plain reloads, and an explicit `ignoreCache: true` fails fast with a clear backend-capability error (the same doctrine as `click`'s modifiers) instead of an opaque mid-flight protocol rejection. The `navigate_page` manifest and docs now state the Firefox limitation up front.
+- **#6 — `file://` navigation on the Firefox backend.** Two parts, with their evidentiary limits stated:
+  - Launched-Firefox profiles now carry Mozilla's automation prefs. Firefox's Remote Agent has its own recommended automation bundle, but it is gated on `remote.prefs.recommended`, which DEFAULTS TO FALSE (verified in mozilla-central's `remote/shared/RecommendedPreferences.sys.mjs`) — so a bare `--remote-debugging-port` launch ran with consumer prefs while every geckodriver/Marionette-class setup applies the bundle. `launch.ts` now seeds `user.js` into every throwaway profile with `remote.prefs.recommended: true` plus `security.fileuri.strict_origin_policy: false` and `dom.file.createInChild: true` (the latter is the pref Marionette's own `geckoinstance.py` sets). An explicit `profilePath` is deliberately NOT mutated — it belongs to its owner.
+  - `NS_ERROR_FILE_ACCESS_DENIED` now maps to an actionable error naming snap/AppArmor confinement (an Ubuntu snap Firefox cannot read host paths outside its mount namespace, and no preference fixes that) and the localhost-server workaround, instead of relaying the bare nsresult.
+  - Live-verified on macOS (Firefox 153, launch mode): top-level `file://` navigation, sibling `<script src>` loading, and same-directory `fetch()` all pass end-to-end (`test/firefox-smoke.ts`, 24/24). The Linux snap-confined case cannot be reproduced on macOS and is covered by the error mapping instead; a negative control confirmed sibling-script/fetch behavior does not discriminate the seeded prefs on Firefox 153/macOS, so those smoke checks are regression guards, not causal proof.
+
+### Changed
+
+- **`test/firefox-smoke.ts`** gains the file:// + reload section (check 7b2) with its evidentiary limits documented inline, and no longer claims to avoid `file://` categorically.
+
 ## [1.11.0] - 2026-08-18
 
 **Firefox multi-process session coordination + orphan auto-recovery, and a new `cdp install` one-command setup.** Attaching several cdp-toolkit processes to one user Firefox no longer hard-wedges on Firefox's single-BiDi-session limit, and a session orphaned by a killed client is now auto-cleared over the Marionette side channel instead of requiring a Firefox restart. Chrome behavior is unchanged. The tool surface is still 45 tools — the installer is a CLI subcommand, not a new tool.
