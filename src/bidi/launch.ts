@@ -22,7 +22,7 @@
  * node:os and node:path.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -146,6 +146,55 @@ function waitForExit(proc: ChildProcess, deadlineMs: number): Promise<void> {
 }
 
 /**
+ * Automation prefs seeded into every THROWAWAY profile this toolkit launches (#6).
+ *
+ * Firefox's Remote Agent has its own recommended automation-pref bundle, but it is gated on
+ * `remote.prefs.recommended`, which DEFAULTS TO FALSE — a bare `--remote-debugging-port`
+ * launch therefore runs with consumer prefs (verified in mozilla-central's
+ * remote/shared/RecommendedPreferences.sys.mjs; `defineLazyPreferenceGetter(..., "remote.prefs.recommended", false)`).
+ * The two file://-relevant consequences, and the reason each pref is here:
+ *
+ * - `remote.prefs.recommended: true` — flips on Firefox's own bundle at BiDi session start. This
+ *   is the same mechanism geckodriver/Marionette automation leans on.
+ * - `security.fileuri.strict_origin_policy: false` — a member of that bundle, also set explicitly
+ *   so the behavior does not depend on the bundle's exact contents per Firefox version. Without
+ *   it, file:// documents get unique opaque origins and sibling file:// subresources fail.
+ * - `dom.file.createInChild: true` — the bundle's file-API automation companion pref.
+ *
+ * Only the throwaway profile is seeded. An explicit `profilePath` belongs to its owner: writing
+ * prefs into someone's real profile (where `security.fileuri.strict_origin_policy: false` would
+ * persist as a security relaxation of their daily browsing) is not this toolkit's call to make.
+ */
+const LAUNCH_USER_JS_PREFS: Record<string, boolean> = {
+  "remote.prefs.recommended": true,
+  "security.fileuri.strict_origin_policy": false,
+  "dom.file.createInChild": true,
+};
+
+/**
+ * Seed `user.js` in a profile directory with the toolkit's automation prefs. Firefox reads
+ * user.js exactly once, at profile startup — which is why this runs BEFORE spawn, never after.
+ * Merges with an existing user.js (never rewrites a pref that file already sets, never drops a
+ * line it did not write) so the function is idempotent and safe on a reused profile dir.
+ * Exported for unit tests; returns the file's final content.
+ */
+export function writeLaunchUserJs(profilePath: string): string {
+  const target = join(profilePath, "user.js");
+  const existing = existsSync(target) ? readFileSync(target, "utf8") : "";
+  const present = new Set<string>();
+  for (const line of existing.split("\n")) {
+    const m = /^user_pref\("([^"]+)"\s*,/.exec(line.trim());
+    if (m) present.add(m[1]!);
+  }
+  const additions = Object.entries(LAUNCH_USER_JS_PREFS)
+    .filter(([k]) => !present.has(k))
+    .map(([k, v]) => `user_pref("${k}", ${JSON.stringify(v)});`);
+  const content = (existing.length > 0 ? existing.replace(/\n*$/, "\n") : "") + additions.join("\n") + (additions.length > 0 ? "\n" : "");
+  if (content !== existing) writeFileSync(target, content, "utf-8");
+  return content;
+}
+
+/**
  * Launch Firefox with the BiDi debug port enabled and resolve once the port
  * actually accepts a TCP connection. Never resolves on a fixed sleep.
  */
@@ -156,6 +205,7 @@ export async function launchFirefox(opts: LaunchFirefoxOptions = {}): Promise<La
 
   const isThrowaway = opts.profilePath === undefined;
   const profilePath = opts.profilePath ?? mkdtempSync(join(tmpdir(), "cdp-toolkit-ff-profile-"));
+  if (isThrowaway) writeLaunchUserJs(profilePath);
 
   const args = ["--profile", profilePath, "--remote-debugging-port", String(port), "--no-remote"];
   if (opts.headless) args.push("--headless");

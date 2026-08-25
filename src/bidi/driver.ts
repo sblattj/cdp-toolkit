@@ -136,6 +136,20 @@ function mapBidiError(e: unknown): DriverError {
     if (code === "unsupported operation") return driverError("unsupported", e.message);
     if (!code && /timed out/i.test(e.message)) return driverError("timeout", e.message);
     if (!code && /(disposed|not open|connection closed)/i.test(e.message)) return driverError("disconnected", e.message);
+    // NS_ERROR_FILE_ACCESS_DENIED from browsingContext.navigate means the browser process was
+    // refused at the OS level while opening the file:// target — not a protocol failure. Two
+    // mechanisms produce it (#6): (1) the automation prefs that relax file:// handling were never
+    // applied — launch.ts now seeds them via user.js, so this should not surface for a
+    // toolkit-launched Firefox; (2) kernel-level confinement of the browser itself (Ubuntu's snap
+    // Firefox is the common one: a snap process cannot see host paths outside its mount
+    // namespace), which no preference can bypass. The error must name the way out rather than
+    // relay the raw nsresult.
+    if (/NS_ERROR_FILE_ACCESS_DENIED/i.test(e.message)) {
+      return driverError(
+        "page-error",
+        `${e.message} — the browser process was not allowed to open this file:// path. For a snap- or AppArmor-confined Firefox (Ubuntu default) that is kernel-level and no preference fixes it: serve the directory over a local http server (e.g. python3 -m http.server) and navigate to the http://127.0.0.1:<port>/ URL instead. If this Firefox was launched by cdp-toolkit and still fails, please report it at https://github.com/sblattj/cdp-toolkit/issues.`,
+      );
+    }
     return driverError("page-error", e.message);
   }
   return driverError("page-error", e instanceof Error ? e.message : String(e));

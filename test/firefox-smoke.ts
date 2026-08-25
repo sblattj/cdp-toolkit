@@ -4,8 +4,11 @@
  * Unlike test/smoke.ts (which drives an already-running Chrome on CDP_BASE),
  * this script owns the whole lifecycle itself: it launches a throwaway
  * headless Firefox via src/bidi/launch.ts, serves the local fixtures over
- * Bun.serve on an ephemeral port (never file://, never a shared debug port),
- * and tears the process down again. It NEVER connects to port 9222 or any
+ * Bun.serve on an ephemeral port (never a shared debug port), and tears the
+ * process down again. Since 1.11.1 it ALSO makes one deliberate file://
+ * navigation with a sibling script and a sibling fetch() (check 7b2): an
+ * end-to-end regression guard for launch-mode file:// capability (#6), whose
+ * evidentiary limits are stated inline. It NEVER connects to port 9222 or any
  * other fixed port: that convention is reserved for a real Chrome the
  * developer may have running locally, and this script must not touch it.
  *
@@ -14,7 +17,8 @@
  * wall-clock cap kills it and exits non-zero if something hangs, so this
  * can never wedge CI. Run with `bun run firefox:smoke`.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
@@ -185,6 +189,86 @@ try {
     /no history entry to go forward to/.test(ffBoundaryError),
     `error=${JSON.stringify(ffBoundaryError)}`,
   );
+
+  // --- 7b2. file:// navigation + reload behavior (1.11.1) ---
+  // THREE things pinned by live-fire, with their evidentiary limits stated:
+  //
+  // (a) #6 — browsingContext.navigate to a local file was reported failing on Linux with
+  //     NS_ERROR_FILE_ACCESS_DENIED. What cdp-toolkit could fix it DID: launch profiles now
+  //     carry the automation prefs (remote.prefs.recommended defaults to FALSE, verified in
+  //     remote/shared/RecommendedPreferences.sys.mjs, so a bare --remote-debugging-port launch
+  //     used to run with consumer prefs), and the denial now maps to an actionable error
+  //     naming snap/AppArmor confinement and the localhost-server workaround (unit-tested in
+  //     test/bidi-navigate-launch.test.ts). What is verified HERE on macOS: top-level file://
+  //     navigation, a <script src> sibling, and a fetch() of sibling data all work in launch
+  //     mode. NOT verified here: the Linux snap-confined case — a snap Firefox cannot be
+  //     fixed from inside the process at all, which is exactly why the error mapping exists.
+  //     A negative control (same fixture, unseeded profile) confirmed sibling-script loading
+  //     and same-directory fetch do NOT discriminate the seeded prefs on Firefox 153/macOS
+  //     (file origins are directory-keyed), so these checks are regression guards for the
+  //     end-to-end capability, NOT proof the pref is the enabling cause.
+  // (b) reload — browsingContext.reload used to send `ignoreCache: false`
+  //     unconditionally, and Firefox rejects the KEY (any value, even false) with
+  //     `Argument "ignoreCache" is not supported yet`, so EVERY plain reload failed on
+  //     Firefox. The key is now omitted; an explicit ignoreCache:true fails fast with
+  //     a capability error instead of mid-flight protocol noise.
+  const filePage = await driver.page(undefined);
+  const fileTmpDir = mkdtempSync(join(tmpdir(), "cdp-ff-smoke-file-"));
+  try {
+    writeFileSync(
+      join(fileTmpDir, "deck.html"),
+      `<!doctype html><title>deck</title><div id="marker">local-file-ok</div>
+<script src="sibling.js"></script>
+<script>
+  window.__fetchOutcome = (async () => {
+    try { const r = await fetch("data.json"); return "ok:" + (await r.text()); }
+    catch (e) { return "err:" + (e && e.message ? e.message : String(e)); }
+  })();
+</script>
+`,
+      "utf8",
+    );
+    writeFileSync(join(fileTmpDir, "sibling.js"), "window.__siblingLoaded = true;", "utf8");
+    writeFileSync(join(fileTmpDir, "data.json"), '{"n":42}', "utf8");
+    const fileNav = await filePage.navigate({ url: `file://${join(fileTmpDir, "deck.html")}` });
+    const fileHref = await filePage.evaluate("location.href");
+    const markerText = await filePage.evaluate("document.getElementById('marker').textContent");
+    record(
+      "navigate to a file:// URL renders the local document (#6)",
+      fileNav.url.startsWith("file://") && String(fileHref).startsWith("file://") && markerText === "local-file-ok",
+      `url=${fileNav.url}; location=${String(fileHref)}; marker=${JSON.stringify(markerText)}`,
+    );
+    const siblingLoaded = await filePage.evaluate("window.__siblingLoaded === true");
+    await new Promise((r) => setTimeout(r, 500)); // the fetch probe is async; let it settle
+    const fetchOutcome = String(await filePage.evaluate("window.__fetchOutcome"));
+    record(
+      "file:// page loads a sibling script AND fetches sibling data (launch-mode end-to-end, regression guard)",
+      siblingLoaded === true && fetchOutcome === 'ok:{"n":42}',
+      `sibling=${JSON.stringify(siblingLoaded)} fetch=${JSON.stringify(fetchOutcome)}`,
+    );
+  } finally {
+    rmSync(fileTmpDir, { recursive: true, force: true });
+  }
+
+  await filePage.navigate({ url: `${BASE_URL}/form.html` });
+  const reloadNav = await filePage.navigate({ reload: true });
+  record(
+    "plain reload:true succeeds on Firefox (ignoreCache key omitted from browsingContext.reload)",
+    reloadNav.reloaded === true && reloadNav.url.includes("form.html"),
+    `reloaded=${reloadNav.reloaded} url=${reloadNav.url} waitedFor=${reloadNav.waitedFor}`,
+  );
+  let hardReloadError = "";
+  try {
+    await filePage.navigate({ reload: true, ignoreCache: true });
+  } catch (err) {
+    hardReloadError = err instanceof Error ? err.message : String(err);
+  }
+  record(
+    "reload + ignoreCache:true fails fast with the Firefox capability error, not a protocol rejection",
+    /not supported on the Firefox WebDriver-BiDi backend/.test(hardReloadError),
+    `error=${JSON.stringify(hardReloadError)}`,
+  );
+  await filePage.release();
 
   // --- 7c. the two Chrome-only P3 tools are ABSENT from this backend, not present-and-throwing ---
   const p3Caps = { downloads: driver.capabilities.has("browser.downloads"), permissions: driver.capabilities.has("browser.permissions") };
