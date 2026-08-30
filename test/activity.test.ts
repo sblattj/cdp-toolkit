@@ -16,6 +16,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 import { claimPage, listLeasesTool, type ClaimPageResult, type LeaseRow } from "../src/leases-tools.ts";
 import { claimLease, leaseFile, releaseLeaseFor } from "../src/leases.ts";
 import { listPages, newPage } from "../src/shared-tools.ts";
@@ -651,9 +652,13 @@ describe("list_leases annotates rows with human activity", () => {
 
 describe("the manifest describes the new fields", () => {
   const spec = (name: string) => MANIFEST.find((s) => s.name === name)!;
+  // Full prose now lives in TOOL_DOCS (served on demand by describe_tool); the
+  // compressed MANIFEST descriptions carry only terse summaries. These guarantees
+  // assert the fact is still documented and reachable, just relocated.
+  const doc = (name: string) => TOOL_DOCS[name];
 
   test("claim_page documents humanActiveMs, contention, and that it never refuses", () => {
-    const d = spec("claim_page").description;
+    const d = doc("claim_page").description;
     expect(d).toContain("humanActiveMs");
     expect(d).toContain("contention");
     // The single most important sentence in the description: an agent that read
@@ -662,18 +667,18 @@ describe("the manifest describes the new fields", () => {
   });
 
   test("claim_page states that null means no data, not no human", () => {
-    const d = spec("claim_page").description;
+    const d = doc("claim_page").description;
     expect(d).toContain("never means 'no human'");
   });
 
   test("claim_page discloses the second-server and iframe blind spots", () => {
-    const d = spec("claim_page").description;
+    const d = doc("claim_page").description;
     expect(d).toContain("cross-origin iframe");
     expect(d).toContain("second MCP server");
   });
 
   test("list_leases documents humanActiveMs and that absence is 'no answer'", () => {
-    const d = spec("list_leases").description;
+    const d = doc("list_leases").description;
     expect(d).toContain("humanActiveMs");
     expect(d).toContain("never 'nobody is there'");
   });
@@ -689,7 +694,7 @@ describe("the manifest describes the new fields", () => {
   });
 
   test("list_pages documents the split reap horizon, the lease field, and probe", () => {
-    const d = spec("list_pages").description;
+    const d = doc("list_pages").description;
     expect(d).toContain("CDP_REAP_GRACE_MS");
     expect(d).toContain("'lease'");
     expect(d).toContain("idleMs");
@@ -700,11 +705,11 @@ describe("the manifest describes the new fields", () => {
   test("list_pages advertises 'probe' as an input, and it defaults to false", () => {
     const props = spec("list_pages").inputSchema.properties as Record<string, { type?: string; description?: string }>;
     expect(props.probe?.type).toBe("boolean");
-    expect(props.probe?.description).toContain("500ms");
+    expect(doc("list_pages").params.probe).toContain("500ms");
   });
 
   test("list_leases documents the computed idleMs/expiresAt fields", () => {
-    const d = spec("list_leases").description;
+    const d = doc("list_leases").description;
     expect(d).toContain("idleMs");
     expect(d).toContain("expiresAt");
   });

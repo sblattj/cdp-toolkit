@@ -5,6 +5,30 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-29
+
+**Progressive disclosure: the default `tools/list` an agent loads shrinks ~88% (≈20,200 → ≈2,500 tokens) to 12 core tools plus two meta-tools, with the full 45-tool surface, and the full per-tool documentation, one `browser_tools` call away.** This is the first npm publication since 1.11.0, so it also **carries the [1.11.1] changes below** (the two Firefox BiDi navigation fixes) that landed on main but were never released. Tool names, parameters, and schema shapes are unchanged — a strip-descriptions deep-equal of the manifest gates the change, the same check 1.10.0 used.
+
+### Added
+
+- **Tool profiles + on-demand group activation.** The server now starts on the `core` profile (`list_pages`, `new_page`, `close_page`, `select_page`, `navigate_page`, `wait_for`, `take_snapshot`, `click`, `fill`, `type_text`, `evaluate_script`, `take_screenshot`) and holds the other 33 tools in 12 activatable groups (`src/toolGroups.ts`). `CDP_TOOL_PROFILE=full` advertises everything at startup — the exact prior behavior. Profiles are MCP-only; the CLI still exposes all 45 tools.
+- **`browser_tools` meta-tool** — `list_groups` (every group, its tools, active state), `activate`/`deactivate` (toggle one group), `set_profile` (core|full wholesale). Any change fires `notifications/tools/list_changed` so the client re-fetches `tools/list`; the server now declares `tools.listChanged: true`.
+- **`describe_tool` meta-tool** — full description and per-parameter docs for any tool by name, *including tools not currently listed* (`src/toolDocs.ts`, generated verbatim from the pre-2.0 manifest prose). Call it before using an unfamiliar tool; the live listing carries only terse summaries.
+- Environment knob: `CDP_TOOL_PROFILE` (`core` default, `full` = prior behavior).
+- The server `instructions` block now front-loads the disclosure model: core profile at startup, `browser_tools` to activate, `describe_tool` for full docs, hidden tools still callable by name.
+
+### Changed
+
+- **The manifest advertised over `tools/list` now carries terse one-line descriptions; the full prose moved to `describe_tool`.** Description text drops 61,002 → 14,077 chars; the full 45-tool payload would be ~8.5k tokens (−58% vs 1.x) and the default surface ~2.5k (−88%). Schema shapes are untouched. Hidden does not mean disabled: a hidden-but-available tool called by name still executes — only discovery is gated.
+- **MCP SDK 1.29 → 2.0.** The runtime dependency is now `@modelcontextprotocol/server@^2.0.0` (the SDK 2.0 package split), with `@modelcontextprotocol/client@^2.0.0` as a devDependency powering the in-process client tests; `scripts/build.ts` keeps the SDK external under the new package name.
+- **Tests re-pointed, guarantees preserved.** Every description assertion in `test/` now reads `TOOL_DOCS` instead of the manifest (worker-capture traps, HTML5 drag modes, lease semantics, the 500ms probe bound — all still asserted, relocated), and `test/origins.test.ts` now proves the "origin is never 'human'" vocabulary is reachable end-to-end through `describe_tool` over a real stdio MCP connection.
+- Repo hygiene: the private `.cbm-atlas`/`.cbmignore` indexing artifacts and one internal design plan doc are no longer tracked.
+
+### Fixed
+
+- Seven one-line manifest descriptions that a mechanical compression pass had corrupted with copy-paste text from unrelated tools (`fill.value`, `fill_form.fields[].value`, `emulate.mediaFeatures` item name/value, `mock_request.action`, `lighthouse_audit.categories`, `clear_mocks.all`, `list_mocks.target`) now carry their correct terse wording, derived from the preserved `TOOL_DOCS` prose.
+- The runtime version constant (`src/mcp.ts` `VERSION`) had drifted from `package.json` since 1.11.0; both now read from the same release.
+
 ## [1.11.1] - 2026-08-25
 
 **Two Firefox BiDi navigation fixes: every plain `reload:true` no longer fails, and `file://` navigation gets automation-pref parity plus an actionable error when the OS still refuses.** Chrome behavior is unchanged. The tool surface is unchanged (45 tools).

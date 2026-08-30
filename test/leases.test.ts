@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TOOL_NAMES } from "../src/index.ts";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 import type { Target } from "../src/types.ts";
 import type { BrowsingContextInfo } from "../src/bidi/protocol.ts";
 import { resolveTarget } from "../src/client.ts";
@@ -834,19 +835,18 @@ describe("manifest reflects the lease-required surface", () => {
     const bearing = MANIFEST.filter((s) => "lease" in (s.inputSchema.properties ?? {}));
     expect(bearing.length).toBeGreaterThan(30);
     for (const s of bearing) {
-      const d = JSON.stringify((s.inputSchema.properties as Record<string, { description?: string }>).lease?.description);
+      const d = JSON.stringify(TOOL_DOCS[s.name]?.params.lease);
       expect(d).toContain("CDP_REQUIRE_LEASE");
     }
   });
 
   test("list_pages and list_leases document reaped", () => {
-    expect(spec("list_pages")!.description).toContain("reaped");
-    expect(spec("list_leases")!.description).toContain("reaped");
+    expect(TOOL_DOCS["list_pages"].description).toContain("reaped");
+    expect(TOOL_DOCS["list_leases"].description).toContain("reaped");
   });
 
   test("new_page documents the strict-mode auto-claim", () => {
-    const claim = (spec("new_page")!.inputSchema.properties as Record<string, { description?: string }>).claim;
-    expect(claim?.description).toContain("CDP_REQUIRE_LEASE");
+    expect(TOOL_DOCS["new_page"].params.claim).toContain("CDP_REQUIRE_LEASE");
   });
 });
 

@@ -30,6 +30,7 @@ import { nextFreeName, safeFilename, validateWaitForDownloadArgs } from "../src/
 import { originOf, validateGrantPermissionsArgs } from "../src/tools/permissions.ts";
 import { toolAvailability } from "../src/capabilities.ts";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 
 /* ============================ navigate_page: history mode ============================ */
 
@@ -316,17 +317,18 @@ describe("manifest entries for Track P3", () => {
     const s = spec("navigate_page")!;
     const history = (s.inputSchema.properties as Record<string, { enum?: string[] }>).history;
     expect(history?.enum).toEqual(["back", "forward"]);
-    expect(s.description).toContain("history:'back'|'forward'");
-    expect(s.description).toContain("traversed");
+    const d = TOOL_DOCS["navigate_page"].description;
+    expect(d).toContain("history:'back'|'forward'");
+    expect(d).toContain("traversed");
     // The exclusivity rule has to be discoverable from the description, since the schema cannot
     // express "exactly one of these three".
-    expect(s.description).toContain("Exactly one of url / reload / history");
+    expect(d).toContain("Exactly one of url / reload / history");
   });
 
   test("wait_for_download documents the arm-before-click ordering AND the browser-global side effect", () => {
     // Both are load-bearing for a caller: the first decides whether they get a file at all, the
     // second is a change to where EVERY download in the browser lands, including the user's own.
-    const d = spec("wait_for_download")!.description;
+    const d = TOOL_DOCS["wait_for_download"].description;
     expect(d).toContain("ARMED BEFORE");
     expect(d).toContain("browser-global");
     expect(d).toMatch(/every download in this browser/i);
@@ -335,7 +337,7 @@ describe("manifest entries for Track P3", () => {
   });
 
   test("grant_permissions documents origin-keying, reset semantics, and the per-connection lifetime", () => {
-    const d = spec("grant_permissions")!.description;
+    const d = TOOL_DOCS["grant_permissions"].description;
     expect(d).toMatch(/keyed by ORIGIN/i);
     expect(d).toContain("reset:true");
     expect(d).toMatch(/DISCARDS IT when that connection closes/i);

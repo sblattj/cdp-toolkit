@@ -43,7 +43,7 @@ import { crc32, PngStitchError, stitchPngBandsToFile } from "../src/png.ts";
 
 const FFMPEG = "/opt/homebrew/bin/ffmpeg";
 const hasFfmpeg = existsSync(FFMPEG);
-const CAPTURE_DIR = "/private/tmp/claude-501/-Users-sblatt--dotorg/64e8577c-dd8d-49e0-b9cb-8fe92cec95bf/scratchpad";
+const CAPTURE_DIR = process.env.CDP_PNG_CAPTURE_DIR ?? "";
 const REAL_TALL = join(CAPTURE_DIR, "tall-1600x16384-beyond.png");
 const hasRealCapture = existsSync(REAL_TALL);
 

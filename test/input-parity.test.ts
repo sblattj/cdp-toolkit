@@ -34,6 +34,7 @@ import { createFirefoxDriver } from "../src/bidi/driver.ts";
 import { modifierBits, validateDispatchMouseArgs, dispatchMouse, type DispatchMouseArgs } from "../src/tools/dispatch-mouse.ts";
 import { toolAvailability } from "../src/capabilities.ts";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 
 /* ------------------------------- modifier bit math ------------------------------- */
 
@@ -468,8 +469,9 @@ describe("drag's param gap is a param gap, not a hidden tool (ADR-001)", () => {
   test("the manifest description names the chrome-only html5 restriction", () => {
     const entry = MANIFEST.find((s) => s.name === "drag");
     expect(entry).toBeDefined();
-    expect(entry!.description).toContain("CHROME-ONLY");
-    expect(entry!.description).toContain("mode:'html5'");
+    const d = TOOL_DOCS["drag"].description;
+    expect(d).toContain("CHROME-ONLY");
+    expect(d).toContain("mode:'html5'");
   });
   test("the manifest schema carries mode, steps and by, and only 'from' stays required", () => {
     const schema = MANIFEST.find((s) => s.name === "drag")!.inputSchema as {

@@ -14,6 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 import { WORKER_CAPABLE_TOOLS } from "../src/workers.ts";
 
 describe("manifest grammar drift", () => {
@@ -86,14 +87,15 @@ describe("manifest grammar drift", () => {
       const tool = MANIFEST.find((t) => t.name === name);
       expect(tool).toBeDefined();
       const props = (tool!.inputSchema as { properties: Record<string, { type?: string; description?: string }> }).properties;
-      expect(props.target?.description ?? "").toContain("worker:<substring>");
-      expect(props.target?.description ?? "").toMatch(/CHROME-ONLY|Chrome only/);
-      expect(tool!.description).toMatch(/worker\.targets/);
-      expect(tool!.description).toMatch(/KEEPS\s+THE\s+WORKER\s+ALIVE/);
+      const docs = TOOL_DOCS[name];
+      expect(docs.params.target ?? "").toContain("worker:<substring>");
+      expect(docs.params.target ?? "").toMatch(/CHROME-ONLY|Chrome only/);
+      expect(docs.description).toMatch(/worker\.targets/);
+      expect(docs.description).toMatch(/KEEPS\s+THE\s+WORKER\s+ALIVE/);
       // wake is a real, documented argument on all three, and it names the
       // eviction fact it exists for.
       expect(props.wake?.type).toBe("boolean");
-      expect(props.wake?.description ?? "").toMatch(/idle-evicted/);
+      expect(docs.params.wake ?? "").toMatch(/idle-evicted/);
     }
   });
 
@@ -116,7 +118,7 @@ describe("manifest grammar drift", () => {
    */
   test("the worker descriptions give the MEASURED reason, and never the service-worker-realm misdiagnosis", () => {
     for (const name of ["list_network_requests", "get_network_request", "list_console_messages"]) {
-      const desc = MANIFEST.find((t) => t.name === name)!.description ?? "";
+      const desc = TOOL_DOCS[name].description ?? "";
       expect(desc).toMatch(/Network domain/);
       expect(desc).toMatch(/global scope/);
       expect(desc).toMatch(/self\.fetch/);
@@ -138,7 +140,8 @@ describe("manifest grammar drift", () => {
     const tool = MANIFEST.find((t) => t.name === "evaluate_script");
     expect(tool).toBeDefined();
     const props = (tool!.inputSchema as { properties: Record<string, { type?: string; description?: string }> }).properties;
-    const target = props.target?.description ?? "";
+    const docs = TOOL_DOCS["evaluate_script"];
+    const target = docs.params.target ?? "";
     expect(target).toContain("worker:<substring>");
     // The capability gate has to be IN the description a caller reads, not only
     // in the error they hit after trying it on Firefox.
@@ -146,13 +149,11 @@ describe("manifest grammar drift", () => {
     expect(props.wake?.type).toBe("boolean");
     // The eviction fact is the whole teaching; a `wake` description that did not
     // state it would leave the caller with a flag and no model of what it fixes.
-    expect(props.wake?.description ?? "").toMatch(/idle-evicted/);
+    expect(docs.params.wake ?? "").toMatch(/idle-evicted/);
   });
 
   test("evaluate_script's 'expression' description names every alias key the key-echo error covers", () => {
-    const tool = MANIFEST.find((t) => t.name === "evaluate_script");
-    expect(tool).toBeDefined();
-    const desc = (tool!.inputSchema as { properties: Record<string, { description?: string }> }).properties.expression?.description ?? "";
+    const desc = TOOL_DOCS["evaluate_script"].params.expression ?? "";
     for (const alias of ["function", "code", "js", "script", "fn", "body"]) {
       expect(desc).toContain(`'${alias}'`);
     }

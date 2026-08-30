@@ -36,7 +36,7 @@ describe("parseInstallArgs", () => {
       "--browser",
       "chrome",
       "--port",
-      "9333",
+      "9444",
       "--name",
       "my-cdp",
       "--alias-name",
@@ -46,7 +46,7 @@ describe("parseInstallArgs", () => {
     expect(args).toEqual({
       harness: "codex",
       browser: "chrome",
-      port: 9333,
+      port: 9444,
       name: "my-cdp",
       alias: true,
       aliasName: "cdp-x",

@@ -19,8 +19,8 @@ import { tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { BrowserDriver, PageInfo } from "../src/driver.ts";
 import { claimPage, releasePage } from "../src/leases-tools.ts";
 import { listPages, newPage } from "../src/shared-tools.ts";
@@ -374,11 +374,15 @@ describe("list_pages over the real MCP server", () => {
     }
   }, 30_000);
 
-  test("the advertised tool description tells the consumer origin is never 'human'", async () => {
+  test("a consumer can reach 'origin is never human' on demand via describe_tool", async () => {
     const c = await connect();
-    const { tools } = await c.listTools();
-    const spec = tools.find((t) => t.name === "list_pages");
-    expect(spec?.description).toContain("never says 'human'");
-    expect(spec?.description).toContain("origin");
+    // Progressive disclosure: the compressed tools/list carries only a terse summary,
+    // but the full origin vocabulary stays reachable through the describe_tool meta-tool.
+    const res = (await c.callTool({ name: "describe_tool", arguments: { name: "list_pages" } })) as {
+      content: Array<{ text?: string }>;
+    };
+    const text = res.content.map((x) => x.text ?? "").join("");
+    expect(text).toContain("never says 'human'");
+    expect(text).toContain("origin");
   }, 30_000);
 });
