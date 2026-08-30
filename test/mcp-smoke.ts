@@ -6,8 +6,8 @@
  *
  * SAFETY: only creates and drives its OWN about:blank page; never touches a real tab.
  */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { fileURLToPath } from "node:url";
 
 const serverPath = fileURLToPath(new URL("../src/mcp.ts", import.meta.url));

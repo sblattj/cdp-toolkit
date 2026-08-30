@@ -9,7 +9,7 @@
  * runnable via BOTH `bunx -y cdp-toolkit` and `npx -y cdp-toolkit`, and npx is the
  * dominant MCP-install idiom, so this widens the audience without giving up Bun.
  *
- * `@modelcontextprotocol/sdk` stays EXTERNAL (a real runtime dependency, resolved
+ * `@modelcontextprotocol/server` stays EXTERNAL (a real runtime dependency, resolved
  * from node_modules by the consumer); we bundle only our own code.
  *
  * dist/ is gitignored and rebuilt at publish time via the `prepublishOnly` hook.
@@ -25,7 +25,7 @@ const result = await Bun.build({
   format: "esm",
   splitting: false, // self-contained file per entry (no shared chunks to resolve)
   minify: false,
-  external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*"],
+  external: ["@modelcontextprotocol/server", "@modelcontextprotocol/server/*"],
 });
 
 if (!result.success) {

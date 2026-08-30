@@ -129,7 +129,7 @@ describe("aliasLine", () => {
       const binPath = join(dir, "arc-bin");
       writeFileSync(binPath, "");
       await withEnv("ARC_BIN", binPath, () => {
-        const line = aliasLine({ choice: "arc", port: 9333, aliasName: "my-arc-debug" });
+        const line = aliasLine({ choice: "arc", port: 9444, aliasName: "my-arc-debug" });
         expect(line.startsWith("alias my-arc-debug=")).toBe(true);
       });
     });

@@ -54,6 +54,7 @@ import { REQUIRED_CAPABILITIES } from "../src/driver.ts";
 import { toolAvailability } from "../src/capabilities.ts";
 import { FIREFOX_TOOLS } from "../src/firefox-tools.ts";
 import { MANIFEST } from "../src/manifest.ts";
+import { TOOL_DOCS } from "../src/toolDocs.ts";
 import { TOOL_NAMES } from "../src/index.ts";
 
 /** A three-frame ledger: 500ms, then a 3s still, then a final frame held to stop. */
@@ -434,8 +435,7 @@ describe("Firefox / BiDi has no screencast", () => {
   });
 
   test("the manifest tells a reader why Firefox cannot run it", () => {
-    const spec = MANIFEST.find((s) => s.name === "start_screen_recording");
-    expect(spec?.description).toContain("WebDriver BiDi has no screencast");
+    expect(TOOL_DOCS["start_screen_recording"].description).toContain("WebDriver BiDi has no screencast");
   });
 });
 
