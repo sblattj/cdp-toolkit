@@ -287,16 +287,29 @@ describe("CDP_TOOL_PROFILE", () => {
   }, 30_000);
 
   test("a tool the profile hides is still callable by name", async () => {
+    // list_mocks reads in-process mock state only, so it succeeds with NO browser; CDP_BASE
+    // is pinned to a closed port so a Chrome on the developer's machine can never mask a
+    // regression here (list_leases dials the browser and failed on CI for exactly that reason).
     const out = await runServer(
-      [modernRpc("server/discover"), modernRpc("tools/list"), modernRpc("tools/call", { name: "list_leases", arguments: {} })],
-      { CDP_TOOL_PROFILE: "core" },
+      [
+        modernRpc("server/discover"),
+        modernRpc("tools/list"),
+        modernRpc("tools/call", { name: "list_mocks", arguments: {} }),
+        modernRpc("tools/call", { name: "browser_tools", arguments: {} }),
+      ],
+      { CDP_TOOL_PROFILE: "core", CDP_BASE: "http://127.0.0.1:1" },
     );
     // Control: it really is absent from THIS connection's listing, so the call below
     // is exercising the unlisted path and not just a tool that was listed anyway.
-    expect(names(out.res[1]!)).not.toContain("list_leases");
+    expect(names(out.res[1]!)).not.toContain("list_mocks");
     const call = out.res[2]!;
     expect(call.result.isError).toBeFalsy();
-    expect(() => JSON.parse(text(call))).not.toThrow();
+    expect(JSON.parse(text(call))).toEqual({ count: 0, mocks: [] });
+    // Second control: a name that is neither listed nor exists (the 2.0.0 meta-tool removed
+    // in 2.1) is refused as unknown, so "unlisted" is not the same as "any name works".
+    const removed = out.res[3]!;
+    expect(removed.result.isError).toBe(true);
+    expect(text(removed)).toBe("unknown tool: browser_tools");
   }, 30_000);
 });
 
