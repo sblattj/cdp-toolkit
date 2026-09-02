@@ -30,7 +30,8 @@ name: publish
 #      registry PUT, check that selector first; it is unconfirmed as OUR
 #      cause, but it is the one documented setting that would produce exactly
 #      that split (provenance is a separate OIDC path from the publish PUT).
-#   6. Bump the version in package.json AND src/mcp.ts (VERSION), commit, then
+#   6. Bump the version in package.json AND src/version.ts (VERSION; a test
+#      asserts the two match), commit, then
 #      push a matching tag:  git tag v1.0.1 && git push origin v1.0.1
 #
 # After that, every `git push origin v*` cuts a published, provenance-signed release.
