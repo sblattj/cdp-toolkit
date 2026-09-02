@@ -1,6 +1,6 @@
 # cdp-toolkit
 
-**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser (and know when a human is using it too), plus a built-in network-mocking fake backend. **45 tools — 12 of them on the MCP server's default listing**, the rest revealed by one `browser_tools` call (see [Progressive disclosure](#progressive-disclosure)). Chrome is the flagship default; a second backend drives Firefox over WebDriver BiDi behind the same tool surface (see below).
+**A lightweight, drop-in alternative to [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) that won't wedge your agent.** It drives the Chrome tabs you point it at over the raw DevTools Protocol: any number of tabs, one explicitly named target per call over one direct socket, with a bounded timeout on every call, so a stuck page returns a clean error instead of hanging your agent and forcing a `/mcp` restart. Same idea, no all-target fan-out, plus tab leases so several agents can work one browser (and know when a human is using it too), plus a built-in network-mocking fake backend. **45 tools, all of them on one static, cacheable MCP listing** — or a lean 12-tool `core` listing when your client loads every schema eagerly (see [Progressive disclosure](#progressive-disclosure)). Chrome is the flagship default; a second backend drives Firefox over WebDriver BiDi behind the same tool surface (see below).
 
 > For AI-agent developers and Claude Code / Cursor users who need **the tabs they name driven reliably**, not a Puppeteer-managed browser.
 
@@ -129,7 +129,7 @@ bun run mcp:smoke   # spawn the server + a real initialize/tools-list/tools-call
 
 - **One target per call, never a broadcast.** Each call opens one WebSocket to the one target it named, with a bounded timeout on every CDP command, lazy domain enabling, and stateless element refs. Drive as many tabs as you like across calls; there is still no broadcast step that can stall on a wedged tab.
 - **Network mocking: build the UI before the backend exists.** `mock_request` arms a persistent per-target fake backend: return canned responses, force errors, or inject latency/fault rates. Mocks survive reloads and navigations until `clear_mocks`.
-- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, a cookie group that reads, writes, and deletes httpOnly cookies, real HTML5 drag-and-drop, raw scroll/mouse dispatch, download capture, permission grants, and tab-to-video screen recording. The MCP server lists a lean 12-tool core by default and activates the rest per group via `browser_tools`, so the discovery payload stays small; the CLI exposes all 45. They coexist with `chrome-devtools-mcp` in a separate namespace.
+- **Full chrome-devtools-mcp parity + extras.** All 29 upstream tools, plus `performance_trace` (a robust single-call trace), Lighthouse audits, heap snapshots, a cookie group that reads, writes, and deletes httpOnly cookies, real HTML5 drag-and-drop, raw scroll/mouse dispatch, download capture, permission grants, and tab-to-video screen recording. The MCP server publishes all of them on one static, cacheable `tools/list` (≈8.5k tokens, −58% vs 1.x) and serves the full per-tool prose on demand through `describe_tool`; `CDP_TOOL_PROFILE=core` trims that listing to a 12-tool everyday set (≈2.3k tokens) for clients that eagerly load every schema, and the trimmed-away tools stay callable by name. The CLI exposes all 45 regardless. They coexist with `chrome-devtools-mcp` in a separate namespace.
 - **A whole page is a file, not a wedged tab.** Chrome cannot encode a screenshot past 16384 device px on either side, and past that `Page.captureScreenshot` does not error — it never answers, and leaves the tab resized to the clip it was capturing. On a ratio-2 display that ceiling arrives at about 8192 CSS px: an ordinary long article. `take_screenshot` measures the projection before every capture and, past the cap, takes the page as vertical bands stitched losslessly into one PNG — a 140,982 CSS px page comes back as a 2780×281964 file in 18 bands, in 17 seconds, with the tab still healthy. Also per-capture `scale`, and `renderWidth`/`renderHeight` to shoot one capture at an emulated viewport and restore the tab afterwards.
 - **Many agents, one browser, no stolen tabs.** `claim_page` hands out an opaque lease token for one tab; every other tool checks it at target resolution, so an unqualified call against a leased tab is refused by name rather than silently retargeted to whatever tab a different agent is driving.
 - **Knows when a human is already using the tab you're driving.** An in-page activity beacon distinguishes a person's clicks/keys/scrolls from the toolkit's own dispatched input, so `claim_page` and `list_leases` can report `humanActiveMs` and warn on contention instead of silently fighting someone for the keyboard. See "Staleness: is a human already using this tab?" below.
@@ -224,32 +224,73 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
 | `CDP_LEASE_TTL_MS` | `900000` | How long a tab lease survives without use before another agent can reclaim it. Refreshed on every checked call. |
 | `CDP_REQUIRE_LEASE` | off | Strict mode, MCP server only (inert under the CLI regardless of value). Turns leasing from optional into mandatory: a call against an unheld tab acquires a lease instead of driving it lease-free, and `list_pages`/`list_leases` close tabs an abandoned agent left behind. See "Parallel tabs" below. |
-| `CDP_TOOL_PROFILE` | `core` | MCP server only. Startup tool profile: `core` lists the 12 everyday tools plus the `browser_tools`/`describe_tool` meta-tools; `full` lists everything at startup (exact 1.x behavior). Groups toggle at runtime via `browser_tools` either way. See "Progressive disclosure" below. |
+| `CDP_TOOL_PROFILE` | `full` | MCP server only. Startup-only filter on what `tools/list` advertises, read once and fixed for the life of the process. `full` (the default, and what unset/empty means) lists every group; `core` lists just the 12 everyday tools plus `describe_tool`; or a comma-separated group list, e.g. `core,network,console` (`core` is always included). An unknown group name is a configuration error: the server prints `CDP_TOOL_PROFILE: unknown tool group 'x'. Known: full, core, input, …` and exits 1. Tools the profile leaves out stay callable by name. See "Progressive disclosure" below. |
 | `CDP_REAP_GRACE_MS` | `2700000` | Extra grace (on top of `CDP_LEASE_TTL_MS`) before an `expired` lease's tab is actually destroyed by reap; `dead-pid` tabs are reaped immediately regardless. See "Reap" below. |
 | `CDP_FIREFOX_MARIONETTE_PORT` | `2828` | Firefox backend only. The Marionette side-channel port used to force-clear Firefox's orphaned BiDi session during orphan-session recovery (a blind `WebDriver:DeleteSession`). Only effective when that Firefox was launched with `--marionette`. See "Firefox" below. |
 | `CDP_FIREFOX_SESSION_WAIT_MS` | `10000` | Firefox backend only. How long a second process waits for a live holder to release Firefox's one BiDi session before returning the distinguishable "held by a live process" error. See "Firefox" below. |
 
 ## Progressive disclosure
 
-By default the MCP server starts on the `core` profile: 12 everyday tools (`list_pages`, `new_page`, `close_page`, `select_page`, `navigate_page`, `wait_for`, `take_snapshot`, `click`, `fill`, `type_text`, `evaluate_script`, `take_screenshot`) plus two always-listed meta-tools, `browser_tools` and `describe_tool`. The other 33 tools stay hidden inside 12 activatable groups (`input`, `cookies`, `network`, `console`, `mocking`, `emulation`, `performance`, `recording`, `leases`, `permissions`, `dialogs`, `downloads`) until one `browser_tools` call reveals them. `CDP_TOOL_PROFILE=full` in the server's env restores 1.x behavior: everything advertised at startup.
+The MCP server publishes **one complete, deterministic, cacheable `tools/list`**: `describe_tool` first, then every tool the selected browser can actually run whose group the startup profile advertises, in manifest order. It is computed once at startup and frozen — byte-identical on every call, on every connection, and unchangeable by anything a client does mid-session — and on a 2026-era connection it carries cache hints (`ttlMs: 3600000`, `cacheScope: "public"`) so a client can hold it for an hour instead of re-fetching. `capabilities.tools.listChanged` is `false`: nothing will ever notify, because nothing ever changes.
 
-The default listing costs under 2.5k tokens and the full profile about 8.5k, down from about 20.2k in 1.x (−88% and −58%). Tool names, parameters, and schema shapes are unchanged; only what a client sees at discovery time moves.
+That shape is deliberate. The MCP **2026-07-28** revision puts lazy discovery on the *host* side — the client runs its own catalog → inspect → execute funnel across the servers it has connected — and a server cooperates by publishing a complete, deterministic, cacheable list rather than by mutating its own. The revision makes it a MUST that a server's tool set not change as a side effect of other requests on the connection. See [Build an MCP server](https://modelcontextprotocol.io/docs/2026-07-28/develop/build-server) and [Client best practices](https://modelcontextprotocol.io/docs/2026-07-28/develop/clients/client-best-practices); the latter also notes that adding or removing tool definitions mid-conversation invalidates the host's prompt cache — which a list that never changes never does. 2.0.0's `browser_tools` runtime activation toggle was exactly that anti-pattern and is **removed in 2.1**: calling it now returns `unknown tool: browser_tools`.
 
-`browser_tools` drives the disclosure; `describe_tool` serves the full docs:
+**`describe_tool` is the inspect layer.** The listing carries terse one-liners; the full description and per-parameter docs load on demand, for *any* tool — listed or not:
 
 ```json
-{"tool": "browser_tools", "arguments": {"action": "list_groups"}}
-{"tool": "browser_tools", "arguments": {"action": "activate", "group": "mocking"}}
 {"tool": "describe_tool", "arguments": {"name": "wait_for_download"}}
+{"tool": "describe_tool", "arguments": {}}
 ```
 
-Every `activate`/`deactivate`/`set_profile` that changes the listing fires `notifications/tools/list_changed` (the server declares `listChanged: true`), so a compliant client re-fetches `tools/list` and sees the new surface. Clients that cache their tool list should honor that notification rather than keep serving the stale one.
+With no `name` it returns the grouped catalog of everything this server can run. The whole 45-tool surface costs 1,141 characters:
+
+```
+cdp-toolkit 2.1.0 · browser=chrome · 45 tools available, 46 in tools/list (CDP_TOOL_PROFILE=full)
+[listed] core (12): list_pages, new_page, close_page, select_page, navigate_page, wait_for, take_snapshot, click, fill, type_text, evaluate_script, take_screenshot
+[listed] input (7): hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file
+[listed] cookies (3): list_cookies, set_cookie, delete_cookies
+[listed] network (2): list_network_requests, get_network_request
+[listed] console (2): list_console_messages, get_console_message
+[listed] mocking (3): mock_request, list_mocks, clear_mocks
+[listed] emulation (2): emulate, resize_page
+[listed] performance (6): performance_start_trace, performance_stop_trace, performance_analyze_insight, performance_trace, take_heapsnapshot, lighthouse_audit
+[listed] recording (2): start_screen_recording, stop_screen_recording
+[listed] leases (3): claim_page, release_page, list_leases
+[listed] permissions (1): grant_permissions
+[listed] dialogs (1): handle_dialog
+[listed] downloads (1): wait_for_download
+Unlisted tools are callable by name; describe_tool {name} documents any of them.
+```
+
+Under a narrower profile the groups it leaves out read `[hidden]` instead of `[listed]`, and the header's second count drops accordingly.
+
+**`CDP_TOOL_PROFILE` is the only filter, and it is startup-only** — set once by whoever configures the server, then fixed for the life of the process. Measured over raw stdio (bytes = compact JSON of the `tools` array, tokens ≈ bytes ÷ 4):
+
+| `CDP_TOOL_PROFILE` | entries in `tools/list` | bytes | ≈ tokens |
+|---|---|---|---|
+| unset / `full` — the default | 46 | 33,886 | ≈8,471 |
+| `core` | 13 | 9,066 | ≈2,266 |
+| `core,network,console` | 17 | 11,893 | ≈2,973 |
+| `full` under `CDP_BROWSER=firefox` | 35 | 26,533 | ≈6,633 |
+
+For comparison, 1.x advertised 45 tools with full prose at roughly 20,200 tokens. So the default listing is **−58% vs 1.x**, and `core` is **−89%**.
+
+The default flipped from `core` (2.0.0) to `full` in 2.1 for three reasons: the standard puts discovery on the host, and a host that defers schemas — Claude Code lists MCP tool *names* and loads schemas on demand — pays little for a complete list; consumers that hold per-tool allowlists or per-tool interception keyed on the tool *name* for non-core tools (the console and network readers, `performance_analyze_insight`) were silently broken by a `core` default, because those tools were simply absent from `tools/list`; and a list that never changes never invalidates the host's prompt cache. Keep `CDP_TOOL_PROFILE=core` if your client eagerly loads every schema — that is where the ≈2.3k-token surface is worth the round trips.
 
 Three rules worth knowing:
 
-- **Hidden does not mean blocked.** Only discovery is gated. `tools/call` checks backend availability, not group membership, so an agent that names a hidden-but-available tool still executes it; only a tool the selected browser cannot run at all is refused by name.
-- **`describe_tool` works for any tool by name, hidden ones included** — the full description and per-parameter docs behind the terse one-liner `tools/list` now carries.
-- **Meta-tools are MCP-only.** Profiles are an MCP-server concept: `cdp browser_tools` fails with `unknown tool`, and the CLI keeps exposing all 45 tools no matter how `CDP_TOOL_PROFILE` is set.
+- **Unlisted does not mean blocked.** Only discovery is filtered. `tools/call` checks backend availability, not group membership, so an agent that names an unlisted-but-available tool still executes it; only a tool the selected browser cannot run at all is refused by name.
+- **`describe_tool` works for any tool by name, unlisted ones included** — the full description and per-parameter docs behind the terse one-liner `tools/list` carries.
+- **Profiles and `describe_tool` are MCP-only.** They are MCP-server concepts: `cdp describe_tool` fails with `unknown tool 'describe_tool'`, and the CLI keeps exposing all 45 tools no matter how `CDP_TOOL_PROFILE` is set.
+
+### MCP protocol eras
+
+The server serves **both** eras off the same stdio transport, and the era is pinned per connection by how the client opens:
+
+- A modern client opens with **`server/discover`** and gets `protocolVersion` `2026-07-28`, `resultType: "complete"`, the `_meta['io.modelcontextprotocol/serverInfo']` envelope, and the `ttlMs`/`cacheScope` cache hints on both `server/discover` and `tools/list`.
+- A 2025-era client opens with **`initialize`** and gets `protocolVersion` `2025-11-25`, exactly as before — this upgrade is invisible to it.
+
+Measured 2026-09-01: Claude Code 2.1.258 and Codex CLI 0.147.0 both connect and both pin the **legacy** era — their binaries carry the 2026-07-28 client strings, but neither opens with `server/discover` by default, and the MCP SDK's own `Client` behaves the same unless it opts in. So serving both eras is load-bearing, not courtesy, and today the `ttlMs`/`cacheScope` hints reach only clients that ask for the modern era. The static listing pays off on either one — no mid-session tool churn, and no prompt-cache invalidation.
 
 ## Firefox (WebDriver BiDi)
 
@@ -327,7 +368,7 @@ This coordinates and recovers **around** Firefox's one-session limit; it does no
 
 **Attaching is not relaunching.** The one thing that is genuinely impossible is handing a debug port to an *already-running* Firefox process after the fact: the `--remote-debugging-port` flag only takes effect on a process's original launch, so relaunching the `firefox` binary against a running instance hands off to it and exits silently, opening no port (verified against Firefox 153.0.3). That is a real, narrow limitation of the Firefox binary itself. It is not the same claim as "Firefox cannot be attached to" — a Firefox that was launched *with* the debug port open, whether by this toolkit or by your own hand, exposes a plain BiDi endpoint that any number of fresh clients can connect to later, which is exactly what `--connect`/`CDP_FIREFOX_ENDPOINT` does.
 
-**Tool availability is filtered per backend**, not per call: `tools/list` (MCP) and `--list`/`--capabilities` (CLI) only ever advertise a tool the selected browser can actually run. A tool is never listed and then thrown from at call time. On the MCP server a second filter composes on top: a tool is listed only when the backend can run it *and* its group is active — backend availability first, profile second (see [Progressive disclosure](#progressive-disclosure)). Under Firefox, six capability areas are absent because Firefox 153's BiDi implementation has no equivalent domain:
+**Tool availability is filtered per backend**, not per call: `tools/list` (MCP) and `--list`/`--capabilities` (CLI) only ever advertise a tool the selected browser can actually run. A tool is never listed and then thrown from at call time. On the MCP server a second filter composes on top: a tool is listed only when the backend can run it *and* its group is in the startup profile — backend availability first, `CDP_TOOL_PROFILE` second (see [Progressive disclosure](#progressive-disclosure)). Under Firefox, six capability areas are absent because Firefox 153's BiDi implementation has no equivalent domain:
 
 - `performance_start_trace`, `performance_stop_trace`, `performance_analyze_insight`, `performance_trace` (needs `trace.performance`)
 - `take_heapsnapshot` (needs `heap.snapshot`)
@@ -336,7 +377,7 @@ This coordinates and recovers **around** Firefox's one-session limit; it does no
 - `dispatch_mouse` (needs `input.raw`): the raw move/down/up primitive is a direct `Input.dispatchMouseEvent` wrapper with no BiDi analogue.
 - `wait_for_download`, `grant_permissions` (need `browser.downloads` / `browser.permissions`): both drive Chrome's `Browser.*` domain; WebDriver BiDi has no command to redirect a download or pre-grant a permission.
 
-Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), the `claim_page`/`release_page`/`list_leases` lease group, and the new `scroll` tool (Chrome dispatches `Input.dispatchMouseEvent{type:'mouseWheel'}`, Firefox uses BiDi's `wheel` input source — both live-verified), is available under both backends: 34 of the 45 tools. Under the MCP server's default profile only the core subset of those is listed until their groups are activated — the profile filter applies after this backend filter. One asymmetry to know before expecting Chrome-style concurrency: the lease group fences *tabs* on both backends, but Firefox permits only **one BiDi session per browser instance**, so multiple agents under Firefox share and serialize on that single session (coordinated by the cross-process session lease above), not the independent concurrent sessions Chrome's unlimited CDP connections allow — see "Parallel tabs" below.
+Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's `network.addIntercept` covers the same fake-backend use case as Chrome's `Fetch` domain), the `claim_page`/`release_page`/`list_leases` lease group, and the new `scroll` tool (Chrome dispatches `Input.dispatchMouseEvent{type:'mouseWheel'}`, Firefox uses BiDi's `wheel` input source — both live-verified), is available under both backends: 34 of the 45 tools. Under `CDP_BROWSER=firefox` the MCP server's default (`full`) listing is therefore 35 entries — those 34 plus `describe_tool` — and a narrower `CDP_TOOL_PROFILE` trims it further, the profile filter applying after this backend filter. One asymmetry to know before expecting Chrome-style concurrency: the lease group fences *tabs* on both backends, but Firefox permits only **one BiDi session per browser instance**, so multiple agents under Firefox share and serialize on that single session (coordinated by the cross-process session lease above), not the independent concurrent sessions Chrome's unlimited CDP connections allow — see "Parallel tabs" below.
 
 **Honest capability gaps, not oversold parity:**
 
@@ -351,7 +392,7 @@ Everything else, including `mock_request`/`list_mocks`/`clear_mocks` (Firefox's 
 
 ## The tools (29 parity + 16 superset = 45)
 
-This table is the **full-profile view** — all 45 tools, which is what `cdp --list` and `CDP_TOOL_PROFILE=full` show. On the MCP server's default `core` profile only 12 of them are listed at startup; the rest sit in 12 activatable groups: `input` (7: hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file), `cookies` (3: list/set/delete_cookies), `network` (2: list/get_network_request), `console` (2: list/get_console_message), `mocking` (3: mock_request, list_mocks, clear_mocks), `emulation` (2: emulate, resize_page), `performance` (6: the four trace tools, take_heapsnapshot, lighthouse_audit), `recording` (2: start/stop_screen_recording), `leases` (3: claim_page, release_page, list_leases), `permissions` (1: grant_permissions), `dialogs` (1: handle_dialog), `downloads` (1: wait_for_download). See [Progressive disclosure](#progressive-disclosure).
+This table is the **full-profile view** — all 45 tools, which is what `cdp --list` and the MCP server's default listing (`CDP_TOOL_PROFILE=full`) both show. They are partitioned into 13 static profile groups: `core` (12: list_pages, new_page, close_page, select_page, navigate_page, wait_for, take_snapshot, click, fill, type_text, evaluate_script, take_screenshot), `input` (7: hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file), `cookies` (3: list/set/delete_cookies), `network` (2: list/get_network_request), `console` (2: list/get_console_message), `mocking` (3: mock_request, list_mocks, clear_mocks), `emulation` (2: emulate, resize_page), `performance` (6: the four trace tools, take_heapsnapshot, lighthouse_audit), `recording` (2: start/stop_screen_recording), `leases` (3: claim_page, release_page, list_leases), `permissions` (1: grant_permissions), `dialogs` (1: handle_dialog), `downloads` (1: wait_for_download). `CDP_TOOL_PROFILE=core` narrows the MCP listing to the first group; any group it leaves out stays callable by name. See [Progressive disclosure](#progressive-disclosure).
 
 The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 16 superset tools (`performance_trace`, the `list_cookies`/`set_cookie`/`delete_cookies` cookie group, the `mock_request`/`list_mocks`/`clear_mocks` group, the `claim_page`/`release_page`/`list_leases` lease group, the `start_screen_recording`/`stop_screen_recording` screen-recording pair, `scroll`, `dispatch_mouse`, `wait_for_download`, and `grant_permissions`) are toolkit additions. Each row notes the underlying CDP method(s) and the precise parity gaps.
 
@@ -397,7 +438,7 @@ The 29 parity tools are 1:1 with `chrome-devtools-mcp`; the 16 superset tools (`
 | `mock_request` *(superset)* | `Fetch.*` (+ `Page.reload`) | **A fake backend.** Registers a rule on a target's persistent session: fulfill with a canned response, fail, or continue (with optional `delayMs`/`failRate`). Persists across reloads until `clear_mocks`. Request-stage only. Cached requests aren't intercepted (use `reload:true`). |
 | `list_mocks` *(superset)* | `Runtime.evaluate` (liveness probe) | Lists active mock sessions with rules + hit counts; prunes sessions whose tab closed. |
 | `clear_mocks` *(superset)* | `Fetch.disable` | Tears down the resolved target's mock session (or all with `all:true`). |
-| `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens a fresh tab and claims it (no `target`/`targetId`), or takes over a tab that is already open (`target`, any selector, or the exact-id `targetId`) and returns an opaque lease token plus `opened` (true only when this call created the tab). Never steals a tab another live process holds. Also returns `humanActiveMs` (ms since input this server did not dispatch; `null` means no data, never "no human") and, on a takeover of a tab a human used within the last 30s, a `contention` warning — the claim is never refused for it. MCP only; the CLI refuses it. The `browser_tools`/`describe_tool` meta-tools are likewise MCP-only. |
+| `claim_page` *(superset)* | `Target.createTarget` + lease file | Opens a fresh tab and claims it (no `target`/`targetId`), or takes over a tab that is already open (`target`, any selector, or the exact-id `targetId`) and returns an opaque lease token plus `opened` (true only when this call created the tab). Never steals a tab another live process holds. Also returns `humanActiveMs` (ms since input this server did not dispatch; `null` means no data, never "no human") and, on a takeover of a tab a human used within the last 30s, a `contention` warning — the claim is never refused for it. MCP only; the CLI refuses it. The `describe_tool` meta-tool is likewise MCP-only. |
 | `release_page` *(superset)* | lease file | Gives a lease back via `lease` (the token) or `target` (a selector, for a lease the gate auto-acquired and so never handed out a token for). Idempotent. Closes the tab by default when this toolkit's creation ledger says it opened it; leaves a merely-claimed tab open. Override either way with `close`. |
 | `list_leases` *(superset)* | lease file | Who holds what, with pid liveness and reclaimability, plus computed `idleMs`/`expiresAt` and, where the tab's beacon answers, `humanActiveMs` (absent, not null, when there's no answer). Needs no token; never returns the nonce. A lease file that could not be read or parsed is reported as an `unreadable` row instead of being skipped (with `idleMs`/`expiresAt` omitted). Under `CDP_REQUIRE_LEASE` also reaps abandoned agent tabs, reporting closures in an additive `reaped` array. |
 | `wait_for_download` *(superset)* | `Browser.setDownloadBehavior` + `Browser.downloadWillBegin`/`downloadProgress` on a standing browser-endpoint connection | Waits for a download to finish and returns it as a real file on disk: `{path,suggestedFilename,bytes,url,target}`. **Ordering rule, not optional:** call `wait_for_download{arm:true}` *before* the click that starts the download, then click, then call `wait_for_download` again to collect it — arming this late is not a preference, it's because Chrome reverts the download-behavior override the instant the arming client disconnects, and denies an unarmed download outright. **Browser-global side effect:** while armed, *every* download in the browser is redirected into the toolkit's downloads directory. **MCP-server only:** the arm lives on a connection this server process holds open; the one-shot CLI's connection dies with the process, so nothing is captured there. Chrome-only (`browser.downloads`). |
@@ -555,9 +596,10 @@ src/
   types.ts           # Target, TargetSelector, Uid, CDP envelopes
   index.ts           # TOOLS registry (45) + re-exported client primitives
   cli.ts             # the Bun CLI
-  mcp.ts             # stdio MCP server (exposes TOOLS via @modelcontextprotocol/server)
+  mcp.ts             # stdio MCP server, dual-era (serveStdio): static cacheable tools/list
+  version.ts         # the VERSION constant, single source of truth with package.json
   manifest.ts        # JSON Schemas advertised by the MCP server (one per tool)
-  toolGroups.ts      # tool-to-group map + core/full profiles (progressive disclosure)
+  toolGroups.ts      # tool-to-group map + CDP_TOOL_PROFILE resolution (startup-only filter)
   toolDocs.ts        # full per-tool prose served on demand by describe_tool
   leases.ts          # lease records, staleness, reclamation, assertLeaseOk, CDP_REQUIRE_LEASE
   leases-tools.ts    # claim_page / release_page / list_leases

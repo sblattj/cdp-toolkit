@@ -47,3 +47,35 @@ export const PROFILES = {
 } as const;
 
 export type ProfileName = keyof typeof PROFILES;
+
+/**
+ * Resolve CDP_TOOL_PROFILE into the set of groups whose tools tools/list advertises.
+ *
+ * The profile is a STARTUP filter, read once: the listing it selects is fixed for the
+ * life of the process (2.1 dropped the runtime `browser_tools` toggle, so the tool set
+ * can never change as a side effect of another request — a spec MUST). Accepted
+ * spellings: unset/empty or "full" (everything), "core" (the lean everyday set), or a
+ * comma-separated list of group names. `core` is always included, so a list can never
+ * strand the basics.
+ */
+export function resolveProfile(spec: string | undefined): { groups: ReadonlySet<ToolGroup>; label: string } {
+  const all = (): { groups: ReadonlySet<ToolGroup>; label: string } => ({ groups: new Set(TOOL_GROUPS), label: "full" });
+  const raw = (spec ?? "").trim();
+  if (raw === "" || raw.toLowerCase() === "full") return all();
+
+  const tokens = raw.split(",").map((t) => t.trim().toLowerCase()).filter((t) => t !== "");
+  if (tokens.includes("full")) return all();
+
+  const known = new Set<string>(TOOL_GROUPS);
+  const picked = new Set<ToolGroup>(["core"]);
+  for (const token of tokens) {
+    if (!known.has(token)) {
+      throw new Error(`CDP_TOOL_PROFILE: unknown tool group '${token}'. Known: full, core, ${TOOL_GROUPS.filter((g) => g !== "core").join(", ")}`);
+    }
+    picked.add(token as ToolGroup);
+  }
+  if (picked.size === TOOL_GROUPS.length) return all();
+  // Canonical label: TOOL_GROUPS order, not the order the caller typed, so the ready
+  // line and the catalog header read the same for every equivalent spelling.
+  return { groups: picked, label: TOOL_GROUPS.filter((g) => picked.has(g)).join(",") };
+}
