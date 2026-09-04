@@ -29,6 +29,9 @@
  * function through script.callFunction and PARSE its text back into SnapshotNode[], which is
  * genuinely new integration work, not a reimplementation of the walker itself.
  */
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import type { TargetSelector } from "../types.ts";
 import {
   UID_STAMP_ATTR, isDriverError, interpolatePoints, clearViewportRecord, readViewportRecord, renderRestoreFailureNote, writeViewportRecord,
@@ -40,15 +43,16 @@ import {
   type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
   type BandConsumer, type CaptureDelivery,
 } from "../driver.ts";
-import { assertLeaseOk, defaultLabel } from "../leases.ts";
+import { assertLeaseOk, defaultLabel, isPidAlive } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "../workers.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSessionUrl } from "./client.ts";
 import {
-  acquireSessionSlot, releaseSessionSlot, SessionSlotBusyError,
-  type AcquireResult, type SessionSlotHandle,
+  acquireSessionSlot, advertiseMux, muxDaemonLogFile, readSessionSlot, releaseSessionSlot, sessionWaitMs, SessionSlotBusyError,
+  type AcquireResult, type SessionSlotHandle, type SessionSlotRecord,
 } from "./session-lease.ts";
+import { startBidiMux, type BidiMux } from "./mux.ts";
 import { defaultMarionettePort, forceClearOrphanSession } from "./marionette.ts";
 import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
@@ -346,12 +350,150 @@ const connections = new Map<string, BidiConnection>();
 // contending with our own pid. Populated in getConnection's create body; cleared on dispose() and
 // on a terminal dial failure that never established a session.
 const slotHandles = new Map<string, SessionSlotHandle>();
+// The BiDi multiplexer WE host, keyed by the FIREFOX endpoint whose real session it fronts (see
+// ./mux.ts). Populated by getConnection's holder path right after the real connection is cached;
+// closed first thing in dispose(), so joiners see their sockets drop while we still hold the slot.
+// Absent when this process is not a holder, when startBidiMux failed (the holder just runs alone),
+// or under CDP_FIREFOX_MUX=off.
+const muxes = new Map<string, BidiMux>();
+// Firefox endpoints this process reached THROUGH another process's mux rather than by owning the
+// session. Keyed by the FIREFOX endpoint (the connections map's key) even though the socket really
+// points at the holder's loopback mux, so page()/the beacon map/dispose all stay keyed on one
+// identity. Membership means exactly two things: we hold NO session slot for this endpoint (never
+// release one), and a dead socket here must NOT take the `owned` re-dial branch — it must re-run
+// acquire, which either joins the new holder or wins the slot outright.
+const joined = new Set<string>();
 // In-flight create dedup, keyed by endpoint. Two page() acquisitions can both cache-miss and call
 // getConnection concurrently; without this both would run the acquire+dial body, and the second
 // would either contend for the slot we just took (same pid → wait then SessionSlotBusyError against
 // ourselves) or open a second BiDi session. The first caller stores its create-promise here and
 // every other awaits it; cleared in a finally once the create settles.
 const connecting = new Map<string, Promise<BidiConnection>>();
+// Per-endpoint SESSION EPOCH: how many times THIS process has established a connection to this
+// endpoint (as a holder, or through a mux). Firefox regenerates every browsing-context id whenever
+// its single BiDi session is re-created, so any id this process handed out before an epoch bump is
+// dead — measured on Firefox 153.0.3: after session.end + session.new the tab survives at the same
+// url but browsingContext.getTree reports a NEW context id. The epoch is what lets a
+// "no such frame"/"no context matching" failure say WHY instead of reading like a typo. We track it
+// per ENDPOINT, not per id (the brief's permitted simplification): the hint is appended whenever
+// epoch > 1, which can over-attach the hint to an id that was simply closed, and never under-attach.
+const sessionEpochs = new Map<string, number>();
+// Reverse lookup so resolveContext (which only has a BidiConnection) can find its endpoint's epoch.
+const connEndpoints = new WeakMap<BidiConnection, string>();
+
+function bumpEpoch(endpoint: string, conn: BidiConnection): void {
+  sessionEpochs.set(endpoint, (sessionEpochs.get(endpoint) ?? 0) + 1);
+  connEndpoints.set(conn, endpoint);
+}
+
+/** Appended to a no-such-target error once this process has re-connected at least once. */
+const STALE_ID_HINT =
+  " — the Firefox BiDi session was re-established after its previous holder went away, and Firefox " +
+  "assigns new context ids per session — re-resolve the tab with list_pages (url:/title: selectors) " +
+  "and claim it again";
+
+function withStaleIdHint(conn: BidiConnection, err: unknown): unknown {
+  const endpoint = connEndpoints.get(conn);
+  if (endpoint === undefined) return err;
+  if ((sessionEpochs.get(endpoint) ?? 0) <= 1) return err;
+  const e = err as DriverError;
+  if (!isDriverError(e) || e.code !== "no-such-target") return err;
+  if (e.message.includes("re-established")) return err;
+  e.message += STALE_ID_HINT;
+  return e;
+}
+
+/**
+ * Which mux strategy this connection uses. `off` is the pre-mux behavior (no mux hosted,
+ * an advertised one ignored). `host` hosts the mux IN THIS PROCESS — correct for LAUNCH mode
+ * (a private Firefox this toolkit owns, which dies with us anyway) and an opt-in for anyone who
+ * does not want a stray process. Unset/`daemon` in ATTACH mode is the DEFAULT and the whole point
+ * of the daemon: the real Firefox session must not live in a client process, because when that
+ * client exits — even cleanly — Firefox regenerates every context id and every other client's
+ * cached ids, tab leases and origin records go stale.
+ */
+type MuxMode = "off" | "host" | "daemon";
+function muxMode(attached: boolean): MuxMode {
+  const raw = process.env.CDP_FIREFOX_MUX;
+  if (raw === "off") return "off";
+  if (raw === "host") return "host";
+  if (raw === "daemon") return "daemon";
+  return attached ? "daemon" : "host";
+}
+
+/** Absolute path of the daemon entry point, or undefined if we cannot find one to spawn.
+ *  Order: explicit env override (tests), the source tree (`bun run src/…`), then the built
+ *  bundle. `import.meta.url` inside dist is dist/{mcp,cli,index}.js, so the sibling is
+ *  dist/bidi/mux-daemon.js (scripts/build.ts roots entrypoints at src/). */
+function resolveDaemonScript(): string | undefined {
+  const override = process.env.CDP_FIREFOX_MUX_DAEMON;
+  if (override) return override;
+  for (const rel of ["./mux-daemon.ts", "./mux-daemon.js", "./bidi/mux-daemon.js", "../bidi/mux-daemon.js"]) {
+    let p: string;
+    try {
+      p = fileURLToPath(new URL(rel, import.meta.url));
+    } catch {
+      continue;
+    }
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// The label stamped on a slot record WE take. defaultLabel() is "pid-<pid>", which is right for an
+// MCP server but useless for the daemon, whose record a human reads when they wonder what process
+// is holding their browser. hostFirefoxMux sets it to "mux-daemon(spawned by pid N)".
+let slotLabelOverride: string | undefined;
+
+/** A LIVE holder advertising a mux, or undefined. */
+async function liveAdvertisedHolder(endpoint: string): Promise<{ endpoint: string; holder: SessionSlotRecord } | undefined> {
+  const rec = await readSessionSlot(endpoint).catch(() => undefined);
+  if (!rec || !rec.muxEndpoint || !isPidAlive(rec.pid)) return undefined;
+  return { endpoint: rec.muxEndpoint, holder: rec };
+}
+
+/**
+ * DAEMON MODE: get a mux endpoint to join WITHOUT ever becoming the holder in this process.
+ * Returns the advertised endpoint, or undefined meaning "no daemon could be brought up — fall
+ * back to the in-process host path", which is what turns a genuinely unavailable browser back
+ * into the existing actionable busy/Marionette errors instead of a mystery timeout.
+ * Throws only for the deadline case, which is a real failure with a real diagnostic (the log).
+ */
+async function ensureMuxDaemon(endpoint: string): Promise<{ endpoint: string; holder: SessionSlotRecord } | undefined> {
+  const already = await liveAdvertisedHolder(endpoint);
+  if (already) return already;
+
+  const script = resolveDaemonScript();
+  if (!script) return undefined; // no daemon to spawn: host it ourselves
+
+  let exited = false;
+  const child = spawn(process.execPath, [script, endpoint, String(process.pid)], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, CDP_FIREFOX_MUX: "host" },
+  });
+  child.once("error", () => { exited = true; });
+  // Fires even on an unref'ed child while WE are alive, which is exactly the fast negative signal
+  // we need: a daemon that refused (busy slot, Marionette missing, dial error) exits non-zero at
+  // once, and we fall back rather than waiting out the deadline.
+  child.once("exit", () => { exited = true; });
+  child.unref();
+
+  const deadline = Date.now() + sessionWaitMs() + 5_000;
+  while (Date.now() < deadline) {
+    const hit = await liveAdvertisedHolder(endpoint);
+    if (hit) return hit;
+    if (exited) return undefined; // daemon gave up: host in-process and surface ITS error
+    await sleep(50);
+  }
+  throw driverError("disconnected",
+    `Firefox's single WebDriver BiDi session on ${endpoint} could not be brought up: a mux daemon was ` +
+    `spawned (${script}) but never advertised a multiplexer within ${sessionWaitMs() + 5_000}ms. ` +
+    `Its diagnostics are in ${muxDaemonLogFile(endpoint)}. Retry, or set CDP_FIREFOX_MUX=host to run ` +
+    `the session in this process instead.`);
+}
 
 /**
  * Release a slot claim we took in THIS getConnection call after a dial that never established a
@@ -396,7 +538,20 @@ function orphanNotClearedError(endpoint: string): DriverError {
 // WebDriver:DeleteSession (which shares Firefox's one session slot) force-clears the orphan WITHOUT
 // killing the user's browser, and we retry. Marionette recovery is best-effort and degrades to a
 // clear, actionable error when Firefox has no --marionette port (the launch-mode norm).
-async function getConnection(endpoint: string, timeoutMs?: number): Promise<BidiConnection> {
+//
+// AND THE THIRD OUTCOME, THE MUX JOIN. "Wait and retry" was the honest answer while one process
+// could only ever hand the session to the next one. It no longer is: the holder now hosts a
+// loopback BiDi multiplexer over its one real session (./mux.ts) and advertises it in the slot
+// record, so when acquire reports a LIVE holder WITH a muxEndpoint we do not wait at all — we dial
+// the holder's mux with the same connectBidiSessionUrl and the same dialOpts we would use against
+// Firefox, and cache the resulting socket under the FIREFOX endpoint key. Downstream, a joined
+// connection is indistinguishable from a real one; the only bookkeeping is the `joined` set, which
+// records that we hold NO slot (so dispose releases nothing and ends nothing) and that a dead
+// socket here must re-run acquire rather than take the `owned` re-dial shortcut. A live holder with
+// NO mux is still plain busy, exactly as before. On the holder side, the only addition is that
+// after the real connection is cached we start a mux and advertise it — best-effort, because a
+// holder that fails to start one is simply a holder that serves nobody but itself.
+async function getConnection(endpoint: string, timeoutMs?: number, attached = false): Promise<BidiConnection> {
   const existing = connections.get(endpoint);
   if (existing && existing.isOpen) { existing.retain(); return existing; }
   // A cached connection whose socket has died (ws.onclose fired) can only reject every
@@ -421,20 +576,63 @@ async function getConnection(endpoint: string, timeoutMs?: number): Promise<Bidi
 
   const create = (async (): Promise<BidiConnection> => {
     const mport = defaultMarionettePort();
+    // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
+    // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
+    // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
+    // next handleUserPrompt call). Setting "ignore" here is what makes handleDialog() able to see
+    // and answer a live prompt at all. Declared before the acquire so the JOIN path can dial the
+    // holder's mux with byte-identical options — a joined connection must be indistinguishable.
+    const dialOpts = {
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" as const } } },
+    };
+
     // Do we ALREADY hold this endpoint's slot? (e.g. our previous socket died without dispose, so
     // the eviction above kept the claim.) If so, re-dial WITHOUT re-acquiring: acquireSessionSlot
     // against our own live pid would just poll to its wait ceiling and then throw
     // SessionSlotBusyError against ourselves. We already own Firefox's slot; only the socket needs
     // re-establishing (and if Firefox stranded our old session, the re-dial's retry path clears it).
-    const owned = slotHandles.has(endpoint);
-    if (!owned) {
+    let owned = slotHandles.has(endpoint);
+    // ...UNLESS the dead socket we just evicted was a JOINED one. A joiner owns no slot and no
+    // session, so the `owned` shortcut would re-dial Firefox directly against a session someone
+    // else holds. Drop the join marker and run the full acquire, which either joins whoever holds
+    // the slot NOW (the old holder recovered, or a new one took over) or wins the slot outright.
+    if (joined.has(endpoint)) { joined.delete(endpoint); owned = false; }
+
+    // DAEMON MODE (the default in ATTACH mode). Never become the holder in-process: either join a
+    // daemon that already advertises a mux, or spawn one and join it as soon as it does. The real
+    // session then outlives every client, which is the entire point — see ensureMuxDaemon.
+    // A daemon that refuses returns undefined and we fall through to the host path below, so an
+    // unavailable browser still produces the existing actionable busy/Marionette errors.
+    if (!owned && muxMode(attached) === "daemon") {
+      const target = await ensureMuxDaemon(endpoint);
+      if (target) {
+        try {
+          const joinedConn = await connectBidiSessionUrl(target.endpoint, dialOpts); // already retained once
+          connections.set(endpoint, joinedConn);
+          joined.add(endpoint);
+          bumpEpoch(endpoint, joinedConn);
+          return joinedConn;
+        } catch (e) {
+          // The daemon died between advertising and our dial. Fall through to the ordinary
+          // acquire loop, which steals the orphan record and re-runs the whole flow.
+          console.error(`[cdp-toolkit] firefox mux daemon at ${target.endpoint} could not be dialed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    // The acquire runs in a loop only so the JOIN path can retry itself exactly ONCE (below);
+    // every other path breaks out on its first pass.
+    for (let attempt = 0; ; attempt++) {
+      if (owned) break;
       // Cross-process coordination (session-lease.ts): take the endpoint's single BiDi session slot,
-      // classifying any current holder. A LIVE holder (another agent legitimately driving this
-      // Firefox) throws SessionSlotBusyError; a DEAD holder's orphan is stolen and surfaced as
-      // staleHolder so we can force-clear Firefox's stranded session before we call session.new.
+      // classifying any current holder. A LIVE holder that ADVERTISES A MUX is JOINED rather than
+      // waited on; a LIVE holder without one still throws SessionSlotBusyError exactly as before; a
+      // DEAD holder's orphan is stolen and surfaced as staleHolder so we can force-clear Firefox's
+      // stranded session before we call session.new.
       let acq: AcquireResult;
       try {
-        acq = await acquireSessionSlot(endpoint, { label: defaultLabel(), marionettePort: mport });
+        acq = await acquireSessionSlot(endpoint, { label: slotLabelOverride ?? defaultLabel(), marionettePort: mport });
       } catch (e) {
         if (e instanceof SessionSlotBusyError) {
           // Issue #5: a distinguishable LIVE holder, NOT a wedge. Map to an actionable disconnected
@@ -448,7 +646,35 @@ async function getConnection(endpoint: string, timeoutMs?: number): Promise<Bidi
         }
         throw e;
       }
-      slotHandles.set(endpoint, acq.handle);
+
+      if (acq.joinMux) {
+        // JOIN: the live holder fronts its one real session with a loopback BiDi mux, so we dial
+        // THAT instead of Firefox. We take no slot and open no real session — but we cache the
+        // socket under the FIREFOX endpoint key, so page(), the beacon map and dispose() are all
+        // keyed on one identity and neither knows nor cares that the bytes go via the holder.
+        const { endpoint: muxEndpoint, holder } = acq.joinMux;
+        try {
+          const joinedConn = await connectBidiSessionUrl(muxEndpoint, dialOpts); // already retained once
+          connections.set(endpoint, joinedConn);
+          joined.add(endpoint);
+          bumpEpoch(endpoint, joinedConn);
+          return joinedConn;
+        } catch (e) {
+          // A holder can die between advertising and our dial, leaving a stale muxEndpoint in a
+          // record whose pid is about to read dead. Re-run the WHOLE acquire once: we will either
+          // steal that orphan and become the holder ourselves, or join whoever took over.
+          if (attempt === 0) continue;
+          const who = `'${holder.label}' (pid ${holder.pid})`;
+          throw driverError("disconnected",
+            `Firefox's single WebDriver BiDi session on ${endpoint} is held by a LIVE process ${who}, ` +
+            `which advertises a BiDi multiplexer at ${muxEndpoint}, but that multiplexer could not be ` +
+            `dialed (${e instanceof Error ? e.message : String(e)}). The holder is most likely shutting ` +
+            `down; retry in a moment, or point this server at a different endpoint/browser.`);
+        }
+      }
+
+      // We took the slot ourselves: the ordinary HOLDER path, unchanged.
+      if (acq.handle) slotHandles.set(endpoint, acq.handle);
       if (acq.staleHolder) {
         // Issue #4 auto-recovery: we stole a DEAD holder's lease, but Firefox itself may still hold
         // that holder's orphaned BiDi session. Force-clear it over Marionette BEFORE dialing, or
@@ -457,17 +683,9 @@ async function getConnection(endpoint: string, timeoutMs?: number): Promise<Bidi
         // still dial, and the re-dial retry path below surfaces a clear error if the orphan persists.
         await forceClearOrphanSession(acq.staleHolder.marionettePort ?? mport);
       }
+      break;
     }
 
-    // Firefox 153's default unhandledPromptBehavior is "dismiss": a page-blocking alert()/confirm()
-    // gets auto-dismissed before handleDialog() ever runs, and Firefox's own userPromptOpened event
-    // reports handler:"dismiss" on it (verified: a bare session.new left "no such alert" on the very
-    // next handleUserPrompt call). Setting "ignore" here is what makes handleDialog() able to see
-    // and answer a live prompt at all.
-    const dialOpts = {
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: "ignore" as const } } },
-    };
     let conn: BidiConnection;
     try {
       conn = await connectBidiSessionUrl(endpoint, dialOpts); // already retained once
@@ -498,6 +716,22 @@ async function getConnection(endpoint: string, timeoutMs?: number): Promise<Bidi
       }
     }
     connections.set(endpoint, conn);
+    bumpEpoch(endpoint, conn);
+    // We are the HOLDER. Front our one real session with a loopback BiDi mux and advertise it in
+    // the slot record, so any other process that wants this Firefox JOINS us instead of being told
+    // the slot is busy. Strictly additive and strictly best-effort: any failure here leaves a
+    // perfectly good holder that simply serves nobody but itself (exactly pre-mux behavior), so it
+    // is logged to stderr and swallowed rather than failing the connection the caller asked for.
+    if (muxMode(attached) !== "off") {
+      try {
+        const mux = await startBidiMux(conn);
+        muxes.set(endpoint, mux);
+        const h = slotHandles.get(endpoint);
+        if (h) await advertiseMux(h, mux.endpoint);
+      } catch (e) {
+        console.error(`[cdp-toolkit] firefox mux not started: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     return conn;
   })();
 
@@ -553,7 +787,10 @@ async function resolveContext(
 ): Promise<BrowsingContextInfo> {
   const { contexts } = await conn.send("browsingContext.getTree", {}).catch((e) => { throw mapBidiError(e); });
   if (!contexts.length) throw driverError("no-such-target", "no browsing contexts available");
-  const hit = await pickContext(conn, contexts, selector);
+  // A no-such-target here is the exact symptom of Firefox's per-session context-id regeneration
+  // once this process has re-connected at least once, so the error explains it rather than reading
+  // like a typo. The CODE is left untouched (still no-such-target), so caller handling is unchanged.
+  const hit = await pickContext(conn, contexts, selector).catch((e) => { throw withStaleIdHint(conn, e); });
   // liveIds deliberately not passed: hit is by construction a member of contexts, so target-gone
   // could never fire for the context just resolved (see leases.ts's assertLeaseOk callers).
   await assertLeaseOk("firefox", hit.context, { lease: opts.lease, url: hit.url });
@@ -1381,10 +1618,10 @@ class BidiBrowserDriver implements BrowserDriver {
   readonly snapshotFidelity = "dom-heuristic" as const;
   /** `endpoint` is a BiDi ws URL (see getConnection): derived from a port for a launched
    *  Firefox, user-supplied for an attached one. It is this driver's whole identity. */
-  constructor(private readonly endpoint: string, private readonly timeoutMs?: number) {}
+  constructor(private readonly endpoint: string, private readonly timeoutMs?: number, private readonly attached = false) {}
 
   async listPages(): Promise<PageInfo[]> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
       const { contexts } = await conn.send("browsingContext.getTree", {}).catch((e) => { throw mapBidiError(e); });
       return Promise.all(contexts.map((c) => pageInfoOf(conn, c)));
@@ -1393,7 +1630,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async newPage(url?: string): Promise<PageInfo> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
       const { context } = await conn.send("browsingContext.create", { type: "tab" }).catch((e) => { throw mapBidiError(e); });
       // Established fact: navigating the default about:home context to a data: URL is rejected,
@@ -1405,7 +1642,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async closePage(id: string): Promise<{ success: boolean }> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
       await conn.send("browsingContext.close", { context: id }).catch((e) => { throw mapBidiError(e); });
       return { success: true };
@@ -1414,7 +1651,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async activatePage(id: string): Promise<PageInfo> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
       await conn.send("browsingContext.activate", { context: id }).catch((e) => { throw mapBidiError(e); });
       const ctx = await resolveContext(conn, id);
@@ -1424,7 +1661,7 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
   async page(selector: TargetSelector): Promise<PageDriver> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     let ctx: BrowsingContextInfo;
     try {
       ctx = await resolveContext(conn, selector);
@@ -1452,7 +1689,7 @@ class BidiBrowserDriver implements BrowserDriver {
    * an annotation that must never fail real work.
    */
   async installActivityBeacon(contextId: string): Promise<boolean> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs).catch(() => undefined);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached).catch(() => undefined);
     if (!conn) return false;
     try {
       const key = `${this.endpoint}:${contextId}`;
@@ -1479,7 +1716,7 @@ class BidiBrowserDriver implements BrowserDriver {
   /** Read the beacon timestamp for a context, or null when it has none. Gate-free;
    *  see the declaration in ../driver.ts for why that is required here. */
   async readActivityBeacon(contextId: string): Promise<number | null> {
-    const conn = await getConnection(this.endpoint, this.timeoutMs).catch(() => undefined);
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached).catch(() => undefined);
     if (!conn) return null;
     try {
       const res = await conn.send("script.evaluate", {
@@ -1504,15 +1741,34 @@ class BidiBrowserDriver implements BrowserDriver {
     // Drop any in-flight create record defensively: dispose() ends this endpoint's life, so a
     // pending create must not leave a stale promise that a later getConnection would await.
     connecting.delete(this.endpoint);
+    // Close our multiplexer FIRST, before anything can end the real session under it. Joiners see
+    // their sockets close (1001) and start polling the slot — which we still hold at this instant,
+    // so they wait rather than racing us — and by the time we release below, the slot is genuinely
+    // free for one of them to take and become the next holder. Best-effort and idempotent.
+    const mux = muxes.get(this.endpoint);
+    if (mux) {
+      muxes.delete(this.endpoint);
+      await mux.close().catch(() => undefined);
+    }
     const conn = connections.get(this.endpoint);
     if (!conn) {
       // No live connection, but we may still hold the session slot lock (e.g. a create acquired the
       // slot then failed to establish a session on an `owned` re-dial, which leaves the claim). A
       // clean dispose must free it cross-process so the next process is not falsely told we're LIVE.
+      joined.delete(this.endpoint);
       await this.releaseSessionSlotIfHeld();
       return;
     }
     connections.delete(this.endpoint);
+    if (joined.has(this.endpoint)) {
+      // JOINED: this socket points at another process's mux, not at Firefox. We own neither the
+      // real session nor any slot, so there is nothing to end and nothing to release — sending
+      // session.end would only be answered locally by the mux, and releaseSessionSlot would at best
+      // be a no-op. Drop the socket and forget the join. The holder's session, and our tabs, live on.
+      joined.delete(this.endpoint);
+      conn.dispose();
+      return;
+    }
     // Cleanly END the BiDi session so Firefox frees its single session slot for the next
     // attach (a launch-mode Firefox is killed anyway; this matters for attach mode where the
     // user's browser lives on). Verified: closing the socket alone does NOT free the slot, and
@@ -1544,12 +1800,55 @@ export function createFirefoxDriver(port: number, opts?: { timeoutMs?: number })
   return new BidiBrowserDriver(`ws://127.0.0.1:${port}/session`, opts?.timeoutMs);
 }
 
+/**
+ * Become the HOLDER of this endpoint's one Firefox BiDi session and front it with a mux, for the
+ * detached daemon in ./mux-daemon.ts. Deliberately a thin wrapper over getConnection's existing
+ * holder path (slot acquire, dead-holder steal, Marionette orphan force-clear, dial, startBidiMux,
+ * advertiseMux) rather than a second implementation of it — the daemon must behave EXACTLY like
+ * the in-process holder it replaces. Requires CDP_FIREFOX_MUX=host in the environment: without it
+ * getConnection would take the daemon path and spawn another daemon.
+ *
+ * Rejects if the slot is held by someone else (including another daemon that won the race, which
+ * arrives as a JOIN — a daemon must never join, it exits), if the dial fails, or if the mux could
+ * not be started. `dispose` closes the mux, ends the real session, and releases the slot.
+ */
+export async function hostFirefoxMux(endpoint: string, opts: { label?: string } = {}): Promise<{ mux: BidiMux; conn: BidiConnection; dispose(): Promise<void> }> {
+  if (opts.label) slotLabelOverride = opts.label;
+  if (process.env.CDP_FIREFOX_MUX !== "host") {
+    throw new Error("hostFirefoxMux requires CDP_FIREFOX_MUX=host (set it before importing this module)");
+  }
+  const conn = await getConnection(endpoint, undefined, true);
+  if (joined.has(endpoint)) {
+    // Another holder (very likely a racing daemon) owns the session; we joined it. A daemon that
+    // joins would be a second process serving a session it does not own, so refuse and let the
+    // caller exit non-zero. Drop the socket we just opened first.
+    joined.delete(endpoint);
+    connections.delete(endpoint);
+    conn.dispose();
+    throw new Error(`endpoint ${endpoint} is already served by another holder's multiplexer`);
+  }
+  const mux = muxes.get(endpoint);
+  if (!mux) {
+    const driver = new BidiBrowserDriver(endpoint, undefined, true);
+    await driver.dispose().catch(() => undefined);
+    throw new Error(`could not start a BiDi multiplexer for ${endpoint}`);
+  }
+  const driver = new BidiBrowserDriver(endpoint, undefined, true);
+  return {
+    mux,
+    conn,
+    // BidiBrowserDriver.dispose is the ONE teardown that closes the mux first, then session.end,
+    // then releases the slot — reused rather than re-derived so the daemon can never drift from it.
+    dispose: () => driver.dispose(),
+  };
+}
+
 /** Construct the same driver for ATTACH mode: `wsUrl` is the BiDi endpoint of a Firefox the user
  *  started themselves with --remote-debugging-port, already normalized by ../backend.ts's
  *  normalizeBidiEndpoint. This driver NEVER owns that process — dispose() ends the BiDi session and
  *  closes the socket, and nothing anywhere in this path kills a browser it did not launch. */
 export function createFirefoxDriverForEndpoint(wsUrl: string, opts?: { timeoutMs?: number }): BrowserDriver {
-  return new BidiBrowserDriver(wsUrl, opts?.timeoutMs);
+  return new BidiBrowserDriver(wsUrl, opts?.timeoutMs, true);
 }
 // resolveContext is exported for ONE reason: it is the Firefox lease choke
 // point, and a choke point nothing can call directly is a choke point nothing
