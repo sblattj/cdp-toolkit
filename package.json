@@ -80,6 +80,7 @@
     "firefox:smoke": "bun run ./test/firefox-smoke.ts",
     "firefox:attach:smoke": "bun run ./test/firefox-attach-smoke.ts",
     "firefox:coord:smoke": "bun run ./test/firefox-session-coord-smoke.ts",
+    "firefox:multi:smoke": "bun run ./test/firefox-multi-agent-smoke.ts",
     "lease:smoke": "bun run ./test/lease-smoke.ts",
     "staleness:smoke": "bun run ./test/staleness-smoke.ts",
     "input:smoke": "bun run ./test/input-smoke.ts",

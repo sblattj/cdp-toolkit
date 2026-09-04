@@ -19,7 +19,11 @@ import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 rmSync("dist", { recursive: true, force: true });
 
 const result = await Bun.build({
-  entrypoints: ["src/index.ts", "src/cli.ts", "src/mcp.ts"],
+  // src/bidi/mux-daemon.ts is a fourth ENTRY POINT, not a library import: it is spawned as its own
+  // process (`node dist/bidi/mux-daemon.js <endpoint> <pid>`) by src/bidi/driver.ts, so it must exist
+  // as a standalone bundle in dist. Bun roots the outputs at the entrypoints' common ancestor (src/),
+  // so it lands at dist/bidi/mux-daemon.js — the path driver.ts's resolveDaemonScript looks for.
+  entrypoints: ["src/index.ts", "src/cli.ts", "src/mcp.ts", "src/bidi/mux-daemon.ts"],
   outdir: "dist",
   target: "node",
   format: "esm",
@@ -42,4 +46,4 @@ for (const bin of ["dist/cli.js", "dist/mcp.js"]) {
   chmodSync(bin, 0o755);
 }
 
-console.log(`built ${result.outputs.length} files → dist/{index,cli,mcp}.js (node target, MCP SDK external)`);
+console.log(`built ${result.outputs.length} files → dist/{index,cli,mcp}.js + dist/bidi/mux-daemon.js (node target, MCP SDK external)`);

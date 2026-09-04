@@ -35,8 +35,34 @@
  * ATOMICITY. Claims are exclusive creates (writeFile flag "wx"), exactly like
  * ../leases.ts claimLease, so "is the slot free, and if so take it" is atomic
  * against a racing process for free, with no registry lock.
+ *
+ * THE MUX: WHY A LIVE HOLDER IS NO LONGER A DEAD END. Everything above still
+ * holds — one process owns Firefox's single BiDi session — but the holder now
+ * also hosts a loopback BiDi multiplexer (./mux.ts) over that one real session
+ * and ADVERTISES its ws endpoint in this record (`muxEndpoint`). Two consequences
+ * for this module, and nothing else changes:
+ *
+ *  - THE HOLDER advertises via advertiseMux() once its mux is listening. That is
+ *    a rewrite of its OWN record, guarded by the same (pid, createdAt) ownership
+ *    test release uses, and written atomically (tmp + rename) so a concurrent
+ *    reader never sees a half-written record. Advertising is best-effort: a
+ *    refusal (`advertised:false`) means the record is no longer ours and the
+ *    holder simply runs alone.
+ *  - A JOINER DOES NOT WAIT. When acquire finds a LIVE holder that carries a
+ *    muxEndpoint, there is nothing to wait FOR: the slot will not free up (the
+ *    holder is healthy) and it does not need to, because the mux serves that one
+ *    session to as many processes as ask. So acquire returns { joinMux }
+ *    immediately, with NO handle and nothing written to disk — the joiner holds
+ *    no slot and must never release one. The record is re-read on every poll
+ *    iteration, so a holder that took the slot a moment ago and advertises a beat
+ *    later is joined as soon as it does, inside the existing wait window.
+ *
+ * A live holder with NO muxEndpoint (a foreign client, an older cdp-toolkit, or
+ * one running with CDP_FIREFOX_MUX=off) is still plain BUSY and still throws
+ * SessionSlotBusyError at the deadline — exactly today's behavior. CDP_FIREFOX_MUX=off
+ * makes acquire ignore muxEndpoint entirely, which is the opt-out.
  */
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isPidAlive, leaseDir } from "../leases.ts";
 
@@ -55,6 +81,12 @@ export interface SessionSlotRecord {
   createdAt: number;
   /** Optional Marionette control port bound to this Firefox, when known. */
   marionettePort?: number;
+  /**
+   * Loopback ws endpoint of the BiDi multiplexer this holder hosts over the one
+   * real session (see ./mux.ts and the header). Absent means "this holder serves
+   * nobody but itself", which is what every pre-mux client's record looks like.
+   */
+  muxEndpoint?: string;
 }
 
 /**
@@ -68,7 +100,11 @@ export interface SessionSlotHandle {
 }
 
 export interface AcquireResult {
-  handle: SessionSlotHandle;
+  /**
+   * Present iff WE took the slot. Absent on the joinMux path: a joiner owns no
+   * slot, wrote no record, and must never release one.
+   */
+  handle?: SessionSlotHandle;
   /**
    * Set only when we STOLE a dead holder's slot. Its presence tells the caller
    * that Firefox may still believe an orphaned BiDi session is active, so the
@@ -77,6 +113,12 @@ export interface AcquireResult {
    * sessions". Absent on a clean first acquire.
    */
   staleHolder?: SessionSlotRecord;
+  /**
+   * Set instead of `handle` when a LIVE holder advertises a BiDi multiplexer.
+   * The caller dials `endpoint` exactly as it would dial Firefox; `holder` is the
+   * record it came from, for error reporting. Nothing was written to disk.
+   */
+  joinMux?: { endpoint: string; holder: SessionSlotRecord };
 }
 
 export interface AcquireOptions {
@@ -103,6 +145,16 @@ function safeEndpoint(endpoint: string): string {
 /** One lock file per endpoint, a sibling of the tab lease files in ARTIFACT_DIR. */
 export function sessionSlotFile(endpoint: string): string {
   return join(leaseDir(), `ff-session-${safeEndpoint(endpoint)}.json`);
+}
+
+/**
+ * Where the detached mux DAEMON (./mux-daemon.ts) appends its one-line diagnostics for this
+ * endpoint. It is spawned with stdio:"ignore" (no console at all), so this file is the ONLY
+ * record of why a daemon refused to start; the driver names it in the error it raises when a
+ * daemon it spawned never advertised. Sibling of the slot file, same safeEndpoint key.
+ */
+export function muxDaemonLogFile(endpoint: string): string {
+  return join(leaseDir(), `ff-mux-${safeEndpoint(endpoint)}.log`);
 }
 
 /** Read per call (like leaseDir/leaseTtlMs), so a test can redirect it. A value
@@ -236,12 +288,52 @@ export async function acquireSessionSlot(endpoint: string, opts: AcquireOptions)
       }
     }
 
-    // 4. LIVE holder: legitimate contention. Poll until the deadline, then fail.
+    // 4. LIVE holder. If it advertises a mux, JOIN it instead of waiting: the slot
+    // is never going to free up, and it does not have to — the holder's mux serves
+    // the one real session to every joiner. Return immediately, writing nothing.
+    // (The re-read at step 2 happens every iteration, so a holder that advertises a
+    // beat after taking the slot is picked up on the next poll.) CDP_FIREFOX_MUX=off
+    // opts out and restores the pre-mux busy-wait exactly.
+    if (typeof holder.muxEndpoint === "string" && holder.muxEndpoint.length > 0 && process.env.CDP_FIREFOX_MUX !== "off") {
+      return { joinMux: { endpoint: holder.muxEndpoint, holder } };
+    }
+    // No mux: legitimate contention. Poll until the deadline, then fail.
     lastLiveHolder = holder;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new SessionSlotBusyError(endpoint, holder);
     await sleep(Math.min(pollMs, remaining));
   }
+}
+
+/**
+ * Publish this holder's BiDi multiplexer endpoint into its OWN slot record, so a
+ * contending process joins the mux instead of waiting out the slot.
+ *
+ * Ownership-guarded by the same (pid, createdAt) test releaseSessionSlot uses: if
+ * the record on disk is missing or belongs to someone else (we were stolen from
+ * as a dead-looking holder, or we already released), we refuse with
+ * { advertised: false } and leave the file byte-for-byte untouched rather than
+ * stamping our mux onto a stranger's claim.
+ *
+ * Atomic: the merged record is written to `<file>.tmp-<pid>` and renamed over the
+ * original, so a concurrent acquire's read sees either the old record or the new
+ * one, never a truncated one. Every other field is preserved.
+ */
+export async function advertiseMux(handle: SessionSlotHandle, muxEndpoint: string): Promise<{ advertised: boolean }> {
+  const current = await readSessionSlot(handle.endpoint);
+  if (!current) return { advertised: false };
+  if (current.pid !== process.pid || current.createdAt !== handle.createdAt) return { advertised: false };
+  const file = sessionSlotFile(handle.endpoint);
+  const tmp = `${file}.tmp-${process.pid}`;
+  const next: SessionSlotRecord = { ...current, muxEndpoint };
+  try {
+    await writeFile(tmp, JSON.stringify(next), "utf8");
+    await rename(tmp, file);
+  } catch {
+    await unlink(tmp).catch(() => undefined);
+    return { advertised: false };
+  }
+  return { advertised: true };
 }
 
 /**

@@ -12,19 +12,24 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAlive } from "../src/leases.ts";
+import { readFile } from "node:fs/promises";
 import {
   acquireSessionSlot,
+  advertiseMux,
   readSessionSlot,
   releaseSessionSlot,
   SessionSlotBusyError,
   sessionSlotFile,
   sessionWaitMs,
+  type AcquireOptions,
+  type SessionSlotHandle,
   type SessionSlotRecord,
 } from "../src/bidi/session-lease.ts";
 
 let dir = "";
 const originalArtifactDir = process.env.CDP_ARTIFACT_DIR;
 const originalWaitEnv = process.env.CDP_FIREFOX_SESSION_WAIT_MS;
+const originalMuxEnv = process.env.CDP_FIREFOX_MUX;
 
 const ENDPOINT = "ws://127.0.0.1:9223/session";
 
@@ -38,11 +43,14 @@ afterAll(async () => {
   else process.env.CDP_ARTIFACT_DIR = originalArtifactDir;
   if (originalWaitEnv === undefined) delete process.env.CDP_FIREFOX_SESSION_WAIT_MS;
   else process.env.CDP_FIREFOX_SESSION_WAIT_MS = originalWaitEnv;
+  if (originalMuxEnv === undefined) delete process.env.CDP_FIREFOX_MUX;
+  else process.env.CDP_FIREFOX_MUX = originalMuxEnv;
   await rm(dir, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
   for (const f of await readdir(dir)) await rm(join(dir, f), { recursive: true, force: true });
+  delete process.env.CDP_FIREFOX_MUX; // the mux is ON unless a case opts out
 });
 
 /** Spawn a real child, let it exit, and wait until the OS has reaped its pid so
@@ -61,6 +69,16 @@ async function makeDeadPid(): Promise<number> {
 async function writeHolder(rec: SessionSlotRecord): Promise<void> {
   await mkdir(dir, { recursive: true });
   await writeFile(sessionSlotFile(rec.endpoint), JSON.stringify(rec), "utf8");
+}
+
+/** acquireSessionSlot for the cases that must WIN the slot. `handle` is optional on
+ *  AcquireResult since the joinMux path returns none; this asserts we got one and
+ *  narrows it, so the ownership cases read the same as they did before the mux. */
+async function acquireHeld(endpoint: string, opts: AcquireOptions) {
+  const res = await acquireSessionSlot(endpoint, opts);
+  expect(res.handle).toBeDefined();
+  expect(res.joinMux).toBeUndefined();
+  return { ...res, handle: res.handle as SessionSlotHandle };
 }
 
 describe("sessionSlotFile", () => {
@@ -94,7 +112,7 @@ describe("sessionWaitMs", () => {
 
 describe("acquireSessionSlot", () => {
   test("a fresh acquire writes our record and returns no staleHolder", async () => {
-    const { handle, staleHolder } = await acquireSessionSlot(ENDPOINT, {
+    const { handle, staleHolder } = await acquireHeld(ENDPOINT, {
       label: "agent-one",
       now: 111,
       marionettePort: 2828,
@@ -141,7 +159,7 @@ describe("acquireSessionSlot", () => {
     const dead: SessionSlotRecord = { endpoint: ENDPOINT, pid: deadPid, label: "orphan", createdAt: 7, marionettePort: 2829 };
     await writeHolder(dead);
 
-    const { handle, staleHolder } = await acquireSessionSlot(ENDPOINT, { label: "stealer", now: 999, waitMs: 300 });
+    const { handle, staleHolder } = await acquireHeld(ENDPOINT, { label: "stealer", now: 999, waitMs: 300 });
     expect(staleHolder).toEqual(dead);
     expect(handle.pid).toBe(process.pid);
     expect(handle.createdAt).toBe(999);
@@ -156,7 +174,7 @@ describe("acquireSessionSlot", () => {
 
 describe("releaseSessionSlot", () => {
   test("releases our own record and is idempotent", async () => {
-    const { handle } = await acquireSessionSlot(ENDPOINT, { label: "me", now: 1 });
+    const { handle } = await acquireHeld(ENDPOINT, { label: "me", now: 1 });
     expect(await readSessionSlot(ENDPOINT)).toBeDefined();
 
     expect(await releaseSessionSlot(handle)).toEqual({ released: true });
@@ -167,7 +185,7 @@ describe("releaseSessionSlot", () => {
   });
 
   test("does NOT release a record another process created after stealing from us", async () => {
-    const { handle } = await acquireSessionSlot(ENDPOINT, { label: "me", now: 10 });
+    const { handle } = await acquireHeld(ENDPOINT, { label: "me", now: 10 });
 
     // Simulate another process having stolen the slot: same endpoint, different
     // createdAt (and a different owner). Our handle must not unlink it.
@@ -200,5 +218,125 @@ describe("readSessionSlot", () => {
     // errno, which must propagate (fail closed) rather than read as free.
     await mkdir(sessionSlotFile(ENDPOINT), { recursive: true });
     await expect(readSessionSlot(ENDPOINT)).rejects.toThrow();
+  });
+});
+
+
+/**
+ * The mux join path (§2.2 of the multi-agent brief). A LIVE holder that advertises a
+ * BiDi multiplexer is something to JOIN, not to wait for, so acquire must return
+ * immediately with { joinMux } and write nothing at all. Every case below uses
+ * process.pid as the holder pid (guaranteed alive) with a createdAt that is NOT ours,
+ * so the record reads as a live FOREIGN holder.
+ */
+describe("acquireSessionSlot + a mux-advertising LIVE holder", () => {
+  const MUX_URL = "ws://127.0.0.1:54321/session";
+
+  test("returns joinMux immediately and writes NO record of its own", async () => {
+    const holder: SessionSlotRecord = {
+      endpoint: ENDPOINT, pid: process.pid, label: "holder-agent", createdAt: 4242,
+      marionettePort: 2828, muxEndpoint: MUX_URL,
+    };
+    await writeHolder(holder);
+    const before = await readFile(sessionSlotFile(ENDPOINT), "utf8");
+
+    const started = Date.now();
+    // waitMs is generous on purpose: if the join path were NOT taken, this case would
+    // burn the whole window and then throw, which the elapsed assertion below catches.
+    const res = await acquireSessionSlot(ENDPOINT, { label: "joiner", waitMs: 4000, pollMs: 20 });
+    const elapsed = Date.now() - started;
+
+    expect(res.joinMux).toEqual({ endpoint: MUX_URL, holder });
+    expect(res.handle).toBeUndefined();
+    expect(res.staleHolder).toBeUndefined();
+    expect(elapsed).toBeLessThan(1000); // immediate, not a poll to the deadline
+
+    // Nothing written: the holder's record is byte-for-byte what it was.
+    expect(await readFile(sessionSlotFile(ENDPOINT), "utf8")).toBe(before);
+  });
+
+  test("CDP_FIREFOX_MUX=off ignores muxEndpoint and restores the busy wait", async () => {
+    process.env.CDP_FIREFOX_MUX = "off";
+    await writeHolder({
+      endpoint: ENDPOINT, pid: process.pid, label: "holder-agent", createdAt: 4242, muxEndpoint: MUX_URL,
+    });
+
+    let thrown: unknown;
+    try {
+      await acquireSessionSlot(ENDPOINT, { label: "joiner", waitMs: 200, pollMs: 20 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SessionSlotBusyError);
+    expect((thrown as SessionSlotBusyError).holderLabel).toBe("holder-agent");
+  });
+
+  test("a live holder with NO muxEndpoint is still plain busy", async () => {
+    await writeHolder({ endpoint: ENDPOINT, pid: process.pid, label: "no-mux-holder", createdAt: 4242 });
+
+    let thrown: unknown;
+    try {
+      await acquireSessionSlot(ENDPOINT, { label: "joiner", waitMs: 200, pollMs: 20 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SessionSlotBusyError);
+    expect((thrown as SessionSlotBusyError).holderLabel).toBe("no-mux-holder");
+  });
+
+  test("an empty-string muxEndpoint is not an advertisement", async () => {
+    await writeHolder({ endpoint: ENDPOINT, pid: process.pid, label: "empty-mux", createdAt: 4242, muxEndpoint: "" });
+
+    let thrown: unknown;
+    try {
+      await acquireSessionSlot(ENDPOINT, { label: "joiner", waitMs: 200, pollMs: 20 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SessionSlotBusyError);
+  });
+});
+
+describe("advertiseMux", () => {
+  const MUX_URL = "ws://127.0.0.1:54999/session";
+
+  test("stamps muxEndpoint onto OUR record and preserves every other field", async () => {
+    const { handle } = await acquireHeld(ENDPOINT, { label: "holder", now: 77, marionettePort: 2828 });
+
+    expect(await advertiseMux(handle, MUX_URL)).toEqual({ advertised: true });
+
+    expect(await readSessionSlot(ENDPOINT)).toEqual({
+      endpoint: ENDPOINT, pid: process.pid, label: "holder", createdAt: 77,
+      marionettePort: 2828, muxEndpoint: MUX_URL,
+    });
+    // And it left no temp file behind (the rename consumed it).
+    expect((await readdir(dir)).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("refuses, and leaves the file untouched, when the record is someone else's", async () => {
+    const { handle } = await acquireHeld(ENDPOINT, { label: "me", now: 5 });
+    // Another process stole the slot after us: same endpoint, different createdAt.
+    await writeHolder({ endpoint: ENDPOINT, pid: process.pid, label: "thief", createdAt: 6 });
+    const before = await readFile(sessionSlotFile(ENDPOINT), "utf8");
+
+    expect(await advertiseMux(handle, MUX_URL)).toEqual({ advertised: false });
+
+    expect(await readFile(sessionSlotFile(ENDPOINT), "utf8")).toBe(before);
+    expect((await readSessionSlot(ENDPOINT))?.muxEndpoint).toBeUndefined();
+  });
+
+  test("refuses when the slot has already been released", async () => {
+    const { handle } = await acquireHeld(ENDPOINT, { label: "me", now: 5 });
+    await releaseSessionSlot(handle);
+    expect(await advertiseMux(handle, MUX_URL)).toEqual({ advertised: false });
+  });
+});
+
+describe("readSessionSlot", () => {
+  test("returns muxEndpoint when the record carries one", async () => {
+    await writeHolder({
+      endpoint: ENDPOINT, pid: process.pid, label: "holder", createdAt: 1, muxEndpoint: "ws://127.0.0.1:1/session",
+    });
+    expect((await readSessionSlot(ENDPOINT))?.muxEndpoint).toBe("ws://127.0.0.1:1/session");
   });
 });

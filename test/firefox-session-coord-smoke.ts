@@ -349,6 +349,15 @@ async function runParent(): Promise<void> {
   process.env.CDP_FIREFOX_ENDPOINT = String(rdpPort);
   process.env.CDP_ARTIFACT_DIR = artifactDir;
   process.env.CDP_FIREFOX_MARIONETTE_PORT = String(marionettePort);
+  // MUX OFF FOR SCENARIOS 1-4, AND WHY. Every scenario below is about the SESSION SLOT itself: a
+  // live holder that must refuse a second process, a killed holder that strands Firefox's session,
+  // a clean handoff. All three need the holder to be the child process we spawned. In the default
+  // (daemon) mode the session deliberately moves OUT of that child into a detached daemon, which is
+  // the right product behavior and the wrong fixture for these assertions — S2a's "a LIVE holder
+  // refuses the second process" is now true only of a holder that advertises NO mux (a foreign
+  // client, an older cdp-toolkit, or CDP_FIREFOX_MUX=off). So scenarios 1-4 pin that shape
+  // explicitly, and SCENARIO 5 covers the default mode's opposite outcome: the second process JOINS.
+  process.env.CDP_FIREFOX_MUX = "off";
 
   console.log(
     `launching Firefox: bin=${binary} rdp=${rdpPort} marionette=${marionettePort} (default ${EXPECTED_MARIONETTE_DEFAULT} deliberately avoided)\n` +
@@ -535,6 +544,61 @@ async function runParent(): Promise<void> {
     );
   } catch (e) {
     record("S4 no-Marionette degradation", false, `threw (best-effort scenario): ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  /* ----------------------------------------------------------------------------------------
+   * SCENARIO 5 — DEFAULT (daemon) mode: the session leaves the client process, and a second
+   * process JOINS instead of being refused. The exact inverse of S2a, which is why both are here.
+   * ---------------------------------------------------------------------------------------- */
+  try {
+    console.log("── SCENARIO 5: default daemon mode (second process JOINS) ──");
+    const daemonEnv = { CDP_FIREFOX_MUX: "daemon", CDP_FIREFOX_MUX_IDLE_MS: "4000" };
+    const a = new Child("holder", { env: daemonEnv });
+    const aReady = await a.json<{ ok: boolean; pid: number }>();
+    const slot = await readSessionSlot(endpoint);
+    // The slot is held by NEITHER this parent NOR the client child: a detached daemon owns it.
+    const daemonHosts = slot !== undefined && slot.pid !== a.pid && slot.pid !== process.pid && !!slot.muxEndpoint;
+    // A second live process now SUCCEEDS (it joins the daemon's mux) where S2a proved it is refused
+    // when the holder advertises no mux.
+    const b = new Child("probe", { env: daemonEnv });
+    const bRes = await b.json<{ ok: boolean; pid: number; pages?: number; err?: ErrId }>();
+    await b.exited();
+    record(
+      "S5 default daemon mode: the session is held by a DETACHED daemon (not the client), and a second live process JOINS instead of being refused",
+      aReady.ok === true && daemonHosts && bRes.ok === true,
+      `A.pid=${a.pid} slot.pid=${slot?.pid} slot.label=${slot?.label} mux=${slot?.muxEndpoint ?? "-"} B.ok=${bRes.ok} B.pages=${bRes.pages ?? "-"} B.err=${bRes.err ? JSON.stringify(bRes.err.message.slice(0, 120)) : "-"}`,
+    );
+
+    // The client releasing does NOT end the session — that is the whole point of the daemon.
+    a.writeLine({ op: "release" });
+    await a.json<{ released: boolean }>();
+    await a.exited();
+    const stillHeld = await readSessionSlot(endpoint);
+    record(
+      "S5 the daemon SURVIVES its spawner: the session (and every context id it hands out) outlives the client that started it",
+      stillHeld !== undefined && stillHeld.pid === slot?.pid,
+      `slotAfterClientRelease=${stillHeld?.pid} (daemon ${slot?.pid})`,
+    );
+
+    // CLEANUP: kill the daemon and clear the session it strands, so the FINAL invariant and any
+    // later run start from a free slot. This mirrors the S4 cleanup.
+    if (stillHeld) {
+      try {
+        process.kill(stillHeld.pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+    const cleanup5 = new Child("probe", { env: { CDP_FIREFOX_MUX: "off" } });
+    const c5 = await cleanup5.json<{ ok: boolean; err?: ErrId }>();
+    await cleanup5.exited();
+    record(
+      "S5 cleanup: after the daemon is killed, a coordinated attach recovers the slot (dead-holder steal + Marionette force-clear)",
+      c5.ok === true,
+      `cleanup.ok=${c5.ok} slotFreeAfter=${await slotFree()} err=${c5.err ? JSON.stringify(c5.err.message.slice(0, 120)) : "-"}`,
+    );
+  } catch (e) {
+    record("S5 default daemon mode", false, `threw: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   // Final invariant: the browser we attached to all along was never killed by the product code.
