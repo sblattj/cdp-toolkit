@@ -5,7 +5,7 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-09-04
 
 **Several agent PROCESSES can now drive tabs of ONE user-launched Firefox at the same time.** Firefox serves exactly one WebDriver BiDi session per browser (measured on 153.0.3: a second `session.new` gets "Maximum number of active sessions", a second WebSocket to `/session/<id>` is refused at the HTTP upgrade). Previously a second cdp-toolkit process attaching to the same Firefox was refused after the session-slot wait; now the process that wins the slot fronts the one real session with a loopback BiDi multiplexer, and every other process joins it instead of waiting. **Measured** (`bun run firefox:multi:smoke`, headless Firefox 153.0.3, 4 agents × 6 rounds): before, 4 server processes attached to one Firefox — 1 of 4 completed, the other 3 refused after the session wait; after, all 4 completed concurrently (40 calls, wall 437ms vs serial 1375ms, 4 distinct processes in flight), a killed server process left 3 survivors finishing with 0 retries, and a killed daemon was replaced within the recovery path with every survivor finishing on its original tab via the stale-id hint (`firefox:coord:smoke` 11/11, `bun test` 929 pass). See [`docs/design/2026-09-04-firefox-multi-agent-session-mux.md`](docs/design/2026-09-04-firefox-multi-agent-session-mux.md).
 
