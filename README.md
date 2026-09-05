@@ -248,7 +248,7 @@ That shape is deliberate. The MCP **2026-07-28** revision puts lazy discovery on
 With no `name` it returns the grouped catalog of everything this server can run. The whole 45-tool surface costs 1,141 characters:
 
 ```
-cdp-toolkit 2.1.0 · browser=chrome · 45 tools available, 46 in tools/list (CDP_TOOL_PROFILE=full)
+cdp-toolkit 2.2.0 · browser=chrome · 45 tools available, 46 in tools/list (CDP_TOOL_PROFILE=full)
 [listed] core (12): list_pages, new_page, close_page, select_page, navigate_page, wait_for, take_snapshot, click, fill, type_text, evaluate_script, take_screenshot
 [listed] input (7): hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file
 [listed] cookies (3): list_cookies, set_cookie, delete_cookies
