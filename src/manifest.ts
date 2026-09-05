@@ -230,6 +230,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "args": {
           "type": "array",
+          "items": {},
           "description": "Positional JSON arguments."
         },
         "savePath": {
