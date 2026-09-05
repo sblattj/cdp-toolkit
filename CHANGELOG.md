@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`evaluate_script.args` now declares `items: {}`.** It was the only array property in `tools/list` without an `items` schema, and Gemini function declarations reject exactly that shape: a host that forwarded the full tool list to a Gemini model (opencode through an OpenRouter Gemini lane, 135 tools) got no response headers at all until the gateway timed the request out. Every other array in the listing already carried `items`; the live `bun src/mcp.ts` `tools/list` now shows none missing.
+
 ## [2.1.0] - 2026-09-01
 
 **Re-based on the MCP 2026-07-28 revision: `tools/list` is now one complete, deterministic, cacheable listing that never changes, and the runtime `browser_tools` activation toggle 2.0.0 shipped three days ago is removed.** The honest headline on cost: the **default** listing grows from ≈2,457 to **≈8,471 tokens** (46 entries, 33,886 bytes, measured over raw stdio against the real entry point), because a standards-conformant list must be complete and static — still **−58% against 1.x's ≈20,200**. `CDP_TOOL_PROFILE=core` keeps the lean ≈2,266-token surface (13 entries, 9,066 bytes, −89% vs 1.x) for hosts that eagerly load every schema. Tool names, parameters, and schema shapes are unchanged, now gated by a durable wire-vs-manifest deep-equal check rather than the one-off strip-descriptions comparison 1.10.0 and 2.0.0 used. No new runtime dependency.
