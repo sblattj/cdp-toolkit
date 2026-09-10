@@ -245,12 +245,12 @@ That shape is deliberate. The MCP **2026-07-28** revision puts lazy discovery on
 {"tool": "describe_tool", "arguments": {}}
 ```
 
-With no `name` it returns the grouped catalog of everything this server can run. The whole 45-tool surface costs 1,141 characters:
+With no `name` it returns the grouped catalog of everything this server can run. The whole 47-tool surface:
 
 ```
-cdp-toolkit 2.2.0 · browser=chrome · 45 tools available, 46 in tools/list (CDP_TOOL_PROFILE=full)
+cdp-toolkit 2.3.0 · browser=chrome · 47 tools available, 48 in tools/list (CDP_TOOL_PROFILE=full)
 [listed] core (12): list_pages, new_page, close_page, select_page, navigate_page, wait_for, take_snapshot, click, fill, type_text, evaluate_script, take_screenshot
-[listed] input (7): hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file
+[listed] input (9): hover, drag, scroll, dispatch_mouse, press_key, fill_form, upload_file, focus_emulation, click_focus_gated
 [listed] cookies (3): list_cookies, set_cookie, delete_cookies
 [listed] network (2): list_network_requests, get_network_request
 [listed] console (2): list_console_messages, get_console_message
@@ -271,7 +271,7 @@ Under a narrower profile the groups it leaves out read `[hidden]` instead of `[l
 
 | `CDP_TOOL_PROFILE` | entries in `tools/list` | bytes | ≈ tokens |
 |---|---|---|---|
-| unset / `full` — the default | 46 | 33,886 | ≈8,471 |
+| unset / `full` — the default | 48 | 35,556 | ≈8,889 |
 | `core` | 13 | 9,066 | ≈2,266 |
 | `core,network,console` | 17 | 11,893 | ≈2,973 |
 | `full` under `CDP_BROWSER=firefox` | 35 | 26,533 | ≈6,633 |

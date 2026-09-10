@@ -651,7 +651,7 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "emulate.mediaFeatures", "emulate.deviceMetrics", "emulate.networkConditions",
   "screenshot.fullPage", "screenshot.element", "screenshot.scale", "screenshot.renderSize", "screenshot.tile", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
-  "capture.screencast", "input.raw", "input.html5Drag",
+  "capture.screencast", "input.raw", "input.html5Drag", "emulate.focus",
   "browser.downloads", "browser.permissions", "worker.targets",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */

@@ -14,7 +14,7 @@ export const GROUP_TOOLS: Record<ToolGroup, readonly string[]> = {
   ],
   input: [
     "hover", "drag", "scroll", "dispatch_mouse", "press_key", "fill_form",
-    "upload_file",
+    "upload_file", "focus_emulation", "click_focus_gated",
   ],
   cookies: ["list_cookies", "set_cookie", "delete_cookies"],
   network: ["list_network_requests", "get_network_request"],
