@@ -675,6 +675,70 @@ export const MANIFEST: ToolSpec[] = [
     }
   },
   {
+    "name": "focus_emulation",
+    "description": "Toggle page focus emulation: the page reports focused/visible without the OS window moving; Chrome-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Lease token; omit for a tab this process already holds. See server instructions."
+        },
+        "target": {
+          "type": "string",
+          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "true = page reports focused; false = restore real focus state."
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "click_focus_gated",
+    "description": "Emulate page focus, wait for a focus-gated button to enable, trusted-click it, restore; Chrome-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Lease token; omit for a tab this process already holds. See server instructions."
+        },
+        "target": {
+          "type": "string",
+          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector of the button; exactly one of selector or text."
+        },
+        "text": {
+          "type": "string",
+          "description": "Visible-text match for the button (e.g. \"Authorize\"); exactly one of selector or text."
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Max ms to poll for the button to become enabled. Default 30000."
+        },
+        "pollMs": {
+          "type": "number",
+          "description": "Poll interval ms. Default 500."
+        },
+        "keepFocus": {
+          "type": "boolean",
+          "description": "Leave focus emulation on after the click (default false = restored)."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "wait_for_download",
     "description": "Arm or collect a browser download; arm capture before triggering the download.",
     "inputSchema": {

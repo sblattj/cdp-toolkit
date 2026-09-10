@@ -43,6 +43,8 @@ import { lighthouseAudit } from "./tools/lighthouse.ts";
 import { mockRequest, listMocks, clearMocks } from "./tools/network_mock.ts";
 // --- raw mouse dispatch (Input.dispatchMouseEvent, one event per call) : chrome-only, capability "input.raw" ---
 import { dispatchMouse } from "./tools/dispatch-mouse.ts";
+// --- focus emulation + focus-gated click (Emulation.setFocusEmulationEnabled) : chrome-only, capability "emulate.focus" ---
+import { focusEmulation, clickFocusGated } from "./tools/focus-emulation.ts";
 // --- downloads + permissions (browser-endpoint state on a standing connection) : chrome-only, 1.8.0 Track P3 ---
 import { waitForDownload } from "./tools/downloads.ts";
 import { grantPermissions } from "./tools/permissions.ts";
@@ -145,6 +147,10 @@ export const TOOLS = {
   clear_mocks: clearMocks,
   // raw mouse dispatch (1) : 1.8.0 Track P1 toolkit addition, chrome-only (capability "input.raw")
   dispatch_mouse: dispatchMouse,
+  // focus emulation (2) : fake page focus without stealing OS focus; trusted click on a focus-gated
+  // button (e.g. Claude Code OAuth Authorize). chrome-only (capability "emulate.focus")
+  focus_emulation: focusEmulation,
+  click_focus_gated: clickFocusGated,
   // downloads + permissions (2) : 1.8.0 Track P3 toolkit additions, chrome-only (capabilities
   // "browser.downloads" / "browser.permissions"). Both drive browser-endpoint state that Chrome
   // reverts when the issuing client disconnects, so both run on tools/browser-session.ts's standing

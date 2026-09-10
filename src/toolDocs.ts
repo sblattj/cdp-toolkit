@@ -173,6 +173,26 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "modifiers": "Modifier keys held for this one event, e.g. ['Shift']."
     }
   },
+  "focus_emulation": {
+    "description": "Toggles CDP Emulation.setFocusEmulationEnabled on a tab: the page then BELIEVES it is focused (document.hasFocus()→true, visibilitychange stays 'visible', focus events fire) while the real OS window and active tab stay put — no focus theft. This is the primitive that unlocks focus-GATED UI (a button the site disables unless its tab is focused, e.g. Anthropic's Claude Code OAuth Authorize button on claude.ai/oauth/*) on a background tab. Chrome-only: WebDriver BiDi's emulation module has no focus primitive, so this tool is absent from tools/list under --browser firefox. Ports the core mechanism of the danbuhler/claude-code-auto-authorize extension. Remember to call with enabled:false to restore, or use click_focus_gated which restores automatically.",
+    "params": {
+      "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'.",
+      "enabled": "true = page reports focused/visible; false = restore the real focus state."
+    }
+  },
+  "click_focus_gated": {
+    "description": "One-call compose of focus emulation + trusted click for a focus-gated button: enables Emulation.setFocusEmulationEnabled, polls until the button (located by CSS selector OR exact visible-text match, e.g. 'Authorize') exists AND is enabled, dispatches a trusted move/press/release click via Input.dispatchMouseEvent (isTrusted:true — a content script's synthesized events can never satisfy a focus gate), then restores focus emulation off unless keepFocus. Built for the Claude Code OAuth Authorize button but works on any focus-gated control on a background tab. Throws with a diagnostic ('never located' vs 'found but stayed disabled') on timeout. Chrome-only; absent under --browser firefox.",
+    "params": {
+      "lease": "Lease token from claim_page. Omit for a tab this process holds. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease).",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'.",
+      "selector": "CSS selector of the button. Give exactly one of selector or text.",
+      "text": "Exact visible-text match of the button (trims whitespace, matches button/[role=button]/submit inputs), e.g. 'Authorize'. Give exactly one of selector or text.",
+      "timeoutMs": "Max ms to poll for the button to appear and become enabled. Default 30000.",
+      "pollMs": "Poll interval in ms. Default 500.",
+      "keepFocus": "Leave focus emulation ON after the click (default false — restored even on throw, so a failed click never strands the page fake-focused)."
+    }
+  },
   "wait_for_download": {
     "description": "Wait for a file download to finish and return it as a real file on disk: {path,suggestedFilename,bytes,url,target}, written under the artifact dir's downloads/. ORDERING RULE, not optional: capture must be ARMED BEFORE the click that starts the download — call wait_for_download{arm:true} first (returns {armed:true,downloadPath,pending}), then click, then call again to collect the file. The download-behavior override is per-connection state Chrome REVERTS the moment the arming client disconnects, and an unarmed headless Chrome denies the download outright, so one triggered before arming is lost. SIDE EFFECT, browser-global: arming redirects EVERY download in this browser (all tabs, all origins) into the toolkit's downloads dir until this server exits — they no longer land in the user's normal Downloads folder. The arm lives on a connection this server holds open (an MCP-server capability): under the one-shot CLI the connection dies with the process and nothing is captured. Chrome-only (capability 'browser.downloads'): absent from tools/list under Firefox.",
     "params": {

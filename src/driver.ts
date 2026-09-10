@@ -150,6 +150,7 @@ export type Capability =
   | "locate.xpath" // find a node by xpath
   | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
   | "input.html5Drag" // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
+  | "emulate.focus" // fake page focus without moving the OS window (focus_emulation / click_focus_gated); Chrome only — BiDi's emulation module has no focus primitive
   | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
   | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome only
   | "worker.targets"; // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
@@ -172,6 +173,8 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   list_mocks: ["network.intercept"],
   clear_mocks: ["network.intercept"],
   dispatch_mouse: ["input.raw"],
+  focus_emulation: ["emulate.focus"],
+  click_focus_gated: ["emulate.focus"],
   wait_for_download: ["browser.downloads"],
   grant_permissions: ["browser.permissions"],
 } as const;

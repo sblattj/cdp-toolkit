@@ -784,8 +784,9 @@ describe("registry and manifest wiring", () => {
     // 36 before list_cookies was added, 37 before set_cookie and delete_cookies,
     // 39 before start_screen_recording and stop_screen_recording, 41 after,
     // 43 after 1.8.0 Track P1 added scroll and dispatch_mouse,
-    // 45 after 1.8.0 Track P3 added wait_for_download and grant_permissions.
-    expect(TOOL_NAMES.length).toBe(45);
+    // 45 after 1.8.0 Track P3 added wait_for_download and grant_permissions,
+    // 47 after focus_emulation and click_focus_gated.
+    expect(TOOL_NAMES.length).toBe(47);
   });
 
   test("every tool has a manifest schema and vice versa", () => {
