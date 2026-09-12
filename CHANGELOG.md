@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`extract_page` names an output-cap truncation for what it is.** A completion the endpoint cut off at `max_tokens` (8192) used to surface as `endpoint returned invalid JSON (Unterminated string)`, which reads as a model or quoting defect and sends the operator debugging the wrong layer. The tool now reads `choices[0].finish_reason`: `length` fails with a dedicated message naming the cap, the completion-token count, and the remedy (narrow the payload with `selector`, or ask the schema for less); any other parse failure carries the `finish_reason` alongside the excerpt. Two new unit tests pin both paths (`test/extract.test.ts`, 24).
+
 ## [2.4.0] - 2026-09-12
 
 **Structured extraction: pages come back as schema-conformant JSON, not prose.** A new `extract_page` tool takes the target page's HTML, cleans it in-page (scripts, styles, hidden elements and other non-content noise stripped), and sends it to an OpenAI-compatible `/chat/completions` endpoint along with your JSON Schema, returning JSON that matches the schema instead of a paragraph you have to parse. The default endpoint is **loopback llm-ferry** (`http://127.0.0.1:8090/v1`, model `schematron`), so page content stays on this machine unless the operator points `CDP_EXTRACT_BASE_URL` elsewhere; the API key is never logged and redacted from every error, and `usage` token counts (plus cost when the endpoint reports one) come back inline on every call. This is prompt-driven extraction: the extraction instructions live in the schema's property `description`s, and a schema whose properties carry no descriptions is rejected up front rather than extracting garbage. A cleaned payload over `maxChars` fails with `html_too_large` naming the actual size instead of silently truncating — shrink with `selector`/`clean:"aggressive"` or raise the cap.

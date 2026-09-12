@@ -443,6 +443,31 @@ describe("endpoint failures", () => {
     expect(longestRun).toBeLessThanOrEqual(200);
   });
 
+  test("finish_reason=length is reported as a max_tokens truncation, not as invalid JSON", async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    stubFetch(() =>
+      completionResponse({
+        choices: [{ message: { content: '{"title": "Quarterly Rep' }, finish_reason: "length" }],
+        usage: { prompt_tokens: 101, completion_tokens: 8192, total_tokens: 8293 },
+      }),
+    );
+    const err = await rejection(extractPage(stubExtractDriver().driver, { schema: VALID_SCHEMA }));
+    expect(err).toBeInstanceOf(CdpError);
+    expect(err.message).toContain("finish_reason=length");
+    expect(err.message).toContain("max_tokens=8192");
+    expect(err.message).toContain("selector");
+    expect(err.message).not.toContain("invalid JSON");
+  });
+
+  test("a parse failure with finish_reason=stop still says invalid JSON and carries the reason", async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    stubFetch(() => completionResponse({ choices: [{ message: { content: '{"title": "x' }, finish_reason: "stop" }] }));
+    const err = await rejection(extractPage(stubExtractDriver().driver, { schema: VALID_SCHEMA }));
+    expect(err).toBeInstanceOf(CdpError);
+    expect(err.message).toContain("invalid JSON");
+    expect(err.message).toContain("finish_reason=stop");
+  });
+
   test("an error body echoing the API key is REDACTED out of the thrown message", async () => {
     process.env.CDP_EXTRACT_BASE_URL = BASE;
     const key = "sk-seekrit00001111";
