@@ -1763,5 +1763,71 @@ export const MANIFEST: ToolSpec[] = [
       "required": [],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "extract_page",
+    "description": "Extract schema-conformant JSON from the target page's cleaned HTML via an OpenAI-compatible endpoint; default endpoint is local loopback.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Lease token; omit for a tab this process already holds. See server instructions."
+        },
+        "target": {
+          "type": "string",
+          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+        },
+        "schema": {
+          "type": "object",
+          "description": "JSON Schema (type object) the extracted JSON must conform to; extraction instructions live in its property descriptions."
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector scoping extraction to a subtree."
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "dom",
+            "served"
+          ],
+          "description": "Page source to read; 'served' currently returns not-implemented."
+        },
+        "clean": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "aggressive",
+            "none"
+          ],
+          "description": "HTML cleaning level."
+        },
+        "maxChars": {
+          "type": "integer",
+          "description": "Character cap on the cleaned HTML; default 300000."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "description": "Timeout in milliseconds; default 90000, max 300000."
+        },
+        "model": {
+          "type": "string",
+          "description": "Extraction model name; default 'schematron' (or CDP_EXTRACT_MODEL)."
+        },
+        "baseUrl": {
+          "type": "string",
+          "description": "OpenAI-compatible endpoint base URL; default local loopback (or CDP_EXTRACT_BASE_URL)."
+        },
+        "savePath": {
+          "type": "string",
+          "description": "Output file path."
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "additionalProperties": false
+    }
   }
 ];

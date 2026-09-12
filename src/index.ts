@@ -4,7 +4,7 @@
  * Two exports:
  *   1. `TOOLS` : the registry mapping every chrome-devtools-mcp tool name
  *      (snake_case string, all 29 of them) plus the toolkit's own superset
- *      tools, 45 entries in all, to its raw-CDP implementation function. The
+ *      tools, 48 entries in all, to its raw-CDP implementation function. The
  *      CLI and any embedder dispatch through this single table.
  *   2. The client primitives, re-exported so consumers can build their own
  *      flows on the same connection/timeout machinery the tools use.
@@ -48,6 +48,8 @@ import { focusEmulation, clickFocusGated } from "./tools/focus-emulation.ts";
 // --- downloads + permissions (browser-endpoint state on a standing connection) : chrome-only, 1.8.0 Track P3 ---
 import { waitForDownload } from "./tools/downloads.ts";
 import { grantPermissions } from "./tools/permissions.ts";
+// --- structured extraction (cleaned page HTML -> OpenAI-compatible endpoint, both backends) ---
+import { extractPage } from "./tools/extract.ts";
 
 /** A toolkit tool: a single typed-args function returning JSON-serializable data. */
 export type ToolFn = (args: never) => Promise<unknown>;
@@ -83,8 +85,8 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * named path, and `grant_permissions`, which answers permission prompts for an origin; both
  * chrome-only and both driven from a standing browser-endpoint connection, see
  * tools/browser-session.ts).
- * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 = 45 entries total. Listed explicitly so the mapping is auditable at a glance and
- * the CLI can `--list` it.
+ * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 + 1 (extract_page) + 2 (focus pair) = 48 entries total. Listed explicitly so the mapping is auditable at a glance and
+ *  the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
  * screenshot+emulation/dialogs) now route through shared-tools.ts's single Driver-based
@@ -157,6 +159,11 @@ export const TOOLS = {
   // connection rather than a per-call socket : see that module's header for the measurements.
   wait_for_download: waitForDownload,
   grant_permissions: grantPermissions,
+  // structured extraction (1) : toolkit addition, both backends — a page's cleaned HTML
+  // POSTed to an OpenAI-compatible /chat/completions endpoint (default: loopback
+  // llm-ferry) with the caller's JSON Schema as a strict response_format, returning
+  // schema-conformant JSON + token usage. API key is env-only (CDP_EXTRACT_API_KEY).
+  extract_page: onCdp(extractPage),
   // tab leases (3) : opt-in ownership so many agents can share one browser
   claim_page: onCdp(LEASE_TOOLS.claim_page),
   release_page: onCdp(LEASE_TOOLS.release_page),
