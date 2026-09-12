@@ -426,7 +426,7 @@ function guardSize(outcome: CleanOutcome, maxChars: number): number {
 /* ------------------------------ upstream call ------------------------------ */
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: unknown } }[];
+  choices?: { message?: { content?: unknown }; finish_reason?: unknown }[];
   model?: string;
   usage?: {
     prompt_tokens?: number;
@@ -481,7 +481,7 @@ export async function callExtractionEndpoint(opts: {
   html: string;
   schema: Record<string, unknown>;
   timeoutMs: number;
-}): Promise<{ content: string; usage: ExtractUsage; model: string }> {
+}): Promise<{ content: string; usage: ExtractUsage; model: string; finishReason: string | undefined }> {
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body = JSON.stringify({
     model: opts.model,
@@ -540,7 +540,9 @@ export async function callExtractionEndpoint(opts: {
         totalTokens: u.total_tokens ?? 0,
         ...(pickCostUsd(u) !== undefined ? { costUsd: pickCostUsd(u) } : {}),
       };
-      return { content, usage, model: parsed.model ?? opts.model };
+      const fr = parsed.choices?.[0]?.finish_reason;
+      const finishReason = typeof fr === "string" ? fr : undefined;
+      return { content, usage, model: parsed.model ?? opts.model, finishReason };
     }
     lastStatus = res.status;
     lastBody = text;
@@ -599,7 +601,7 @@ export async function extractPage(
     const outcome = coerceCleanOutcome(await page.evaluate(source, { awaitPromise: true }), args.selector);
     const estTokens = guardSize(outcome, maxChars);
 
-    const { content, usage, model: respondedModel } = await callExtractionEndpoint({
+    const { content, usage, model: respondedModel, finishReason } = await callExtractionEndpoint({
       baseUrl,
       apiKey,
       model,
@@ -608,12 +610,24 @@ export async function extractPage(
       timeoutMs,
     });
 
+    // A completion cut off at max_tokens is NOT a JSON bug, and the endpoint
+    // says so in finish_reason. Without this check the truncated tail surfaces
+    // as "Unterminated string", which reads as a model or quoting defect and
+    // sends the operator debugging the wrong layer. The remedy is to shrink
+    // the payload (selector) or the schema, so name that here.
+    if (finishReason === "length") {
+      throw new CdpError(
+        `extract_page: completion truncated at max_tokens=${COMPLESION_TOKENS} (finish_reason=length, ${usage.completionTokens} completion tokens); ` +
+          `narrow the payload with 'selector' or ask the schema for less: ${excerpt(redactSecrets(content, apiKey), 200)}`,
+      );
+    }
+
     let data: unknown;
     try {
       data = JSON.parse(content);
     } catch (e) {
       throw new CdpError(
-        `extract_page: endpoint returned invalid JSON (${(e as Error).message}): ${excerpt(redactSecrets(content, apiKey), 200)}`,
+        `extract_page: endpoint returned invalid JSON (${(e as Error).message}${finishReason !== undefined ? `, finish_reason=${finishReason}` : ""}): ${excerpt(redactSecrets(content, apiKey), 200)}`,
       );
     }
 
