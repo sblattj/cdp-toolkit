@@ -60,6 +60,6 @@ Type `bun run src/cli.ts mock_request --urlPattern '*/api/*' --body '{"results":
 Enter
 Sleep 3000ms
 
-Type "# 45 tools, one direct WebSocket per call, a bounded timeout on every call."
+Type "# 48 tools, one direct WebSocket per call, a bounded timeout on every call."
 Enter
 Sleep 2200ms
