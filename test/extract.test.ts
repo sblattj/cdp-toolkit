@@ -411,7 +411,7 @@ describe("prompt shape: html (default) vs the Schematron model-card messages", (
     expect(messages.some((m) => m.role === "system")).toBe(false);
   });
 
-  test('prompt:"schematron" sends exactly the model card system+user pair, schema compact and inline', async () => {
+  test('prompt:"schematron" sends exactly the model card system+user pair, schema compact and inline, and OMITS response_format', async () => {
     process.env.CDP_EXTRACT_BASE_URL = BASE;
     const calls = stubFetch(() => completionResponse());
     const { driver, cleaning } = stubExtractDriver();
@@ -420,7 +420,7 @@ describe("prompt shape: html (default) vs the Schematron model-card messages", (
 
     const body = JSON.parse(String(calls[0]!.init.body)) as {
       messages: { role: string; content: string }[];
-      response_format: { type: string; json_schema: { strict: boolean; schema: unknown } };
+      response_format?: { type: string; json_schema: { strict: boolean; schema: unknown } };
     };
     expect(body.messages.length).toBe(2);
     expect(body.messages[0]).toEqual({ role: "system", content: "You are a helpful assistant" });
@@ -429,7 +429,23 @@ describe("prompt shape: html (default) vs the Schematron model-card messages", (
     // The schema is COMPACT (json.dumps default separators), not pretty-printed.
     expect(body.messages[1]!.content).toContain(JSON.stringify(VALID_SCHEMA));
     expect(body.messages[1]!.content).not.toContain(JSON.stringify(VALID_SCHEMA, null, 2));
-    // response_format rides along in BOTH modes: llguidance honours it.
+    // response_format is OMITTED entirely in schematron mode (never sent as
+    // null): the schema already rides inline in the prompt, and against a
+    // locally served open-weight Schematron-8B, constrained decoding on top
+    // of it collapsed a real page's extraction to {"stories": []}.
+    expect("response_format" in body).toBe(false);
+  });
+
+  test('prompt:"html" (default) still sends response_format', async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    const calls = stubFetch(() => completionResponse());
+    const { driver } = stubExtractDriver();
+
+    await extractPage(driver, { schema: VALID_SCHEMA, prompt: "html" });
+
+    const body = JSON.parse(String(calls[0]!.init.body)) as {
+      response_format: { type: string; json_schema: { strict: boolean; schema: unknown } };
+    };
     expect(body.response_format.type).toBe("json_schema");
     expect(body.response_format.json_schema.strict).toBe(true);
     expect(body.response_format.json_schema.schema).toEqual(VALID_SCHEMA);

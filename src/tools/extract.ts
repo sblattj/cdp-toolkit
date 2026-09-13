@@ -14,10 +14,13 @@
  * remote host.
  *
  * The caller's JSON Schema is BOTH the response contract (sent as
- * response_format json_schema strict) AND the extraction prompt: Schematron
- * reads the schema's property DESCRIPTIONS as its only instructions. A schema
- * with no descriptions anywhere would extract garbage with no hint why, so it
- * is rejected up front, before any page work happens.
+ * response_format json_schema strict in "html" mode) AND the extraction
+ * prompt: Schematron reads the schema's property DESCRIPTIONS as its only
+ * instructions. A schema with no descriptions anywhere would extract garbage
+ * with no hint why, so it is rejected up front, before any page work happens.
+ * In "schematron" mode response_format is OMITTED — the schema already rides
+ * inline in the prompt, and constrained decoding on top of it collapses real
+ * pages to an empty result (see buildExtractionMessages/callExtractionEndpoint).
  *
  * COST IS ALWAYS VISIBLE: every successful call reports the endpoint's token
  * counts, so a bloated extraction is visible in the answer itself, not
@@ -99,7 +102,9 @@ export interface ExtractPageArgs {
    * locally served open-weight Schematron was fine-tuned on: without it, an
    * HTML-only prompt yields garbage even under constrained decoding. It adds
    * roughly the JSON-stringified schema's length to the prompt. Default from
-   * CDP_EXTRACT_PROMPT, then "html". response_format is sent in BOTH modes.
+   * CDP_EXTRACT_PROMPT, then "html". "schematron" mode sends NO
+   * response_format — the schema is already inline in the prompt, and the
+   * client validates only that the response parses as JSON.
    */
   prompt?: "html" | "schematron";
   /** Model name override (default CDP_EXTRACT_MODEL, then "schematron"). */
@@ -564,12 +569,23 @@ export async function callExtractionEndpoint(opts: {
   prompt?: "html" | "schematron";
 }): Promise<{ content: string; usage: ExtractUsage; model: string; finishReason: string | undefined }> {
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const promptMode = opts.prompt ?? "html";
+  // "schematron" mode OMITS response_format entirely (never sends it as null).
+  // Measured 2026-09-12: against a locally served open-weight Schematron-8B
+  // (llguidance-constrained decoding), the IDENTICAL messages with
+  // response_format present returned {"stories": []} in 6 completion tokens
+  // for a real CNN zone, while omitting response_format returned valid,
+  // schema-conformant JSON with 5 stories (285 tokens) — the schema is
+  // already inline in the schematron user message, so constrained decoding
+  // on top of it is redundant and, on real markup, harmful.
   const body = JSON.stringify({
     model: opts.model,
-    messages: buildExtractionMessages(opts.prompt ?? "html", opts.html, opts.schema),
+    messages: buildExtractionMessages(promptMode, opts.html, opts.schema),
     temperature: 0,
     max_tokens: COMPLESION_TOKENS,
-    response_format: { type: "json_schema", json_schema: { name: "extract", strict: true, schema: opts.schema } },
+    ...(promptMode === "schematron"
+      ? {}
+      : { response_format: { type: "json_schema", json_schema: { name: "extract", strict: true, schema: opts.schema } } }),
   });
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
@@ -715,6 +731,15 @@ export async function extractPage(
         `extract_page: endpoint returned invalid JSON (${(e as Error).message}${finishReason !== undefined ? `, finish_reason=${finishReason}` : ""}): ${excerpt(redactSecrets(content, apiKey), 200)}`,
       );
     }
+    // In "schematron" mode nothing constrains the shape server-side (no
+    // response_format), so a syntactically valid but non-object payload
+    // (array/null/primitive) is caught here with the same invalid-JSON error
+    // shape used above.
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw new CdpError(
+        `extract_page: endpoint returned invalid JSON (expected a JSON object${finishReason !== undefined ? `, finish_reason=${finishReason}` : ""}): ${excerpt(redactSecrets(content, apiKey), 200)}`,
+      );
+    }
 
     const result: ExtractPageResult = {
       data,
@@ -759,7 +784,8 @@ export async function extractPage(
  * method is used, and the live DOM is never mutated (cleaning runs on a clone).
  *
  * Upstream dependency (global fetch, zero npm deps): POST ${baseUrl}/chat/completions
- * with response_format json_schema strict; default baseUrl is the loopback
+ * with response_format json_schema strict in "html" mode only ("schematron"
+ * mode omits it — see callExtractionEndpoint); default baseUrl is the loopback
  * llm-ferry (http://127.0.0.1:8090/v1, model "schematron"). If it is not
  * running, the network error names the URL and asks "is ferry running?".
  *
