@@ -33,6 +33,8 @@
  *                          upstream-derived error text (see redactSecrets).
  *   CDP_EXTRACT_TIMEOUT_MS default 90000 (hard-capped at 300000 with the arg)
  *   CDP_EXTRACT_MAX_CHARS  default 300000
+ *   CDP_EXTRACT_PROMPT     default "html"; "schematron" switches to the
+ *                          Schematron model-card prompt (see buildMessages)
  *
  * BOTH BACKENDS, NO capability gating: everything page-side goes through the
  * neutral Driver's page.evaluate (Chrome Runtime.evaluate / Firefox
@@ -54,6 +56,7 @@ const DEFAULT_MODEL = "schematron";
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_MAX_CHARS = 300_000;
 const MAX_TIMEOUT_MS = 300_000;
+const DEFAULT_PROMPT_MODE = "html";
 
 /** Token arithmetic for the size guard: ~3.5 chars/token on HTML, the fixed
  *  completion budget we request, a safety margin, against a 128k context. */
@@ -87,6 +90,18 @@ export interface ExtractPageArgs {
   maxChars?: number;
   /** Endpoint budget in ms. Default 90000, hard max 300000. */
   timeoutMs?: number;
+  /**
+   * Prompt shape sent upstream. "html" (default) sends the cleaned HTML as the
+   * only user message and lets the server carry the schema — what the hosted
+   * Schematron API expects, since it injects the schema server-side.
+   * "schematron" sends the open-weight Schematron model card's own messages
+   * (system + a user message with the schema INLINE, then the HTML), which a
+   * locally served open-weight Schematron was fine-tuned on: without it, an
+   * HTML-only prompt yields garbage even under constrained decoding. It adds
+   * roughly the JSON-stringified schema's length to the prompt. Default from
+   * CDP_EXTRACT_PROMPT, then "html". response_format is sent in BOTH modes.
+   */
+  prompt?: "html" | "schematron";
   /** Model name override (default CDP_EXTRACT_MODEL, then "schematron"). */
   model?: string;
   /** Base URL override; the tool appends /chat/completions. Default is the
@@ -140,6 +155,15 @@ function extractBaseUrl(): string {
 function extractModel(): string {
   const raw = process.env.CDP_EXTRACT_MODEL?.trim();
   return raw ? raw : DEFAULT_MODEL;
+}
+
+/** Prompt shape default. Same precedence rule as the others: an empty/blank
+ *  value counts as unset. An unrecognized value is NOT silently ignored — it
+ *  is reported by validateExtractArgs, so a typo'd env var fails loudly
+ *  instead of quietly extracting garbage from the wrong prompt. */
+function extractPromptMode(): string {
+  const raw = process.env.CDP_EXTRACT_PROMPT?.trim();
+  return raw ? raw : DEFAULT_PROMPT_MODE;
 }
 
 /** The key lives in env only, never in args, never in a log line. */
@@ -215,6 +239,13 @@ export function validateExtractArgs(args: ExtractPageArgs): void {
   }
   if (args.clean !== undefined && args.clean !== "standard" && args.clean !== "aggressive" && args.clean !== "none") {
     throw new CdpError(`extract_page: 'clean' must be "standard", "aggressive" or "none" (got ${JSON.stringify(args.clean)})`);
+  }
+  if (args.prompt !== undefined && args.prompt !== "html" && args.prompt !== "schematron") {
+    throw new CdpError(`extract_page: 'prompt' must be "html" or "schematron" (got ${JSON.stringify(args.prompt)})`);
+  }
+  const envPrompt = process.env.CDP_EXTRACT_PROMPT?.trim();
+  if (args.prompt === undefined && envPrompt && envPrompt !== "html" && envPrompt !== "schematron") {
+    throw new CdpError(`extract_page: CDP_EXTRACT_PROMPT must be "html" or "schematron" (got ${JSON.stringify(envPrompt)})`);
   }
   if (args.maxChars !== undefined && (!Number.isFinite(args.maxChars) || args.maxChars <= 0)) {
     throw new CdpError("extract_page: 'maxChars' must be a positive number");
@@ -423,7 +454,7 @@ function guardSize(outcome: CleanOutcome, maxChars: number): number {
   return estTokens;
 }
 
-/* ------------------------------ upstream call ------------------------------ */
+/* --------------------- upstream response shape & helpers --------------------- */
 
 interface ChatCompletionResponse {
   choices?: { message?: { content?: unknown }; finish_reason?: unknown }[];
@@ -468,6 +499,54 @@ function excerpt(text: string, max: number): string {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+/* ------------------------------ prompt shapes ------------------------------ */
+
+export interface ChatMessage {
+  role: "system" | "user";
+  content: string;
+}
+
+/**
+ * The two prompt shapes, kept in one place because the wire body is the only
+ * thing a refactor can silently break here.
+ *
+ * "html" (default, unchanged): the cleaned HTML is the ONLY user message and
+ * the schema rides in response_format alone. That is what the HOSTED
+ * Schematron API expects — it injects the schema into the prompt server-side.
+ *
+ * "schematron": the open-weight Schematron model card's own `construct_messages`
+ * (inference-net/Schematron-8B), verbatim — a "You are a helpful assistant"
+ * system message plus a user message carrying the COMPACT JSON.stringify'd
+ * schema inline, then the HTML, then the "MAKE SURE ITS VALID JSON." tail. The
+ * model was fine-tuned on exactly this string; a locally served open-weight
+ * Schematron handed a bare HTML prompt returns garbage even with constrained
+ * decoding, which is why this mode exists. Note the schema text is charged to
+ * the prompt on top of the HTML (maxChars caps the HTML only).
+ */
+export function buildExtractionMessages(
+  mode: "html" | "schematron",
+  html: string,
+  schema: Record<string, unknown>,
+): ChatMessage[] {
+  if (mode !== "schematron") return [{ role: "user", content: html }];
+  const user =
+    "You are going to be given a JSON schema following the standardized JSON Schema format. You are going to be given a HTML page and you are going to apply the schema to the HTML page however you see it as applicable and return the results in a JSON object. The schema is as follows:" +
+    "\n\n" +
+    JSON.stringify(schema) +
+    "\n\n" +
+    "Here is the HTML page:" +
+    "\n\n" +
+    html +
+    "\n\n" +
+    "MAKE SURE ITS VALID JSON.";
+  return [
+    { role: "system", content: "You are a helpful assistant" },
+    { role: "user", content: user },
+  ];
+}
+
+/* ------------------------------ upstream call ------------------------------ */
+
 /**
  * One POST to ${baseUrl}/chat/completions, with a single bounded retry on 5xx
  * (transient gateway flaps are the one failure worth an automatic second try;
@@ -481,11 +560,13 @@ export async function callExtractionEndpoint(opts: {
   html: string;
   schema: Record<string, unknown>;
   timeoutMs: number;
+  /** Prompt shape; default "html" (the pre-existing wire shape). */
+  prompt?: "html" | "schematron";
 }): Promise<{ content: string; usage: ExtractUsage; model: string; finishReason: string | undefined }> {
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body = JSON.stringify({
     model: opts.model,
-    messages: [{ role: "user", content: opts.html }],
+    messages: buildExtractionMessages(opts.prompt ?? "html", opts.html, opts.schema),
     temperature: 0,
     max_tokens: COMPLESION_TOKENS,
     response_format: { type: "json_schema", json_schema: { name: "extract", strict: true, schema: opts.schema } },
@@ -591,6 +672,9 @@ export async function extractPage(
   const timeoutMs = Math.min(args.timeoutMs ?? extractTimeoutMs(), MAX_TIMEOUT_MS);
   const baseUrl = args.baseUrl ?? extractBaseUrl();
   const model = args.model ?? extractModel();
+  // The arg wins over the env; validateExtractArgs already refused any other
+  // value from either source, so the cast cannot widen the contract.
+  const prompt = (args.prompt ?? extractPromptMode()) as "html" | "schematron";
   const apiKey = extractApiKey();
 
   return withPage(driver, args.target, async (page) => {
@@ -608,6 +692,7 @@ export async function extractPage(
       html: outcome.html,
       schema: args.schema,
       timeoutMs,
+      prompt,
     });
 
     // A completion cut off at max_tokens is NOT a JSON bug, and the endpoint

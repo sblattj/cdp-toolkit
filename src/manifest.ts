@@ -1811,6 +1811,14 @@ export const MANIFEST: ToolSpec[] = [
           "type": "integer",
           "description": "Timeout in milliseconds; default 90000, max 300000."
         },
+        "prompt": {
+          "type": "string",
+          "enum": [
+            "html",
+            "schematron"
+          ],
+          "description": "Prompt shape: 'html' (default) sends cleaned HTML only; 'schematron' uses the open-weight Schematron model-card prompt with the schema inline (or CDP_EXTRACT_PROMPT)."
+        },
         "model": {
           "type": "string",
           "description": "Extraction model name; default 'schematron' (or CDP_EXTRACT_MODEL)."
