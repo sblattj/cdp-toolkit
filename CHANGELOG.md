@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] - 2026-09-12
+
+### Fixed
+
+- **`extract_page { prompt: "schematron" }` no longer sends `response_format`.** Measured against a locally served open-weight Schematron-8B on `mlx_vlm.server` (llguidance-constrained decoding): with `response_format` present, a real CNN zone came back as `{"stories": []}` in 6 completion tokens; the IDENTICAL messages with `response_format` omitted returned valid, schema-conformant JSON with 5 stories in 285 tokens. A 3-link toy page worked either way, so the collapse only shows on real markup. The schema already rides inline in the schematron prompt, so constrained decoding on top of it was redundant and, on real pages, actively harmful; `response_format` is now omitted entirely (never sent as `null`) in `schematron` mode, unchanged in `html` mode. Since nothing constrains the shape server-side anymore in `schematron` mode, `extractPage` now also rejects a syntactically valid but non-object JSON response (array/null/primitive) with the same invalid-JSON error shape. One new unit test pins `html` mode still sending `response_format`; the existing schematron wire-shape test now asserts its absence (`test/extract.test.ts`).
+
 ## [2.5.0] - 2026-09-12
 
 ### Added

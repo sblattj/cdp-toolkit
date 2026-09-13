@@ -6,4 +6,4 @@
  * ready line; keeping it in its own module means a release bump touches one
  * line here plus package.json, not a const buried in the server.
  */
-export const VERSION = "2.5.0";
+export const VERSION = "2.5.1";
