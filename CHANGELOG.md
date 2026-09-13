@@ -5,7 +5,11 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.0] - 2026-09-12
+
+### Added
+
+- **`extract_page { prompt }` — a second prompt shape, for locally served open-weight Schematron.** The tool used to send the cleaned HTML as the ONLY user message and let `response_format: json_schema strict` carry the schema; that is right for the HOSTED Schematron API, which injects the schema into the prompt server-side, and wrong for open weights served locally (e.g. an MLX `pchamart/schematron8B-mlx-8bit` lane), which were fine-tuned on a prompt with the schema INSIDE the user message and return garbage from a bare-HTML prompt even under constrained decoding. `prompt:"schematron"` sends the `inference-net/Schematron-8B` model card's own messages verbatim — a `You are a helpful assistant` system message plus a user message with the compact `JSON.stringify`'d schema, the HTML, and the `MAKE SURE ITS VALID JSON.` tail. `prompt:"html"` (the default) is byte-identical to the previous wire shape; `CDP_EXTRACT_PROMPT` sets the default and the per-call arg wins over it; anything else is rejected before any page or network work. `response_format` is still sent in BOTH modes (llguidance-constrained decoding on mlx_vlm honours it, and it is harmless elsewhere). The schema text is charged to the prompt on top of the HTML — `maxChars` caps the HTML only, and the real number comes back in `usage.promptTokens`. Five new unit tests pin both wire shapes, the env/arg precedence and the rejection (`test/extract.test.ts`).
 
 ### Fixed
 

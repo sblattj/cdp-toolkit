@@ -90,7 +90,7 @@ function stubExtractDriver(cleaning: Partial<Cleaning> = {}) {
 /** The env surface the spec gives the tool. Saved/deleted in beforeEach,
  *  restored in afterEach, so every test sees the documented defaults unless it
  *  sets an override itself — a host-exported CDP_EXTRACT_MODEL cannot flake CI. */
-const ENV_VARS = ["CDP_EXTRACT_BASE_URL", "CDP_EXTRACT_MODEL", "CDP_EXTRACT_API_KEY", "CDP_EXTRACT_TIMEOUT_MS", "CDP_EXTRACT_MAX_CHARS"] as const;
+const ENV_VARS = ["CDP_EXTRACT_BASE_URL", "CDP_EXTRACT_MODEL", "CDP_EXTRACT_API_KEY", "CDP_EXTRACT_TIMEOUT_MS", "CDP_EXTRACT_MAX_CHARS", "CDP_EXTRACT_PROMPT"] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 const realFetch = globalThis.fetch;
@@ -271,7 +271,7 @@ describe("registration: registry, manifest, docs, groups", () => {
     const entry = MANIFEST.find((m) => m.name === "extract_page")!;
     const props = Object.keys(entry.inputSchema.properties ?? {}).sort();
     expect(props).toEqual(
-      ["baseUrl", "clean", "lease", "maxChars", "model", "savePath", "schema", "selector", "source", "target", "timeoutMs"].sort(),
+      ["baseUrl", "clean", "lease", "maxChars", "model", "prompt", "savePath", "schema", "selector", "source", "target", "timeoutMs"].sort(),
     );
   });
 
@@ -363,6 +363,122 @@ describe("the wire shape: what actually goes over fetch", () => {
     });
     expect(calls[0]!.url).toBe("http://elsewhere.test/api/chat/completions");
     expect((JSON.parse(String(calls[0]!.init.body)) as { model: string }).model).toBe("per-call-model");
+  });
+});
+
+/* ------------------------- 4b. the prompt shapes ------------------------- */
+
+/**
+ * The two prompt shapes are the whole point of the `prompt` arg, and the wire
+ * body is the only place the difference is observable — so these assert the
+ * EXACT strings that go over fetch, rebuilt here from the model card's own
+ * literal pieces rather than imported from the implementation (an assertion
+ * that imports the thing it checks cannot fail).
+ */
+describe("prompt shape: html (default) vs the Schematron model-card messages", () => {
+  const BASE = "http://loopback.test/v1";
+
+  /** inference-net/Schematron-8B README, `construct_messages`, verbatim. */
+  function cardUserMessage(schema: unknown, html: string): string {
+    return (
+      "You are going to be given a JSON schema following the standardized JSON Schema format. You are going to be given a HTML page and you are going to apply the schema to the HTML page however you see it as applicable and return the results in a JSON object. The schema is as follows:" +
+      "\n\n" +
+      JSON.stringify(schema) +
+      "\n\n" +
+      "Here is the HTML page:" +
+      "\n\n" +
+      html +
+      "\n\n" +
+      "MAKE SURE ITS VALID JSON."
+    );
+  }
+
+  function messagesOf(init: RequestInit): { role: string; content: string }[] {
+    return (JSON.parse(String(init.body)) as { messages: { role: string; content: string }[] }).messages;
+  }
+
+  test("the DEFAULT is unchanged: one user message, content === the cleaned html, no system message", async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    const calls = stubFetch(() => completionResponse());
+    const { driver, cleaning } = stubExtractDriver();
+
+    await extractPage(driver, { schema: VALID_SCHEMA });
+
+    const messages = messagesOf(calls[0]!.init);
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.role).toBe("user");
+    expect(messages[0]!.content).toBe(cleaning.html);
+    expect(messages.some((m) => m.role === "system")).toBe(false);
+  });
+
+  test('prompt:"schematron" sends exactly the model card system+user pair, schema compact and inline', async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    const calls = stubFetch(() => completionResponse());
+    const { driver, cleaning } = stubExtractDriver();
+
+    await extractPage(driver, { schema: VALID_SCHEMA, prompt: "schematron" });
+
+    const body = JSON.parse(String(calls[0]!.init.body)) as {
+      messages: { role: string; content: string }[];
+      response_format: { type: string; json_schema: { strict: boolean; schema: unknown } };
+    };
+    expect(body.messages.length).toBe(2);
+    expect(body.messages[0]).toEqual({ role: "system", content: "You are a helpful assistant" });
+    expect(body.messages[1]!.role).toBe("user");
+    expect(body.messages[1]!.content).toBe(cardUserMessage(VALID_SCHEMA, cleaning.html));
+    // The schema is COMPACT (json.dumps default separators), not pretty-printed.
+    expect(body.messages[1]!.content).toContain(JSON.stringify(VALID_SCHEMA));
+    expect(body.messages[1]!.content).not.toContain(JSON.stringify(VALID_SCHEMA, null, 2));
+    // response_format rides along in BOTH modes: llguidance honours it.
+    expect(body.response_format.type).toBe("json_schema");
+    expect(body.response_format.json_schema.strict).toBe(true);
+    expect(body.response_format.json_schema.schema).toEqual(VALID_SCHEMA);
+  });
+
+  test('CDP_EXTRACT_PROMPT=schematron selects it, and an explicit prompt:"html" arg beats the env', async () => {
+    process.env.CDP_EXTRACT_BASE_URL = BASE;
+    process.env.CDP_EXTRACT_PROMPT = "schematron";
+
+    const viaEnv = stubFetch(() => completionResponse());
+    const first = stubExtractDriver();
+    await extractPage(first.driver, { schema: VALID_SCHEMA });
+    const envMessages = messagesOf(viaEnv[0]!.init);
+    expect(envMessages.length).toBe(2);
+    expect(envMessages[0]!.content).toBe("You are a helpful assistant");
+    expect(envMessages[1]!.content).toBe(cardUserMessage(VALID_SCHEMA, first.cleaning.html));
+
+    const viaArg = stubFetch(() => completionResponse());
+    const second = stubExtractDriver();
+    await extractPage(second.driver, { schema: VALID_SCHEMA, prompt: "html" });
+    const argMessages = messagesOf(viaArg[0]!.init);
+    expect(argMessages.length).toBe(1);
+    expect(argMessages[0]!.role).toBe("user");
+    expect(argMessages[0]!.content).toBe(second.cleaning.html);
+  });
+
+  test("an invalid prompt value is refused before any page or network work", async () => {
+    const calls = forbidFetch();
+    const { driver, evaluated } = stubExtractDriver();
+    const err = await rejection(extractPage(driver, { schema: VALID_SCHEMA, prompt: "card" } as never));
+    expect(err).toBeInstanceOf(CdpError);
+    expect(err.message).toContain("'prompt'");
+    expect(err.message).toContain("html");
+    expect(err.message).toContain("schematron");
+    expect(calls.length).toBe(0);
+    expect(evaluated.length).toBe(0);
+  });
+
+  test("an invalid CDP_EXTRACT_PROMPT is refused too, naming the two values", async () => {
+    process.env.CDP_EXTRACT_PROMPT = "schematron8b";
+    const calls = forbidFetch();
+    const { driver, evaluated } = stubExtractDriver();
+    const err = await rejection(extractPage(driver, { schema: VALID_SCHEMA }));
+    expect(err).toBeInstanceOf(CdpError);
+    expect(err.message).toContain("CDP_EXTRACT_PROMPT");
+    expect(err.message).toContain("html");
+    expect(err.message).toContain("schematron");
+    expect(calls.length).toBe(0);
+    expect(evaluated.length).toBe(0);
   });
 });
 
