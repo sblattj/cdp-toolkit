@@ -87,7 +87,7 @@ npx -y --package cdp-toolkit cdp navigate_page --target index:0 --url https://ex
 # …or from a clone: `bun run src/cli.ts <tool> …`
 ```
 
-**Requirements:** Node ≥ 22 **or** Bun ≥ 1.1: `npx -y cdp-toolkit` and `bunx -y cdp-toolkit` both work (the published bins are plain Node ESM). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`.
+**Requirements:** Node ≥ 22 **or** Bun ≥ 1.1: `npx -y cdp-toolkit` and `bunx -y cdp-toolkit` both work (the published bins are plain Node ESM, and the server + CLI are CI-tested under both runtimes). Chrome/Chromium with `--remote-debugging-port=9222`. Smoke-check the port: `curl -s http://127.0.0.1:9222/json/version`. Under Bun only, `--transport streamable-http` (with `--port`/`--host`, default `127.0.0.1:3000`) serves the same MCP surface over loopback HTTP instead of stdio.
 
 ### MCP client setup
 

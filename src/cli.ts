@@ -29,6 +29,26 @@ import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
 import { MANIFEST } from "./manifest.ts";
 import { runInstaller } from "./install/wizard.ts";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+/**
+ * True when this module is the process's entry script — the ONLY condition under which main()
+ * runs. Works under both node and bun, ESM included: compare this module's real path with the
+ * realpath of argv[1] (realpath resolves the bunx/npm bin symlink and any /tmp-style symlinked
+ * directory). Importing this module (tests, embedders) leaves argv[1] pointing elsewhere, so the
+ * import stays silent — no tool dispatch, no usage message.
+ */
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return fileURLToPath(import.meta.url) === realpathSync(entry);
+  } catch {
+    // argv[1] may not exist as a file (eval strings, wrappers); never treat that as direct.
+    return false;
+  }
+}
 
 const USAGE = `cdp-toolkit: raw single-target CDP, 29-tool chrome-devtools-mcp parity, plus a Firefox backend over WebDriver BiDi.
 
@@ -330,10 +350,12 @@ async function main(): Promise<number> {
   });
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`${JSON.stringify({ error: message })}\n`);
-    process.exit(1);
-  });
+if (isDirectRun()) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`${JSON.stringify({ error: message })}\n`);
+      process.exit(1);
+    });
+}
