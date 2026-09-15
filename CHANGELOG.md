@@ -5,6 +5,19 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-09-15
+
+**Bun is now a first-class, CI-tested runtime, and the MCP server can serve streamable HTTP.** The package has always declared `engines.bun`, but nothing proved the server actually booted under Bun — or under Node, for that matter. This release pins both: the server and CLI run under Bun ≥ 1.1 or Node ≥ 22, importing `dist/mcp.js` / `dist/cli.js` as libraries is now silent (no server start, no CLI usage dump), and under Bun the same `mcp.js` entry can serve the full MCP surface over loopback HTTP with `--transport streamable-http` for hosts that launch it as an HTTP service instead of a stdio child.
+
+### Added
+
+- **`--transport streamable-http` (Bun only).** `mcp.js` accepts `--transport <stdio|streamable-http>` (default `stdio`, byte-identical behavior to previous releases), plus `--port` (default 3000; `0` picks an OS port, announced on the stderr listening line) and `--host` (default 127.0.0.1). The HTTP path is built on the MCP SDK 2.0's Web-standard `createMcpHandler` behind the same `buildServer()` factory stdio uses, so both transports can never drift apart; loopback host-header and origin validation are enforced in front of it. Launched under Node with `--transport streamable-http`, the server fails fast with a clear stderr message rather than half-serving. The listening URL goes to stderr only — stdout remains the stdio JSON-RPC channel. (`src/mcp.ts`)
+- **CI `runtime` job that gates the badge.** Boots the BUILT `dist/mcp.js` under both `node` (22, matching the `engines.node` floor) and `bun` on every push/PR: silent-import checks for `dist/mcp.js` and `dist/cli.js` under both runtimes, a hand-rolled stdio JSON-RPC `initialize` + `tools/list` handshake under both runtimes (no SDK client, so the wire is what's asserted), and a streamable-http `initialize` round-trip under Bun. No browser involved, so every failure is a real regression. New `bun run test:runtime` runs the same suite locally (`test/runtime-entry.test.ts`, 7 tests). (`.github/workflows/ci.yml`)
+
+### Fixed
+
+- **Importing the entries is now silent under both runtimes.** `dist/mcp.js` and `dist/cli.js` used to start serving / print usage the moment any bundler or `require.resolve`-style host imported them. Both files now gate on a direct-run check (`realpathSync(process.argv[1])` against `import.meta.url`, which handles bin symlinks under npm/bunx and works identically under Node and Bun, ESM-only): only direct/bin invocation runs the server or CLI; library import is side-effect free. `buildServer` is exported from `src/mcp.ts` for embedders. (`src/mcp.ts`, `src/cli.ts`)
+
 ## [2.5.1] - 2026-09-12
 
 ### Fixed
