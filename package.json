@@ -1,6 +1,6 @@
 {
   "name": "cdp-toolkit",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "A lightweight chrome-devtools-mcp alternative: an MCP server + CLI that drives the tabs you name, one target per call over one direct WebSocket, with a bounded timeout on every call, so a stuck page can't wedge your agent or force a /mcp restart. Chrome over CDP and Firefox over WebDriver BiDi, with tools a backend can't run absent from tools/list rather than throwing mid-task. 48 tools including built-in network mocking, a cookie group, tab leases with human-activity detection, real HTML5 drag-and-drop, raw mouse/scroll dispatch, downloads, permission grants, and tab-to-video screen recording so several agents can drive one browser without stealing each other's tabs or a human's. No Puppeteer, no all-target fan-out.",
   "type": "module",
   "license": "MIT",
@@ -73,6 +73,7 @@
     "mcp": "bun run ./src/mcp.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:runtime": "bun test test/runtime-entry.test.ts",
     "smoke": "bun run ./test/smoke.ts",
     "mock:smoke": "bun run ./test/mock-smoke.ts",
     "screencast:smoke": "bun run ./test/screencast-smoke.ts",
