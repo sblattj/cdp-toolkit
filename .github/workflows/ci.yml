@@ -63,3 +63,28 @@ jobs:
       - run: bun run firefox:smoke
         env:
           FIREFOX_BIN: ${{ steps.setup-firefox.outputs.firefox-path }}
+
+  runtime:
+    name: MCP server under bun + node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # Pinned to a full commit SHA, not the floating `v4` tag: a floating ref
+      # is a supply-chain hole in a public repo.
+      # SHA resolved from `gh api repos/actions/setup-node/commits/v4`
+      # on 2026-09-15, which was v4.4.0 at the time.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22 # the engines.node >= 22 floor
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      # Unlike the `smoke` job above, this one is NOT `|| true` and DOES gate
+      # the badge. `smoke` soft-fails because its tools/call round-trip depends
+      # on a flaky CI Chrome nobody controls; this job has no browser
+      # dependency at all — test/runtime-entry.test.ts spawns the built server
+      # under both runtimes with hand-rolled JSON-RPC — so every failure here
+      # is a real regression, not CI flake. Do not add `|| true` here either.
+      - run: bun run test:runtime

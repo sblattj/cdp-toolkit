@@ -1,14 +1,20 @@
 #!/usr/bin/env bun
 /**
- * cdp-toolkit MCP server (stdio).
+ * cdp-toolkit MCP server (stdio by default, streamable-http on request).
  *
  * Exposes the toolkit's raw-CDP tools to any MCP client (Claude Code, etc.) over
- * the standard stdio transport. It does NOT connect to Chrome at startup: each
- * tool call lazily opens a single-target CDP connection (with its own timeout),
- * so the server loads cleanly even when Chrome isn't running; individual calls
- * then fail with a clear error if the browser is unreachable.
+ * the standard stdio transport, or — with `--transport streamable-http` — over
+ * an HTTP/SSE listener served by Bun. It does NOT connect to Chrome at startup:
+ * each tool call lazily opens a single-target CDP connection (with its own
+ * timeout), so the server loads cleanly even when Chrome isn't running;
+ * individual calls then fail with a clear error if the browser is unreachable.
+ *
+ * Importing this module is side-effect-free: the server starts only when the
+ * file is the directly executed entry (bin invocation or `bun run src/mcp.ts`),
+ * never when imported (see isDirectRun below).
  *
  * Launch: `bunx -y cdp-toolkit`  (or `bun run src/mcp.ts` from a checkout)
+ *   HTTP:  `bun run src/mcp.ts --transport streamable-http [--port 3000] [--host 127.0.0.1]`
  * Config:  CDP_BASE (default http://127.0.0.1:9222), CDP_TIMEOUT_MS, CDP_ARTIFACT_DIR,
  *          CDP_TOOL_PROFILE (`full` — the default — advertises every group; `core` advertises
  *          just the 12 everyday tools; or a comma-separated group list, e.g. `core,network`.
@@ -21,6 +27,15 @@
 import { Server } from "@modelcontextprotocol/server";
 import type { Tool } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import {
+  createMcpHandler,
+  hostHeaderValidationResponse,
+  localhostAllowedHostnames,
+  localhostAllowedOrigins,
+  originValidationResponse,
+} from "@modelcontextprotocol/server";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
 import { resolveBackend, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
@@ -31,6 +46,84 @@ import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts
 import { resolveProfile, TOOL_GROUP, TOOL_GROUPS, GROUP_TOOLS } from "./toolGroups.ts";
 import { TOOL_DOCS } from "./toolDocs.ts";
 import { VERSION } from "./version.ts";
+
+// Bun.serve is the HTTP transport's listener: a Bun-only global, typed here (not via bun-types,
+// which CONTRACT.md keeps out of the dependency set) in the narrow shape this file uses. The code
+// below never touches it unless --transport streamable-http was requested, and checks
+// `typeof Bun === "undefined"` first so running under plain node fails with a clear message
+// instead of a ReferenceError. The declaration emits nothing — at runtime the identifier resolves
+// to the real global when one exists.
+declare const Bun: {
+  serve(opts: {
+    port: number;
+    hostname: string;
+    fetch(req: Request): Promise<Response> | Response;
+  }): { stop(): void; port: number };
+};
+
+/**
+ * True when this module is the process's entry script — the ONLY condition under which the
+ * server starts. Works under both node and bun, ESM included: compare this module's real path
+ * with the realpath of argv[1]. realpathSync resolves the bunx/npm bin symlink (argv[1] is the
+ * symlink, the module URL is its target) and any /tmp-style symlinked directory; when argv[1] is
+ * absent (e.g. `node -e`/REPL importing this file) the answer is simply "not direct". A plain
+ * `import(".../mcp.js")` from another module leaves argv[1] pointing at that other entry, so the
+ * import stays silent.
+ */
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return fileURLToPath(import.meta.url) === realpathSync(entry);
+  } catch {
+    // argv[1] may not exist as a file (eval strings, wrappers); never treat that as direct.
+    return false;
+  }
+}
+
+/** What --transport/--port/--host asked for. stdio is the default and stays byte-for-byte unchanged. */
+interface ServeOptions {
+  transport: "stdio" | "streamable-http";
+  port: number;
+  host: string;
+}
+
+/**
+ * Parse the serving flags from the same argv resolveBackend reads (it scans only --browser and
+ * --connect, so these extra tokens were already invisible to it). An unknown --transport value or
+ * a non-port --port is a hard configuration error, mirroring resolveBackend's loud failures.
+ */
+function parseServeOptions(argv: readonly string[]): ServeOptions {
+  const out: ServeOptions = { transport: "stdio", port: 3000, host: "127.0.0.1" };
+  const transportIdx = argv.indexOf("--transport");
+  if (transportIdx !== -1) {
+    const value = argv[transportIdx + 1];
+    if (value !== "stdio" && value !== "streamable-http") {
+      throw new Error(`unknown --transport '${value ?? ""}': expected 'stdio' or 'streamable-http'`);
+    }
+    out.transport = value;
+  }
+  const portIdx = argv.indexOf("--port");
+  if (portIdx !== -1) {
+    const raw = argv[portIdx + 1];
+    const port = Number(raw);
+    // 0 is valid HERE (unlike backend.ts's dial-out endpoints): for a listener it means "let the
+    // OS pick a free port", and the resolved port is then announced on stderr (see run()).
+    if (raw === undefined || !/^\d+$/.test(raw) || port < 0 || port > 65_535) {
+      throw new Error(`invalid --port '${raw ?? ""}': expected an integer 0-65535`);
+    }
+    out.port = port;
+  }
+  const hostIdx = argv.indexOf("--host");
+  if (hostIdx !== -1) {
+    const raw = argv[hostIdx + 1];
+    if (raw === undefined || raw === "") {
+      throw new Error(`invalid --host '${raw ?? ""}': expected a hostname or address`);
+    }
+    out.host = raw;
+  }
+  return out;
+}
 
 // Backend + (Firefox only) attach endpoint are read once at startup (MCP has no per-call notion
 // of backend): --browser flag / CDP_BROWSER env, else "chrome" (zero behavior change for existing
@@ -163,7 +256,7 @@ const LIST_CACHE_HINT = { ttlMs: 3_600_000, cacheScope: "public" } as const;
  * our manifest is plain JSON Schema (src/manifest.ts). McpServer also cannot express
  * "hidden tools remain callable by name", which is the whole point of CDP_TOOL_PROFILE.
  */
-function buildServer(): Server {
+export function buildServer(): Server {
   const server = new Server(
     { name: "cdp-toolkit", version: VERSION },
     {
@@ -236,47 +329,105 @@ function buildServer(): Server {
   return server;
 }
 
-auditCoverage();
-// This process is the long-lived MCP server, which is what makes strict mode
-// (CDP_REQUIRE_LEASE) safe to honor here and unsafe in cli.ts. See requireLease.
-markLongLivedProcess();
+/**
+ * Start serving: stdio (the default) or the streamable-http listener. Only ever called from the
+ * isDirectRun guard below — importing this module must stay silent.
+ */
+async function run(argv: string[]): Promise<void> {
+  const serve = parseServeOptions(argv);
+  auditCoverage();
+  // This process is the long-lived MCP server, which is what makes strict mode
+  // (CDP_REQUIRE_LEASE) safe to honor here and unsafe in cli.ts. See requireLease.
+  markLongLivedProcess();
 
-// serveStdio owns the era decision for the connection: a modern opening (server/discover
-// with the per-request _meta envelope) pins a 2026-07-28 instance, a 2025-era `initialize`
-// pins a legacy one. legacy:'serve' (the default) is deliberate — 2025-era clients keep the
-// initialize handshake they expect, so this upgrade is invisible to them.
-const handle = serveStdio(
-  ({ era }) => {
-    console.error(`[cdp-toolkit] connection pinned to the ${era} protocol era`);
-    return buildServer();
-  },
-  { onerror: (err) => console.error(`[cdp-toolkit] stdio: ${err.message}`) },
-);
-console.error(
-  `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}`,
-);
+  // Per-transport state the shutdown path closes (only one is ever set).
+  let stdioHandle: Awaited<ReturnType<typeof serveStdio>> | undefined;
+  let httpHandler: ReturnType<typeof createMcpHandler> | undefined;
+  let listener: { stop(): void; port: number } | undefined;
 
-// LAUNCH-mode Firefox owns a real OS process (see bidi/launch.ts): it must be reaped on every
-// shutdown path, not just a clean exit. ATTACH-mode Firefox (CDP_FIREFOX_ENDPOINT / --connect)
-// owns no process here — disposeFirefoxSession() below only ends its BiDi session (freeing
-// Firefox's single session slot) and closes the socket, leaving the user's browser running.
-// SIGINT/SIGTERM cover ctrl-C and a supervising client killing the server; stdin 'close' covers
-// the normal MCP shutdown (the client closes the stdio pipe). All three are idempotent through
-// disposeFirefoxSession(), and a no-op entirely when Firefox was never launched/attached.
-let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  await disposeFirefoxSession();
-  // The standing browser-endpoint connection behind wait_for_download / grant_permissions (1.8.0
-  // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is
-  // closed explicitly so shutdown does not depend on that, and is a no-op when neither tool ran.
-  await disposeBrowserSession();
-  // Close the stdio connection (pinned instance + transport) last, so a tool call still
-  // in flight over it cannot outlive the browser resources it was driving.
-  await handle.close().catch(() => undefined);
-  process.exit(0);
+  // LAUNCH-mode Firefox owns a real OS process (see bidi/launch.ts): it must be reaped on every
+  // shutdown path, not just a clean exit. ATTACH-mode Firefox (CDP_FIREFOX_ENDPOINT / --connect)
+  // owns no process here — disposeFirefoxSession() below only ends its BiDi session (freeing
+  // Firefox's single session slot) and closes the socket, leaving the user's browser running.
+  // SIGINT/SIGTERM cover ctrl-C and a supervising client killing the server; in stdio mode the
+  // stdin 'close' event covers the normal MCP shutdown (the client closes the pipe). All are
+  // idempotent through disposeFirefoxSession(), and a no-op entirely when Firefox was never
+  // launched/attached.
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await disposeFirefoxSession();
+    // The standing browser-endpoint connection behind wait_for_download / grant_permissions (1.8.0
+    // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is
+    // closed explicitly so shutdown does not depend on that, and is a no-op when neither tool ran.
+    await disposeBrowserSession();
+    // Close the active transport last, so a tool call still in flight over it cannot outlive the
+    // browser resources it was driving. For http this also stops accepting new connections.
+    if (stdioHandle) await stdioHandle.close().catch(() => undefined);
+    if (httpHandler) await httpHandler.close().catch(() => undefined);
+    if (listener) listener.stop();
+    process.exit(0);
+  }
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+
+  if (serve.transport === "stdio") {
+    // serveStdio owns the era decision for the connection: a modern opening (server/discover
+    // with the per-request _meta envelope) pins a 2026-07-28 instance, a 2025-era `initialize`
+    // pins a legacy one. legacy:'serve' (the default) is deliberate — 2025-era clients keep the
+    // initialize handshake they expect, so this upgrade is invisible to them.
+    stdioHandle = serveStdio(
+      ({ era }) => {
+        console.error(`[cdp-toolkit] connection pinned to the ${era} protocol era`);
+        return buildServer();
+      },
+      { onerror: (err) => console.error(`[cdp-toolkit] stdio: ${err.message}`) },
+    );
+    process.stdin.on("close", () => void shutdown());
+    console.error(
+      `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}`,
+    );
+    return;
+  }
+
+  // streamable-http: Bun.serve + the SDK's web-standard handler. DNS-rebinding protection comes
+  // from the SDK's host/origin validators composed in front (each returns an error Response for a
+  // disallowed request, undefined to fall through); the localhost allowlists match the default
+  // loopback bind. Everything diagnostic goes to stderr — stdout stays the stdio JSON-RPC channel
+  // only, and even here it must carry nothing (an http client never reads it).
+  if (typeof Bun === "undefined") {
+    console.error(
+      "[cdp-toolkit] --transport streamable-http needs Bun's HTTP listener (Bun.serve). Re-run with bun, or use the default stdio transport.",
+    );
+    process.exit(1);
+  }
+  httpHandler = createMcpHandler(
+    ({ era }) => {
+      console.error(`[cdp-toolkit] connection pinned to the ${era} protocol era`);
+      return buildServer();
+    },
+    { onerror: (err) => console.error(`[cdp-toolkit] http: ${err.message}`) },
+  );
+  listener = Bun.serve({
+    port: serve.port,
+    hostname: serve.host,
+    fetch: (req) =>
+      hostHeaderValidationResponse(req, localhostAllowedHostnames()) ??
+      originValidationResponse(req, localhostAllowedOrigins()) ??
+      httpHandler!.fetch(req),
+  });
+  // The resolved port is announced as a bare `port N` token BEFORE the URL text, so a stderr
+  // scanner finds the real listening port first (matters under --port 0, where N is the
+  // OS-assigned one and the only place it is knowable).
+  console.error(
+    `[cdp-toolkit] MCP server v${VERSION} listening on streamable-http port ${listener.port} (http://${serve.host}:${listener.port}/), browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}`,
+  );
 }
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
-process.stdin.on("close", () => void shutdown());
+
+if (isDirectRun()) {
+  run(process.argv.slice(2)).catch((err: unknown) => {
+    console.error(`[cdp-toolkit] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
