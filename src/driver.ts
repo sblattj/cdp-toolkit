@@ -153,7 +153,8 @@ export type Capability =
   | "emulate.focus" // fake page focus without moving the OS window (focus_emulation / click_focus_gated); Chrome only — BiDi's emulation module has no focus primitive
   | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
   | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome only
-  | "worker.targets"; // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
+  | "worker.targets" // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
+  | "frame.targets"; // address an out-of-process (cross-origin) iframe as a target ("frame:<substr>"); Chrome only — same-site iframes are not targets at all
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
