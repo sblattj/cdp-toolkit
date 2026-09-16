@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Wedge benchmark (`bun run bench:wedge`).** A runnable, CI-able proof of the core claim: an isolated headless Chrome drives a throwaway page into an endpoint that accepts the connection and never responds, 8 times, and measures the whole stuck-page lifecycle — the wedged `navigate` rejects at the configured bound (15.03s observed against the default 15s bound), a witness tab keeps answering at healthy latency mid-brick (p95 3ms), and closing the bricked tab plus reopening evaluates at p95 89ms with zero `/mcp` restarts. Also reports, as an observation rather than a failure, that the stuck page itself stays unresponsive while its load is pending: the blast radius is the tab, not the server. (`scripts/wedge-bench.ts`)
+
 ## [2.7.0] - 2026-09-15
 
 **Cross-origin iframes are now discoverable and addressable.** A visible out-of-process iframe used to be a silent hole: `take_snapshot` on the parent page stopped at a bare `Iframe` line with no hint that an entire interactable document lived behind it, `list_pages` hid the iframe's target by default, and the only way to drive it was to know that a raw target id from `list_pages {all:true}` happened to work. Now the snapshot marks the boundary, the docs say the target exists, and a `frame:` selector addresses it by URL. Verified live against Chrome 153 with a real cross-origin iframe: marker present in both snapshot modes, `evaluate_script`/`take_snapshot` drive the frame through both its target id and the new selector, and two iframes with the same URL produce an ambiguity error naming both ids instead of a silent first-match.
