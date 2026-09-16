@@ -63,6 +63,19 @@ export interface CdpEvent<P = Record<string, unknown>> {
  *     listing, because a worker is not a page target — and a worker that is
  *     idle-evicted is in no listing at all, which is what `wake` exists for.
  *     See src/workers.ts and src/cdp/workers.ts.
+ *   - "frame:<substring>"    -> the out-of-process (cross-origin) IFRAME target
+ *     whose url contains the substring (site isolation gives an OOPIF its own
+ *     process and its own target, type "iframe"). Chrome-only, like "worker:",
+ *     but accepted by EVERY target-taking tool except the four page-only ones
+ *     (close/select/release/claim act on the embedder tab): the arm lives in
+ *     pickTarget itself, the one resolver every Chrome tool's target flows
+ *     through, so no per-tool wiring was needed or added. Reads the UNFILTERED
+ *     listing; a SAME-ORIGIN iframe is not a target at all (it runs inside its
+ *     parent page) and can only be reached through the parent. Refused with a
+ *     capability error on Firefox (no iframe targets exist in BiDi's context
+ *     model) and by the page-only resolvers. See src/frames.ts. A bare iframe
+ *     targetId from list_pages{all:true} also still resolves via the bare-id
+ *     arm below.
  */
 export type TargetSelector = string | undefined;
 

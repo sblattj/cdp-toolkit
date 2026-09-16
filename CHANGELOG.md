@@ -5,6 +5,23 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-09-15
+
+**Cross-origin iframes are now discoverable and addressable.** A visible out-of-process iframe used to be a silent hole: `take_snapshot` on the parent page stopped at a bare `Iframe` line with no hint that an entire interactable document lived behind it, `list_pages` hid the iframe's target by default, and the only way to drive it was to know that a raw target id from `list_pages {all:true}` happened to work. Now the snapshot marks the boundary, the docs say the target exists, and a `frame:` selector addresses it by URL. Verified live against Chrome 153 with a real cross-origin iframe: marker present in both snapshot modes, `evaluate_script`/`take_snapshot` drive the frame through both its target id and the new selector, and two iframes with the same URL produce an ambiguity error naming both ids instead of a silent first-match.
+
+### Added
+
+- **OOPIF markers in `take_snapshot`.** When an emitted `<iframe>` node owns an out-of-process (cross-origin) frame, its snapshot line now carries the frame's identity: `[4821] Iframe "Checkout" [frame="F405BF…" frameUrl="https://example.com/"]`. `frame` is the frame id, which IS the iframe's CDP target id — feed it straight back as `target` to any interaction tool. The marker appears in `interactiveOnly` mode too (an iframe at a process boundary is itself the interactable thing), while same-origin iframes are unchanged: their AX subtrees were already merged into the parent tree. Detection drives off the browser's target list correlated through `DOM.getFrameOwner` — deliberately not `Page.getFrameTree`, which omits out-of-process child frames on a page-level attachment (observed Chrome 153) — and is failure-soft end to end: any error in detection degrades to the pre-marker snapshot, never a failed call. (`src/cdp/driver.ts`, `test/iframe-markers.test.ts`)
+- **`frame:<url-substring>` target selector (Chrome).** Resolves against the browser's out-of-process iframe targets by URL substring, so an iframe is addressable without first correlating raw target ids out of `list_pages {all:true}`. Follows the `worker:` arm's rules: an empty needle matches nothing, more than one match is an ambiguity error naming every id+url (never a silent first-match), and a miss lists the live iframes and teaches that only out-of-process iframes appear as targets. Accepted by every tool whose `target` flows through the shared resolver (evaluate_script, take_snapshot, click, screenshot, …); `close_page`/`select_page`/`release_page`/`claim_page` refuse it with a page-only message, and Firefox refuses it with `unsupported` naming the `frame.targets` capability, same as `worker:`. A bare iframe target id still resolves everywhere it did before. (`src/frames.ts`, `src/client.ts`, `src/shared-tools.ts`, `src/bidi/driver.ts`, `test/frame-selector.test.ts`)
+
+### Documented
+
+- `list_pages {all:true}` now says it lists out-of-process iframes (not just workers/background pages) and that a returned non-page targetId is accepted as a bare id by any tool's `target` param — in the tool's deep doc, the manifest, the MCP server instructions, the README tools table and target-grammar bullet, the CLI help grammar, and the CONTRACT grammar rule. The snapshot doc names the cross-origin boundary and the marker. (`src/toolDocs.ts`, `src/mcp.ts`, `src/manifest.ts`, `README.md`, `CONTRACT.md`, `skills/using-cdp-toolkit/SKILL.md`)
+
+### Deferred
+
+- Recursing child-frame accessibility nodes into the parent snapshot is NOT in this release. `backendDOMNodeId` uids are per-renderer-process, so child-frame uids would collide with parent uids under every interaction tool's `DOM.resolveNode` — recursion requires session-aware uid namespacing across all nine interaction tools, plus a BiDi-side answer where no AX domain exists. The marker + `frame:` pair ships the discoverability without that surgery.
+
 ## [2.6.0] - 2026-09-15
 
 **Bun is now a first-class, CI-tested runtime, and the MCP server can serve streamable HTTP.** The package has always declared `engines.bun`, but nothing proved the server actually booted under Bun — or under Node, for that matter. This release pins both: the server and CLI run under Bun ≥ 1.1 or Node ≥ 22, importing `dist/mcp.js` / `dist/cli.js` as libraries is now silent (no server start, no CLI usage dump), and under Bun the same `mcp.js` entry can serve the full MCP surface over loopback HTTP with `--transport streamable-http` for hosts that launch it as an HTTP service instead of a stdio child.
