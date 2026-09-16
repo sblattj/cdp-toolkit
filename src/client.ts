@@ -15,6 +15,14 @@ import {
   workerNeedle,
   WORKER_EMPTY_NEEDLE_MESSAGE,
 } from "./workers.ts";
+import {
+  frameAmbiguityMessage,
+  frameMissMessage,
+  frameNeedle,
+  isFrameSelector,
+  resolveFrameTargets,
+  FRAME_EMPTY_NEEDLE_MESSAGE,
+} from "./frames.ts";
 
 /** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
 export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
@@ -283,6 +291,20 @@ async function pickTarget(targets: Target[], selector: TargetSelector): Promise<
     if (matches.length > 1) throw new CdpError(workerAmbiguityMessage(needle, matches));
     if (matches.length === 1) return matches[0]!;
     throw new CdpError(workerMissMessage(needle, { wakeAttempted: false, liveWorkers }));
+  }
+  if (isFrameSelector(selector)) {
+    // Also resolved against the UNFILTERED listing: an out-of-process iframe is
+    // its own target (site isolation), but not a PAGE target, so `pages` never
+    // contains it. Unlike the worker arm, the returned hit deliberately still
+    // flows through resolveTarget's lease gate below — a bare iframe id does
+    // too today, and this arm is a way of NAMING that same target, not a new
+    // permission to bypass who holds the embedder tab's lease.
+    const needle = frameNeedle(selector);
+    if (needle === "") throw new CdpError(FRAME_EMPTY_NEEDLE_MESSAGE);
+    const { matches, liveFrames } = resolveFrameTargets(targets, needle);
+    if (matches.length > 1) throw new CdpError(frameAmbiguityMessage(needle, matches));
+    if (matches.length === 1) return matches[0]!;
+    throw new CdpError(frameMissMessage(needle, liveFrames));
   }
   // bare id
   const byId = targets.find((t) => t.id === selector);

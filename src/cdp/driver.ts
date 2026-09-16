@@ -652,7 +652,7 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "screenshot.fullPage", "screenshot.element", "screenshot.scale", "screenshot.renderSize", "screenshot.tile", "network.intercept",
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.html5Drag", "emulate.focus",
-  "browser.downloads", "browser.permissions", "worker.targets",
+  "browser.downloads", "browser.permissions", "worker.targets", "frame.targets",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -820,10 +820,36 @@ class CdpPageDriver implements PageDriver {
     const { objectId } = await resolveElementLocator(this.conn, loc);
     return this.callFn(objectId, functionDeclaration, args, true);
   }
+  /**
+ * OOPIF MARKERS (issue #7 fix 1): which emitted snapshot nodes own an out-of-process iframe.
+ *
+ * Chrome's Accessibility.getFullAXTree includes the <iframe> ELEMENT's AX node (role "Iframe",
+ * with a backendDOMNodeId) but not the subtree of an out-of-process iframe (OOPIF): that subtree
+ * lives in a separate renderer/AX tree, so its contents are simply absent and a caller reading
+ * the snapshot has no signal that an entire interactable document ends at that line. Same-origin
+ * iframes ARE merged into the one response, so they need no marker — only process-isolated
+ * frames do, and process isolation is decided by Chrome, not by any origin heuristic here.
+ *
+ * Truth source: the browser's target list (`/json/list`) names every OOPIF as its own target of
+ * type "iframe", and an OOPIF's target id IS its frame id. `Page.getFrameTree` is deliberately
+ * NOT used here: on a page-level websocket attachment it omits out-of-process child frames
+ * (observed Chrome 153: same DOM with the <iframe>, frame tree with no childFrames), which is
+ * exactly the set this marker exists for. DOM.getFrameOwner maps each candidate frame id to the
+ * backendNodeId of the owning <iframe> element — the node snapshot() is about to emit; it throws
+ * for frame ids this page doesn't own, which is the filter.
+ *
+ * The marker rides the node's existing `extras` map ("frame" = frame/target id, "frameUrl" when
+ * the frame tree reported one) because SnapshotNode is owned by ../driver.ts and shared with the
+ * BiDi driver; renderSnapshotLine renders unknown extras keys quoted, which is the desired shape
+ * (`[frame="A1B2..."]`). Everything here is failure-soft by design: a snapshot must never fail
+ * because marker detection did, so any error returns an empty map and the snapshot degrades to
+ * exactly its pre-marker output.
+ */
   async snapshot(opts?: { interactiveOnly?: boolean }): Promise<SnapshotNode[]> {
     const interactiveOnly = opts?.interactiveOnly ?? false;
     await this.ensureDomain("Accessibility");
     const { nodes } = await this.conn.send<{ nodes: AxNode[] }>("Accessibility.getFullAXTree");
+    const oopifFrames = await this.detectOopifFrames();
     const byId = new Map<string, AxNode>();
     for (const n of nodes) byId.set(n.nodeId, n);
     const roots = nodes.filter((n) => !n.parentId || !byId.has(n.parentId));
@@ -837,11 +863,20 @@ class CdpPageDriver implements PageDriver {
     const walk = (node: AxNode, depth: number): void => {
       const role = axString(node.role);
       const name = axString(node.name);
-      const backendNodeId = node.backendDOMNodeId;
-      const emitted = !node.ignored && backendNodeId !== undefined && (interactiveOnly ? isInteractive(role) : !!(role || name));
+      const backendDOMNodeId = node.backendDOMNodeId;
+      const marker = backendDOMNodeId !== undefined ? oopifFrames.get(backendDOMNodeId) : undefined;
+      // interactiveOnly drops "Iframe" (not in INTERACTIVE_ROLES), but an iframe carrying an
+      // OOPIF marker is itself the accessibility boundary of an entire process, so it is
+      // emitted anyway: the default view must surface that the boundary exists. Everything
+      // else about the emit rule is unchanged, and the depth rule below is untouched.
+      const emitted = !node.ignored && backendDOMNodeId !== undefined && (interactiveOnly ? isInteractive(role) || marker !== undefined : !!(role || name));
       if (emitted) {
         const extras = axExtras(node);
-        out.push({ uid: encodeUid(backendNodeId as number), role: role ?? "generic", depth, ...(name ? { name } : {}), ...(Object.keys(extras).length ? { extras } : {}) });
+        if (marker) {
+          extras.frame = marker.frameId;
+          if (marker.frameUrl) extras.frameUrl = marker.frameUrl;
+        }
+        out.push({ uid: encodeUid(backendDOMNodeId as number), role: role ?? "generic", depth, ...(name ? { name } : {}), ...(Object.keys(extras).length ? { extras } : {}) });
       }
       const childDepth = emitted && !interactiveOnly ? depth + 1 : depth;
       for (const childId of node.childIds ?? []) {
@@ -851,6 +886,36 @@ class CdpPageDriver implements PageDriver {
     };
     for (const root of roots) walk(root, 0);
     return out;
+  }
+  /**
+   * The marker map behind snapshot()'s OOPIF annotations (see snapshot()'s OOPIF MARKERS block):
+   * backendNodeId of the owning <iframe> element -> { frameId (= CDP target id), frameUrl }.
+   * Failure-soft end to end: any error anywhere in the round-trip yields an EMPTY map, never a
+   * failed snapshot. DOM.getFrameOwner throws for the main frame, which is why only non-main
+   * frames are visited; ensureDomainSoft covers the DOM.enable it requires without making a
+   * failed enable break anything else (getFrameOwner would simply throw into the same catch).
+   */
+  private async detectOopifFrames(): Promise<Map<number, { frameId: string; frameUrl?: string }>> {
+    const markers = new Map<number, { frameId: string; frameUrl?: string }>();
+    try {
+      await this.ensureDomainSoft("DOM");
+      // Process-isolation truth, not an origin heuristic: every OOPIF has its own iframe-type
+      // CDP target whose id IS its frame id (listTargets is client.ts's /json/list). This page
+      // owns only some of them — DOM.getFrameOwner throws for any frame id the page doesn't own
+      // (notably iframe targets inside OTHER tabs), and that throw is the ownership filter.
+      const iframeTargets = (await listTargets()).filter((t) => t.type === "iframe");
+      for (const target of iframeTargets) {
+        const owner = await this.conn
+          .send<{ backendNodeId?: number }>("DOM.getFrameOwner", { frameId: target.id })
+          .catch(() => ({ backendNodeId: undefined }));
+        if (typeof owner.backendNodeId === "number") {
+          markers.set(owner.backendNodeId, { frameId: target.id, ...(target.url ? { frameUrl: target.url } : {}) });
+        }
+      }
+    } catch {
+      // Deliberately empty: see the doc comment. Markers are an annotation, not a guarantee.
+    }
+    return markers;
   }
   async locate(loc: ElementLocator): Promise<DriverUid> {
     return encodeUid(await backendNodeIdOf(this.conn, loc));

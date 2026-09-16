@@ -46,6 +46,7 @@ import {
 import { assertLeaseOk, defaultLabel, isPidAlive } from "../leases.ts";
 import { resolveLiveLabel } from "../origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "../workers.ts";
+import { FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "../frames.ts";
 import { BEACON_FUNCTION_DECLARATION, BEACON_READ_EXPRESSION, BEACON_SOURCE, recordDispatch } from "../activity.ts";
 import { BidiConnection, BidiError, connectBidiSessionUrl } from "./client.ts";
 import {
@@ -844,6 +845,13 @@ async function pickContext(
     // alternative the bare-id fall-through would produce, which is a confusing
     // "no context matching 'worker:abc'" that reads like a typo.
     throw driverError("unsupported", WORKER_SELECTOR_UNSUPPORTED_MESSAGE);
+  }
+  if (isFrameSelector(selector)) {
+    // Capability-gated for the same reason as the worker: arm above. WebDriver
+    // BiDi has no iframe TARGET to resolve to — an iframe is a realm inside its
+    // tab's browsing context — so the honest error names the capability
+    // ('frame.targets', Chrome-only) rather than retrying or reading as a typo.
+    throw driverError("unsupported", FRAME_SELECTOR_UNSUPPORTED_MESSAGE);
   }
   const exact = contexts.find((c) => c.context === selector);
   if (exact) return exact;
