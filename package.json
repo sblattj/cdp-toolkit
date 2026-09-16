@@ -75,6 +75,7 @@
     "test": "bun test",
     "test:runtime": "bun test test/runtime-entry.test.ts",
     "smoke": "bun run ./test/smoke.ts",
+    "bench:wedge": "bun run scripts/wedge-bench.ts",
     "mock:smoke": "bun run ./test/mock-smoke.ts",
     "screencast:smoke": "bun run ./test/screencast-smoke.ts",
     "mcp:smoke": "bun run ./test/mcp-smoke.ts",
