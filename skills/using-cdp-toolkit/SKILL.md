@@ -59,6 +59,7 @@ Every page-scoped tool takes `target`:
 | `title:<substr>` | first tab whose title contains substr |
 | `label:<name>` | the tab with exactly this label — checked against both tabs this toolkit opened and tabs claimed under that label, so it works even for a takeover with no creation record |
 | `<32-hex targetId>` | that exact tab |
+| `frame:<substr>` | first out-of-process (cross-origin) iframe whose URL contains substr — Chrome only; its targetId from `list_pages{all:true}` also works as a bare id |
 
 **Resolve by a `targetId` you created, or by the `label:` you gave it, never by `title:`/`url:` on a busy or shared browser** — a lookalike tab (staging copy, the human's own tab) matches `title:`/`url:` with no error and plausible output; `label:` is an exact match against a name only you assigned, so it can't collide with someone else's tab the way a substring can. See "Parallel agents."
 

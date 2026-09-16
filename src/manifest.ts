@@ -35,7 +35,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "all": {
           "type": "boolean",
-          "description": "Include non-page targets."
+          "description": "Include non-page targets (workers, iframes)."
         },
         "probe": {
           "type": "boolean",

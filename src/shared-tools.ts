@@ -48,6 +48,7 @@ import {
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
 import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "./origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
+import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -148,6 +149,18 @@ export async function pickPage(driver: BrowserDriver, pages: PageInfo[], selecto
     // and only evaluate_script routes to it.
     throw new SharedToolError(
       backendOf(driver) === "firefox" ? WORKER_SELECTOR_UNSUPPORTED_MESSAGE : WORKER_SELECTOR_PAGE_ONLY_MESSAGE,
+    );
+  }
+  if (isFrameSelector(selector)) {
+    // Same contract as the worker: arm above, same reason. Every caller of
+    // pickPage (close_page / select_page / release_page via resolvePage, and
+    // claim_page's takeover) acts on a TAB; an out-of-process iframe has no
+    // independent existence to close, select, release or claim. Refusing with
+    // the reason beats the bare-id fall-through's "no target with id
+    // 'frame:foo'", which reads as a typo. The arm itself lives in client.ts's
+    // pickTarget and every other target-taking tool accepts it.
+    throw new SharedToolError(
+      backendOf(driver) === "firefox" ? FRAME_SELECTOR_UNSUPPORTED_MESSAGE : FRAME_SELECTOR_PAGE_ONLY_MESSAGE,
     );
   }
   const exactPage = pages.find((x) => x.id === selector);
