@@ -31,9 +31,9 @@ async function freePort(): Promise<number> {
   return 0;
 }
 
+/** Throws rather than exits, so the catch below still kills Chrome and its profile. */
 function fail(msg: string): never {
-  console.error(`FAIL: ${msg}`);
-  process.exit(1);
+  throw new Error(msg);
 }
 
 /** Run `label` under the 60s tool budget, printing what it actually took. */
