@@ -54,7 +54,7 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CdpError, openPage } from "../client.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -367,7 +367,7 @@ async function probeEncoder(): Promise<EncoderChoice> {
 
 /** A live screencast held in-process between start and stop, keyed by targetId. */
 interface LiveRecording {
-  conn: CdpConnection;
+  conn: PageConnection;
   target: Target;
   spoolDir: string;
   ledger: FrameLedgerEntry[];

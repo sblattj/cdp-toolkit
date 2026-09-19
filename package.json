@@ -88,7 +88,9 @@
     "input:smoke": "bun run ./test/input-smoke.ts",
     "extension:smoke": "bun run ./test/extension-smoke.ts",
     "focus:smoke": "bun run ./test/focus-emulation-smoke.ts",
-    "extract:smoke": "bun run ./test/extract-smoke.ts"
+    "extract:smoke": "bun run ./test/extract-smoke.ts",
+    "browser-ws:smoke": "bun run ./test/browser-ws-smoke.ts",
+    "browser-ws:wedge": "bun run ./test/browser-ws-wedge.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

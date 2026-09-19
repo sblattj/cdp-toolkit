@@ -235,6 +235,8 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 |---|---|---|
 | `CDP_BASE` | `http://127.0.0.1:9222` | DevTools HTTP origin (drives discovery + the lighthouse `--port`). |
 | `CDP_TIMEOUT_MS` | `15000` | Per-command timeout. |
+| `CDP_BROWSER_WS` | unset | The `ws://…/devtools/browser/<uuid>` URL, for a Chrome that serves no `/json`. Only consulted after an HTTP listing has already failed. See "Attaching to a Chrome that serves no `/json`" below. |
+| `CDP_USER_DATA_DIR` | unset | Profile directory to read `DevToolsActivePort` from, to find that browser socket without naming its uuid. Opt-in on purpose: nothing is scanned unless you name it. |
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
 | `CDP_EXTRACT_BASE_URL` | `http://127.0.0.1:8090/v1` | `extract_page` only. Base URL of the OpenAI-compatible extraction endpoint (the server appends `/chat/completions`). The default is loopback llm-ferry, so page content never leaves the machine; overriding it sends page content wherever the operator points. |
@@ -316,6 +318,42 @@ The server serves **both** eras off the same stdio transport, and the era is pin
 - A 2025-era client opens with **`initialize`** and gets `protocolVersion` `2025-11-25`, exactly as before — this upgrade is invisible to it.
 
 Measured 2026-09-01: Claude Code 2.1.258 and Codex CLI 0.147.0 both connect and both pin the **legacy** era — their binaries carry the 2026-07-28 client strings, but neither opens with `server/discover` by default, and the MCP SDK's own `Client` behaves the same unless it opts in. So serving both eras is load-bearing, not courtesy, and today the `ttlMs`/`cacheScope` hints reach only clients that ask for the modern era. The static listing pays off on either one — no mid-session tool churn, and no prompt-cache invalidation.
+
+## Attaching to a Chrome that serves no `/json`
+
+Chrome has two ways in, and until recently every build served both: (A) the HTTP discovery endpoints `/json/version` and `/json/list`, plus a per-target socket at `/devtools/page/<targetId>`; and (B) one browser-level socket at `/devtools/browser/<uuid>`, over which `Target.getTargets` lists and `Target.attachToTarget` reaches a page.
+
+A Chrome started with `--remote-debugging-port` serves both, and nothing below is reached on one. A Chrome that had debugging turned on **at runtime**, through the toggle on `chrome://inspect/#remote-debugging`, serves only (B) — measured on Chrome 153:
+
+| Request | `--remote-debugging-port` Chrome | runtime-toggled Chrome |
+|---|---|---|
+| `ws://127.0.0.1:<port>/devtools/browser/<uuid>` | 101 | **101** |
+| `ws://127.0.0.1:<port>/devtools/page/<targetId>` | 101 | **403** |
+| `http://127.0.0.1:<port>/json/version`, `/json/list` | 200 | **404** |
+
+That is the transport a user gets when they attach to the browser they were *already using* rather than relaunching it — a logged-in profile with their real tabs — so it is worth supporting rather than working around. cdp-toolkit reaches it with `Target.getTargets` for discovery and one flat `Target.attachToTarget` session per call for the work, over a single refcounted browser socket.
+
+**The HTTP path is untouched.** `list_pages` issues its original `GET /json/list` first and unconditionally; only a request that did *not* answer reaches the fallback. On a Chrome that serves (A) the code path is the one that shipped, with no added round-trip and no added failure mode. The transport is then cached, so the 404 is paid once per process.
+
+**Nothing is auto-discovered — you name the browser.** Connecting to a DevTools endpoint is not a neutral act: a runtime-toggled Chrome raises a modal *"Allow remote debugging?"* prompt on the user's screen for each new client, and that prompt grants full access to a logged-in session. So cdp-toolkit never scans the default profile looking for a browser socket. Point it at one explicitly:
+
+```bash
+# the browser socket directly (its uuid is minted fresh on every Chrome start)
+CDP_BROWSER_WS=ws://127.0.0.1:9222/devtools/browser/<uuid> cdp list_pages
+
+# or name the profile, and the uuid is read from its DevToolsActivePort file
+CDP_USER_DATA_DIR="$HOME/Library/Application Support/Google/Chrome" cdp list_pages
+```
+
+**The one-target-per-call guarantee still holds.** Discovery is one `Target.getTargets` — metadata only, it attaches to nothing — so a browser with hundreds of tabs costs one round trip, not one attach per tab. Each call then attaches to the one target it named and detaches on close. Every command still carries `CDP_TIMEOUT_MS`, per command id rather than per socket, so a wedged tab rejects at the bound and the shared socket stays clear for everyone else. `bun run browser-ws:wedge` proves exactly that: it blackholes one tab, then measures a witness tab, `list_pages`, and a freshly opened tab on the same socket.
+
+```bash
+bun run browser-ws:smoke    # drives discovery + per-tab work on a browser-ws-only endpoint
+TABS=200 bun run browser-ws:smoke
+bun run browser-ws:wedge    # one stuck tab must not wedge the shared socket
+```
+
+Both spawn their own disposable headless Chrome and front it with a proxy that removes exactly what the runtime-toggle mode removes (`test/browser-ws-only-proxy.ts`), because the real mode cannot be requested with a flag and puts a consent dialog in front of every client. They never look for a Chrome you are already running.
 
 ## Structured page extraction (`extract_page`)
 

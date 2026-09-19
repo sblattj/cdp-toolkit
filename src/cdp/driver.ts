@@ -5,7 +5,8 @@
  * one connection via openPage and holds it for the PageDriver's life; release() closes it. Uid
  * codec (scheme "cdp"): `cdp:<backendDOMNodeId>`, or a bare legacy numeric uid, per THE UID CODEC block in ../driver.ts.
  */
-import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
+import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget, type PageConnection } from "../client.ts";
+import { openSession } from "./session.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { LeaseConflictError } from "../leases.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
@@ -81,7 +82,7 @@ export function cdpSameSite(sameSite?: "strict" | "lax" | "none" | "default"): "
 
 /* ---------------------- copied helpers, see attributions below ---------------------- */
 // Copied verbatim from src/tools/input.ts `centerOf`: scroll into view, read viewport-space center.
-async function centerOf(conn: CdpConnection, objectId: string): Promise<{ x: number; y: number }> {
+async function centerOf(conn: PageConnection, objectId: string): Promise<{ x: number; y: number }> {
   const fn = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();if(r.width===0&&r.height===0)return null;return {x:r.left+r.width/2,y:r.top+r.height/2};}";
   const { result, exceptionDetails } = await conn.send<{ result: { value?: { x: number; y: number } | null }; exceptionDetails?: { text?: string } }>(
     "Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true },
@@ -90,7 +91,7 @@ async function centerOf(conn: CdpConnection, objectId: string): Promise<{ x: num
   if (!result.value) throw driverError("page-error", "element has zero size / is not visible; cannot compute a click point");
   return result.value;
 }
-async function focusElement(conn: CdpConnection, objectId: string): Promise<void> {
+async function focusElement(conn: PageConnection, objectId: string): Promise<void> {
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){this.focus&&this.focus();}", returnByValue: true });
 }
 /**
@@ -112,10 +113,10 @@ async function focusElement(conn: CdpConnection, objectId: string): Promise<void
 const ARM_SCROLL_SETTLE_WATCH =
   "(function(){window.__cdpScrollSettle=new Promise((resolve)=>{let t;const done=()=>{window.removeEventListener('scroll',on,true);resolve(true);};" +
   "const on=()=>{clearTimeout(t);t=setTimeout(done,60);};window.addEventListener('scroll',on,true);t=setTimeout(done,60);setTimeout(done,500);});})()";
-async function armScrollSettleWatch(conn: CdpConnection): Promise<void> {
+async function armScrollSettleWatch(conn: PageConnection): Promise<void> {
   await conn.send("Runtime.evaluate", { expression: ARM_SCROLL_SETTLE_WATCH, returnByValue: true });
 }
-async function awaitScrollSettle(conn: CdpConnection): Promise<void> {
+async function awaitScrollSettle(conn: PageConnection): Promise<void> {
   // Best-effort: a navigation racing the wheel event could tear down window.__cdpScrollSettle
   // before this reads it, and that is not a scroll failure worth surfacing as one.
   await conn.send("Runtime.evaluate", { expression: "window.__cdpScrollSettle", awaitPromise: true, returnByValue: true }).catch(() => undefined);
@@ -129,7 +130,7 @@ async function awaitScrollSettle(conn: CdpConnection): Promise<void> {
 // It is a parameter rather than a `conn.send` here because the choke point is per-PAGE
 // (it knows the target id) and this helper only has a connection.
 async function setValueOnObject(
-  conn: CdpConnection,
+  conn: PageConnection,
   objectId: string,
   value: string,
   sendInput: (method: string, params: Record<string, unknown>) => Promise<unknown>,
@@ -245,7 +246,7 @@ function axExtras(node: AxNode): Record<string, string> {
 }
 /* ------------------------------- locator helpers ------------------------------- */
 // css branch copied from src/tools/input.ts `resolveElement`; uid/text/xpath branches are new.
-async function resolveElementLocator(conn: CdpConnection, loc: ElementLocator): Promise<{ objectId: string }> {
+async function resolveElementLocator(conn: PageConnection, loc: ElementLocator): Promise<{ objectId: string }> {
   if ("uid" in loc) {
     return resolveUid(conn, decodeUid(loc.uid)).catch(() => {
       throw driverError("stale-uid", `uid does not resolve: ${loc.uid}`);
@@ -270,7 +271,7 @@ async function resolveElementLocator(conn: CdpConnection, loc: ElementLocator): 
  * XPath expression and disambiguates them itself. Not copied from any tools/ module (none
  * implement this); built only on the client primitives per CONTRACT.md rule 2.
  */
-async function searchLocate(conn: CdpConnection, query: string): Promise<number> {
+async function searchLocate(conn: PageConnection, query: string): Promise<number> {
   await conn.send("DOM.getDocument", { depth: 0 }).catch(() => undefined);
   const { searchId, resultCount } = await conn.send<{ searchId: string; resultCount: number }>("DOM.performSearch", { query });
   try {
@@ -285,7 +286,7 @@ async function searchLocate(conn: CdpConnection, query: string): Promise<number>
   }
 }
 
-async function backendNodeIdOf(conn: CdpConnection, loc: ElementLocator): Promise<number> {
+async function backendNodeIdOf(conn: PageConnection, loc: ElementLocator): Promise<number> {
   if ("uid" in loc) return decodeUid(loc.uid);
   if ("css" in loc) {
     const { objectId } = await resolveElementLocator(conn, loc);
@@ -323,7 +324,7 @@ interface LayoutMetrics {
   cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
   cssContentSize?: { width: number; height: number };
 }
-async function layoutMetrics(conn: CdpConnection): Promise<LayoutMetrics> {
+async function layoutMetrics(conn: PageConnection): Promise<LayoutMetrics> {
   return conn.send<LayoutMetrics>("Page.getLayoutMetrics");
 }
 /**
@@ -554,7 +555,7 @@ export function planTiledCapture(
  * document-frame correction below is what buys correctness. Keeping it also means the offset this
  * scroll CREATES must be read after it settles — see capture()'s ordering.
  */
-async function elementBox(conn: CdpConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
+async function elementBox(conn: PageConnection, loc: ElementLocator): Promise<{ x: number; y: number; width: number; height: number }> {
   const backendNodeId = await backendNodeIdOf(conn, loc);
   await conn.send("DOM.scrollIntoViewIfNeeded", { backendNodeId }).catch(() => undefined);
   const box = await conn.send<{ model: { content: number[] } }>("DOM.getBoxModel", { backendNodeId });
@@ -663,7 +664,7 @@ class CdpPageDriver implements PageDriver {
   // side effect) it did not have before this migration. See the per-method comments below.
   private readonly enabledDomains = new Set<string>();
   private released = false;
-  constructor(private readonly conn: CdpConnection, target: Target, readonly browser: BrowserDriver) {
+  constructor(private readonly conn: PageConnection, target: Target, readonly browser: BrowserDriver) {
     this.info = { id: target.id, url: target.url, title: target.title, type: target.type };
   }
   private async ensureDomain(name: string): Promise<void> {
@@ -1595,12 +1596,24 @@ class CdpPageDriver implements PageDriver {
  * process, which degrades the beacon to current-document-only — correct, since
  * a CLI process cannot hold anything across calls by construction.
  */
-const beaconSessions = new BeaconSessions<CdpConnection>((conn) => conn.close());
+const beaconSessions = new BeaconSessions<PageConnection>((conn) => conn.close());
 
-/** The page endpoint for a target id, or undefined if the browser no longer has it. */
-async function targetWsUrl(targetId: string): Promise<string | undefined> {
+/**
+ * A connection to one target by id, or undefined if the browser no longer has
+ * it. The beacon paths' counterpart of client.ts's `openPage`, and deliberately
+ * NOT that function: these three callers are gate-free by contract (see
+ * ../driver.ts) and must not go through the lease gate `resolveTarget` applies.
+ *
+ * Transport-routed like `openPage`, for the same reason: on a browser-ws
+ * endpoint the listing carries no per-target URL to dial.
+ */
+async function openTargetConn(targetId: string, opts: { timeoutMs?: number } = {}): Promise<PageConnection | undefined> {
   const hit = (await listTargets()).find((t) => t.id === targetId);
-  return hit?.webSocketDebuggerUrl;
+  if (!hit) return undefined;
+  // Same marker openPage reads: no per-target URL means this endpoint serves
+  // none, so the target is reached by session instead.
+  if (!hit.webSocketDebuggerUrl) return openSession(targetId, opts).catch(() => undefined);
+  return new CdpConnection(hit.webSocketDebuggerUrl, opts).connect().catch(() => undefined);
 }
 
 /**
@@ -1612,7 +1625,7 @@ async function targetWsUrl(targetId: string): Promise<string | undefined> {
  * its tab look exactly like a live tab nobody has touched, and the held session
  * would never be dropped or retried.
  */
-async function readBeaconOver(conn: CdpConnection): Promise<number | null | undefined> {
+async function readBeaconOver(conn: PageConnection): Promise<number | null | undefined> {
   try {
     const res = await conn.send<{ result: { value?: unknown } }>("Runtime.evaluate", {
       expression: BEACON_READ_EXPRESSION,
@@ -1634,7 +1647,7 @@ async function readBeaconOver(conn: CdpConnection): Promise<number | null | unde
  * the same {responsive:false} — that IS the correct answer for both, since the
  * caller cannot drive either tab any faster than this already told it.
  */
-async function probeOver(conn: CdpConnection, timeoutMs: number): Promise<{ responsive: boolean; beaconTs: number | null }> {
+async function probeOver(conn: PageConnection, timeoutMs: number): Promise<{ responsive: boolean; beaconTs: number | null }> {
   try {
     const res = await conn.send<{ result: { value?: unknown } }>(
       "Runtime.evaluate",
@@ -1783,9 +1796,7 @@ class CdpBrowserDriver implements BrowserDriver {
       // build a fresh one rather than reporting a beacon that is not there.
       beaconSessions.drop(targetId);
     }
-    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
-    if (!wsUrl) return false;
-    const conn = await new CdpConnection(wsUrl).connect().catch(() => undefined);
+    const conn = await openTargetConn(targetId).catch(() => undefined);
     if (!conn) return false;
     try {
       await conn.send("Page.enable");
@@ -1816,9 +1827,7 @@ class CdpBrowserDriver implements BrowserDriver {
       if (value !== undefined) return value;
       beaconSessions.drop(targetId);
     }
-    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
-    if (!wsUrl) return null;
-    const conn = await new CdpConnection(wsUrl).connect().catch(() => undefined);
+    const conn = await openTargetConn(targetId).catch(() => undefined);
     if (!conn) return null;
     try {
       return (await readBeaconOver(conn)) ?? null;
@@ -1844,14 +1853,8 @@ class CdpBrowserDriver implements BrowserDriver {
   async probeRenderer(targetId: string, timeoutMs: number = RENDERER_PROBE_TIMEOUT_MS): Promise<{ responsive: boolean; beaconTs: number | null }> {
     const held = beaconSessions.get(targetId);
     if (held) return probeOver(held, timeoutMs);
-    const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
-    if (!wsUrl) return { responsive: false, beaconTs: null };
-    const conn = new CdpConnection(wsUrl, { timeoutMs });
-    try {
-      await conn.connect();
-    } catch {
-      return { responsive: false, beaconTs: null };
-    }
+    const conn = await openTargetConn(targetId, { timeoutMs }).catch(() => undefined);
+    if (!conn) return { responsive: false, beaconTs: null };
     try {
       return await probeOver(conn, timeoutMs);
     } finally {

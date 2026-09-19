@@ -12,7 +12,7 @@
  *   on a fixed interval until the text appears or the timeout elapses.
  */
 import { CdpError, withPage } from "../client.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 
 export interface NavigatePageArgs {
@@ -65,7 +65,7 @@ export async function navigatePage(args: NavigatePageArgs): Promise<NavigatePage
 
   return withPage(
     args.target,
-    async (conn: CdpConnection): Promise<NavigatePageResult> => {
+    async (conn: PageConnection): Promise<NavigatePageResult> => {
       await conn.send("Page.enable");
 
       // Subscribe to the load milestone BEFORE acting so a fast page that loads
@@ -156,7 +156,7 @@ export async function waitForText(args: WaitForArgs): Promise<WaitForResult> {
 
   return withPage(
     args.target,
-    async (conn: CdpConnection, _target: Target): Promise<WaitForResult> => {
+    async (conn: PageConnection, _target: Target): Promise<WaitForResult> => {
       await conn.send("Runtime.enable");
       const expr = `(() => { const b = document.body; return !!b && typeof b.innerText === 'string' && b.innerText.includes(${JSON.stringify(args.text)}); })()`;
 
