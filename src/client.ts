@@ -25,6 +25,9 @@ import {
   FRAME_EMPTY_NEEDLE_MESSAGE,
 } from "./frames.ts";
 
+import { detectEndpoint, resetEndpointCache, type CdpTransport } from "./cdp/endpoint.ts";
+import { openSession, withBrowserSocket, type PageConnection } from "./cdp/session.ts";
+export { SessionConnection, withBrowserSocket, type PageConnection } from "./cdp/session.ts";
 /**
  * Base HTTP origin of the DEFAULT DevTools endpoint, fixed at import (CDP_BASE, else
  * http://127.0.0.1:9222, or the default named by CDP_ENDPOINTS / CDP_ENDPOINTS_FILE).
@@ -207,6 +210,18 @@ export class CdpConnection {
 
 /* ----------------------------- endpoint discovery ----------------------------- */
 
+/**
+ * Which transport each endpoint turned out to serve, learned from its first
+ * listing that succeeded, keyed by endpoint base. Absent until then.
+ */
+const knownTransports = new Map<string, CdpTransport>();
+
+/** Test seam: forget the learned transport. */
+export function resetTransportCache(): void {
+  knownTransports.clear();
+  resetEndpointCache();
+}
+
 async function httpJson<T>(path: string): Promise<T> {
   // Resolved PER CALL, never cached: the endpoint comes from the dispatch scope, and an
   // endpoint that was down a moment ago is simply tried again.
@@ -215,15 +230,76 @@ async function httpJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** All targets (GET /json/list). */
-export function listTargets(): Promise<Target[]> {
-  return httpJson<Target[]>("/json/list");
+/**
+ * `Target.getTargets` reshaped into the `/json/list` record every caller
+ * already reads.
+ *
+ * TWO DIFFERENCES from the HTTP listing, both deliberate:
+ *
+ * `filter: [{}]` is passed because the DEFAULT filter is not "everything" — it
+ * omits types the empty filter includes. Measured on Chrome 153: default
+ * returned 4 targets (page, browser_ui), `[{}]` returned 6, and the missing
+ * ones were exactly the iframe/worker types that the `frame:` and `worker:`
+ * selector arms resolve against. Taking the default would silently delete two
+ * documented features.
+ *
+ * `webSocketDebuggerUrl` is EMPTY, and it has to be: on this transport there is
+ * no per-target socket to name, and inventing the `/devtools/page/<id>` URL
+ * would hand callers a string that 403s. Nothing reads the field on this path —
+ * `openPage` branches on transport before it would — and the emptiness is what
+ * makes a caller that ignored the branch fail loudly instead of hanging.
+ */
+async function getTargetsOverBrowserWs(): Promise<Target[]> {
+  const { targetInfos } = await withBrowserSocket((conn) =>
+    conn.send<{ targetInfos: Array<{ targetId: string; type: string; title: string; url: string; openerId?: string }> }>(
+      "Target.getTargets",
+      { filter: [{}] },
+    ),
+  );
+  return targetInfos.map((t) => ({
+    id: t.targetId,
+    type: t.type,
+    title: t.title,
+    url: t.url,
+    webSocketDebuggerUrl: "",
+    ...(t.openerId ? { parentId: t.openerId } : {}),
+  }));
 }
 
-/** Browser-level WebSocket URL (GET /json/version), for Target.* / Browser.*. */
+/**
+ * All targets: `GET /json/list`, falling back to `Target.getTargets` on the
+ * browser socket when this Chrome does not serve it.
+ *
+ * THE HTTP REQUEST GOES FIRST AND UNCONDITIONALLY, which is the whole
+ * no-regression story: against a Chrome that serves `/json/list` this function
+ * does exactly what it did before the fallback existed, and the fallback is
+ * unreachable. Only a request that failed opens a socket.
+ *
+ * Once a transport is known it is cached, so the 404 is paid once per process
+ * rather than on every listing.
+ */
+export async function listTargets(): Promise<Target[]> {
+  const base = currentEndpoint().base;
+  if (knownTransports.get(base) === "browser-ws") return getTargetsOverBrowserWs();
+  try {
+    const listing = await httpJson<Target[]>("/json/list");
+    knownTransports.set(base, "http");
+    return listing;
+  } catch (httpError) {
+    const targets = await getTargetsOverBrowserWs().catch(() => {
+      // The HTTP failure is the one worth reporting: it names the endpoint the
+      // user configured, where the fallback's failure only says a profile
+      // lookup came up empty.
+      throw httpError;
+    });
+    knownTransports.set(base, "browser-ws");
+    return targets;
+  }
+}
+
+/** Browser-level WebSocket URL, for Target.* / Browser.*. */
 export async function browserWsUrl(): Promise<string> {
-  const v = await httpJson<{ webSocketDebuggerUrl: string }>("/json/version");
-  return v.webSocketDebuggerUrl;
+  return (await detectEndpoint()).browserWsUrl;
 }
 
 /** Resolve a TargetSelector to a concrete page target. See types.ts for grammar.
@@ -333,13 +409,25 @@ export async function openBrowser(opts: { timeoutMs?: number } = {}): Promise<Cd
   return new CdpConnection(await browserWsUrl(), opts).connect();
 }
 
-/** Open a connection to a page target. Returns the connection and the target. */
+/**
+ * Open a connection to a page target. Returns the connection and the target.
+ *
+ * The one place the two transports diverge for a tool author: a per-target
+ * socket where Chrome serves one, an attached session on the shared browser
+ * socket where it does not. Both are closed by the caller the same way, and
+ * both carry the same per-command timeout, so no tool module branches on this.
+ */
 export async function openPage(
   selector: TargetSelector,
   opts: { timeoutMs?: number; lease?: string } = {},
-): Promise<{ conn: CdpConnection; target: Target }> {
+): Promise<{ conn: PageConnection; target: Target }> {
+  // resolveTarget listed first, so the transport is already known here: an
+  // empty webSocketDebuggerUrl is the browser-ws listing's own marker that this
+  // target has no socket to dial (see getTargetsOverBrowserWs).
   const target = await resolveTarget(selector, { lease: opts.lease });
-  const conn = await new CdpConnection(target.webSocketDebuggerUrl, opts).connect();
+  const conn = target.webSocketDebuggerUrl
+    ? await new CdpConnection(target.webSocketDebuggerUrl, opts).connect()
+    : await openSession(target.id, opts);
   return { conn, target };
 }
 
@@ -349,7 +437,7 @@ export async function openPage(
  */
 export async function withPage<T>(
   selector: TargetSelector,
-  fn: (conn: CdpConnection, target: Target) => Promise<T>,
+  fn: (conn: PageConnection, target: Target) => Promise<T>,
   opts: { timeoutMs?: number; lease?: string } = {},
 ): Promise<T> {
   const { conn, target } = await openPage(selector, opts);

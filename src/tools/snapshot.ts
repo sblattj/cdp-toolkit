@@ -8,7 +8,7 @@
  *   `DOM.resolveNode({ backendNodeId: uid })`. There is no server-side ref
  *   table to drift or expire.
  */
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import { withPage } from "../client.ts";
 import type { Target, TargetSelector, Uid } from "../types.ts";
 
@@ -175,7 +175,7 @@ export async function takeSnapshot(args: TakeSnapshotArgs = {}): Promise<TakeSna
  * Resolve a Uid (backendDOMNodeId) to a live JS object handle. Shared by every
  * interaction tool in input.ts. Throws if the node no longer exists.
  */
-export async function resolveUid(conn: CdpConnection, uid: Uid): Promise<{ objectId: string }> {
+export async function resolveUid(conn: PageConnection, uid: Uid): Promise<{ objectId: string }> {
   const { object } = await conn.send<{ object: { objectId?: string } }>("DOM.resolveNode", {
     backendNodeId: uid,
   });
