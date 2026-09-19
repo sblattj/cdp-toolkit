@@ -11,7 +11,7 @@
  *      CDP connection per target; integration-tested in test/mock-smoke.ts.
  */
 import { CdpError, openPage, resolveTarget } from "../client.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
 
 /* ============================================================================
@@ -143,7 +143,7 @@ interface MockRule {
 }
 
 interface MockSession {
-  conn: CdpConnection;
+  conn: PageConnection;
   target: Target;
   rules: MockRule[];
   intercepted: Array<{ url: string; method: string; action: MockAction }>;

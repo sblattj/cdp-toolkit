@@ -35,7 +35,7 @@
  *     path and the recommended entry point.
  */
 import type { Target, TargetSelector } from "../types.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import { CdpError, openPage } from "../client.ts";
 import { mkdir, readFile, writeFile, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -75,7 +75,7 @@ interface TraceEvent {
 
 /** A traced-page registry entry held in-process between start and stop. */
 interface LiveTrace {
-  conn: CdpConnection;
+  conn: PageConnection;
   target: Target;
   events: TraceEvent[];
   startedAt: number;
@@ -108,7 +108,7 @@ function stateFilePath(): string {
 }
 
 /** Subscribe to Tracing.dataCollected and buffer every event into `sink`. */
-function bufferTraceData(conn: CdpConnection, sink: TraceEvent[]): () => void {
+function bufferTraceData(conn: PageConnection, sink: TraceEvent[]): () => void {
   return conn.on("Tracing.dataCollected", (params: Record<string, unknown>) => {
     const value = (params as { value?: TraceEvent[] }).value;
     if (Array.isArray(value)) sink.push(...value);
@@ -116,7 +116,7 @@ function bufferTraceData(conn: CdpConnection, sink: TraceEvent[]): () => void {
 }
 
 /** Begin a trace on an already-open page connection. */
-async function beginTrace(conn: CdpConnection, categories: string[]): Promise<void> {
+async function beginTrace(conn: PageConnection, categories: string[]): Promise<void> {
   await conn.send("Tracing.start", {
     traceConfig: { includedCategories: categories },
     transferMode: "ReportEvents",
@@ -127,7 +127,7 @@ async function beginTrace(conn: CdpConnection, categories: string[]): Promise<vo
  * End a trace, drain all buffered Tracing.dataCollected, and resolve once
  * Tracing.tracingComplete fires (or the timeout elapses). Returns the events.
  */
-async function endTrace(conn: CdpConnection, sink: TraceEvent[], timeoutMs = 30_000): Promise<TraceEvent[]> {
+async function endTrace(conn: PageConnection, sink: TraceEvent[], timeoutMs = 30_000): Promise<TraceEvent[]> {
   const complete = conn.waitFor("Tracing.tracingComplete", undefined, timeoutMs);
   await conn.send("Tracing.end");
   await complete;
