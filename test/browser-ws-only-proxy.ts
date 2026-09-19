@@ -82,8 +82,12 @@ export async function startBrowserWsOnlyProxy(upstreamBase: string): Promise<Bro
         upstream.onmessage = (ev: MessageEvent) => ws.send(String(ev.data));
         upstream.onclose = () => ws.close();
         upstream.onerror = () => ws.close();
+        // Settle on failure too: resolving only on open would leave a failed
+        // upstream handshake queueing client messages forever with no error.
         await new Promise<void>((resolve) => {
           upstream.onopen = () => resolve();
+          upstream.addEventListener("error", () => resolve());
+          upstream.addEventListener("close", () => resolve());
         });
         ws.data.ready = true;
         // Anything the client sent during the upstream handshake, in order.
