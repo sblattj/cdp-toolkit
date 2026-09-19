@@ -15,7 +15,7 @@
  * `CdpError` carrying the exception/description text.
  */
 import { CdpError, withPage } from "../client.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import type { TargetSelector } from "../types.ts";
 
 /** A CDP RemoteObject as returned by Runtime.evaluate / Runtime.callFunctionOn. */
@@ -78,7 +78,7 @@ function unwrap(obj: RemoteObject): unknown {
   return obj.description ?? null;
 }
 
-async function evaluateExpression(conn: CdpConnection, expression: string, awaitPromise: boolean): Promise<unknown> {
+async function evaluateExpression(conn: PageConnection, expression: string, awaitPromise: boolean): Promise<unknown> {
   const res = await conn.send<EvalResponse>("Runtime.evaluate", {
     expression,
     returnByValue: true,
@@ -94,7 +94,7 @@ async function evaluateExpression(conn: CdpConnection, expression: string, await
 }
 
 async function evaluateFunction(
-  conn: CdpConnection,
+  conn: PageConnection,
   expression: string,
   awaitPromise: boolean,
   args: unknown[],

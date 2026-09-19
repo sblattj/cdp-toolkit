@@ -66,7 +66,7 @@
  */
 import { mkdir, appendFile, writeFile, copyFile } from "node:fs/promises";
 import { CdpError, listTargets, openPage, resolveTarget } from "../client.ts";
-import type { CdpConnection } from "../client.ts";
+import type { PageConnection } from "../client.ts";
 import { resolveWorkerSelector } from "../cdp/workers.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import {
@@ -189,7 +189,7 @@ export interface RecorderHandle {
   /** The resolved target this recorder is attached to. */
   target: Target;
   /** The live connection (exposed so a one-shot caller can drive Page.reload on it). */
-  conn: CdpConnection;
+  conn: PageConnection;
   /** Count of buffer-write failures observed (0 on a healthy capture). */
   droppedWrites(): number;
 }
@@ -286,7 +286,7 @@ export interface CaptureWindow {
   /** The unique per-capture buffer file (read this for isolated results). */
   file: string;
   /** Live connection (open until stop), for Network.getResponseBody etc. */
-  conn: CdpConnection;
+  conn: PageConnection;
   /** Resolved target identity. */
   resolved: { id: string; url: string; title: string };
   /** How the window was driven: "reload" for a page, "listen" for a worker. */
