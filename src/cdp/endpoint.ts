@@ -135,6 +135,9 @@ let cached: Promise<EndpointInfo> | undefined;
  * (a container, a forwarded port, a profile outside the defaults).
  */
 export function detectEndpoint(): Promise<EndpointInfo> {
+  // Only a resolved detection is worth keeping. A failure here is usually
+  // transient — Chrome still starting, a port file mid-rewrite — and caching
+  // the rejection would make the first unlucky call poison every later one.
   return (cached ??= (async (): Promise<EndpointInfo> => {
     const forced = process.env.CDP_BROWSER_WS;
     if (forced) return { transport: "browser-ws", browserWsUrl: forced };
@@ -156,7 +159,10 @@ export function detectEndpoint(): Promise<EndpointInfo> {
         `no live browser socket was found in ${process.env.CDP_USER_DATA_DIR ?? "the default Chrome profile(s)"}. ` +
         `Set CDP_BROWSER_WS to the ws://.../devtools/browser/<uuid> URL, or CDP_USER_DATA_DIR to the profile in use.`,
     );
-  })());
+  })().catch((error: unknown) => {
+    cached = undefined;
+    throw error;
+  }));
 }
 
 /** Test seam: drop the per-process detection cache. */

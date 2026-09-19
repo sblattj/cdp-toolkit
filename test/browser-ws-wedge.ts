@@ -82,6 +82,7 @@ const upstreamWs = await new Promise<string>((resolve, reject) => {
       resolve(m[1]);
     }
   });
+  chrome.on("exit", (code) => reject(new Error(`Chrome exited (${code}) before reporting an endpoint`)));
 });
 const proxy = await startBrowserWsOnlyProxy(`http://${new URL(upstreamWs).host}`);
 
