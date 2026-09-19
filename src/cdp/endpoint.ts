@@ -147,16 +147,21 @@ export function detectEndpoint(): Promise<EndpointInfo> {
       return { transport: "browser-ws", browserWsUrl: discovered };
     }
 
-    const version = await fetch(`${BASE}/json/version`)
+    // Bounded for the same reason the handshake above is: a host that accepts
+    // the connection and never answers would otherwise stall detection forever.
+    const version = await fetch(`${BASE}/json/version`, { signal: AbortSignal.timeout(5_000) })
       .then((r) => (r.ok ? (r.json() as Promise<{ webSocketDebuggerUrl?: string }>) : undefined))
       .catch(() => undefined);
     if (version?.webSocketDebuggerUrl) {
       return { transport: "http", browserWsUrl: version.webSocketDebuggerUrl };
     }
 
+    const dir = process.env.CDP_USER_DATA_DIR;
     throw new Error(
       `no DevTools endpoint at ${BASE}: GET /json/version did not answer and ` +
-        `no live browser socket was found in ${process.env.CDP_USER_DATA_DIR ?? "the default Chrome profile(s)"}. ` +
+        (dir
+          ? `no live browser socket was named by ${dir}/DevToolsActivePort. `
+          : `no profile was searched — CDP_USER_DATA_DIR is unset, and no profile is ever scanned unless you name one. `) +
         `Set CDP_BROWSER_WS to the ws://.../devtools/browser/<uuid> URL, or CDP_USER_DATA_DIR to the profile in use.`,
     );
   })().catch((error: unknown) => {

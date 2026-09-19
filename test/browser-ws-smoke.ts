@@ -26,11 +26,6 @@ function chromeBinary(): string {
   return "google-chrome";
 }
 
-async function freePort(): Promise<number> {
-  // Chrome writes its real port to DevToolsActivePort when given 0.
-  return 0;
-}
-
 /** Throws rather than exits, so the catch below still kills Chrome and its profile. */
 function fail(msg: string): never {
   throw new Error(msg);
@@ -107,6 +102,7 @@ try {
   });
   console.log(`\nendpoint shape: /json/version=${version}  /json/list=${list}  page-ws=${pageWs}`);
   if (version !== 404 || list !== 404) fail("fixture is not browser-ws-only: /json answered");
+  if (pageWs !== "refused (403)") fail(`fixture is not browser-ws-only: /devtools/page/* upgraded (${pageWs})`);
 
   /* ---- point the toolkit at it ------------------------------------------- */
   process.env.CDP_BASE = proxy.base;
