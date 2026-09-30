@@ -5,11 +5,32 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-09-29
+
+**The default MCP tool listing went from 49 tools to 7 (37,346 bytes to 5,072, -86.4%; about 9,336 tokens to about 1,268).** With `CDP_TOOL_PROFILE` unset, `tools/list` now advertises `search_tools`, `call_tool` and five core tools (`navigate_page`, `evaluate_script`, `take_snapshot`, `click`, `fill`); every other tool is found with `search_tools` and run with `call_tool`. `CDP_TOOL_PROFILE=full` restores the 2.x listing (plus the two meta-tools). The 48 underlying tools and the `cdp` CLI are unchanged, and the listing is still static: computed once at startup, `listChanged:false`, same cache hints.
+
+### Changed — BREAKING
+
+- **The default profile is now `gateway`, not `full`.** Measured `tools/list` (raw stdio, compact JSON, tokens = bytes/4): 2.7.0 default 49 entries / 37,346 bytes / about 9,336 tokens; 3.0 default 7 entries / 5,072 bytes / about 1,268 tokens (identical on Chrome and Firefox). `CDP_TOOL_PROFILE=full` is now 50 entries / 37,911 bytes on Chrome (the 2.7.0 listing plus the two meta-tools).
+- **`describe_tool` is no longer listed**, but is still answered with 2.x output for back-compat; `describe_tool {}` returns the same catalog as `search_tools {}`.
+- **What is traded away.** A tool reached through `call_tool` appears to the host as `call_tool`, so name-keyed host allowlists and per-tool permission prompts (for example "allow click, deny evaluate_script") cannot distinguish the 43 non-gateway tools; set `CDP_TOOL_PROFILE=full` if you need per-tool host rules. Drop-in parity with chrome-devtools-mcp's listing is also gone by default: its 29 tool names still exist and are callable with the same names, but only 5 are listed unless you set `full`.
+- Direct calls to unlisted tools by name still work over the wire (SDK and CLI consumers are unaffected). `call_tool` exists because a model can only invoke tools its host puts in front of it, and hosts forward `tools/list`.
+- This does not repeat 2.0's `browser_tools` design, which mutated the listing mid-connection (a spec MUST-NOT); the 3.0 listing never changes. See `docs/design/2026-09-29-v3-gateway-default.md`.
 
 ### Added
 
+- **`search_tools {query?, limit?}`.** No query returns the grouped catalog; a query that is an exact tool name returns that one tool; anything else ranks available tools by name (strongest), group, then full docs, returning JSON `{query,total,matches:[{name,group,listed,description,inputSchema}],next}`. `limit` defaults to 8, max 20. (`src/mcp.ts`)
+- **`call_tool {name, arguments?}`.** Unwraps and re-enters the same dispatch as a direct call, so availability errors, lease handling (the `lease` is read from the inner `arguments`) and error shapes are identical. Refuses to wrap a meta-tool. Verified live on headless Chrome 153: `new_page` via `call_tool {claim:true}` mints a lease, `navigate_page` without it is refused naming the lease holder, with it succeeds, and `close_page` releases it. (`src/mcp.ts`)
+- **The `gateway` profile and `gateway,<groups>` lists.** `gateway` is the default; `gateway,network,console` adds only the named groups on top of the five gateway tools (11 entries, 7,899 bytes, about 1,975 tokens). A group list without `gateway` still always includes `core`, as in 2.x (`core`: 14 entries, 9,661 bytes; `core,network,console`: 18 entries, 12,488 bytes). Every profile lists `search_tools` and `call_tool` first. Unknown groups exit at startup with `CDP_TOOL_PROFILE: unknown tool group 'x'. Known: gateway, full, core, input, ...`. (`src/toolGroups.ts`)
+- The server instructions (1,862 chars, under Claude Code's 2 KB cap) now tell the model that only 5 tools are listed, how to find and run the rest, and "No tab yet? call_tool {name:'new_page'}", since none of the five opens a tab.
+
 - **Wedge benchmark (`bun run bench:wedge`).** A runnable, CI-able proof of the core claim: an isolated headless Chrome drives a throwaway page into an endpoint that accepts the connection and never responds, 8 times, and measures the whole stuck-page lifecycle — the wedged `navigate` rejects at the configured bound (15.03s observed against the default 15s bound), a witness tab keeps answering at healthy latency mid-brick (p95 3ms), and closing the bricked tab plus reopening evaluates at p95 89ms with zero `/mcp` restarts. Also reports, as an observation rather than a failure, that the stuck page itself stays unresponsive while its load is pending: the blast radius is the tab, not the server. (`scripts/wedge-bench.ts`)
+
+### Migrating from 2.x
+
+- **Do nothing** if your host and model can use `search_tools` plus `call_tool`.
+- **Set `CDP_TOOL_PROFILE=full`** if you rely on per-tool host allowlists or permission rules, or simply want the old listing.
+- **SDK and CLI callers** that call tools by name are unaffected.
 
 ## [2.7.0] - 2026-09-15
 
