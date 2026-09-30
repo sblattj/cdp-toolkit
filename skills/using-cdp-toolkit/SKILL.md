@@ -1,6 +1,6 @@
 ---
 name: using-cdp-toolkit
-description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (mcp__cdp-toolkit__*) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, scrolling or dragging (incl. real HTML5 drag-and-drop), capturing a file download, granting a permission, claiming a tab so parallel agents don't collide (and knowing whether a human is already in it), mocking a backend, reading a secret without leaking it, screenshotting a page that is very long or needs another viewport/resolution, or when a call returns empty {}, reads the page too early, a leased-tab call is refused by name, or a tab is stuck at the size of a capture that never finished.
+description: Use when driving Chrome (or Firefox) tabs from an AI agent through the cdp-toolkit MCP tools (as of 3.0 only navigate_page, take_snapshot, click, fill and evaluate_script are listed as mcp__cdp-toolkit__*; every other tool is reached with call_tool after search_tools) or its `cdp` CLI — opening and naming a target, reading/clicking/typing on a page, scrolling or dragging (incl. real HTML5 drag-and-drop), capturing a file download, granting a permission, claiming a tab so parallel agents don't collide (and knowing whether a human is already in it), mocking a backend, reading a secret without leaking it, screenshotting a page that is very long or needs another viewport/resolution, or when a call returns empty {}, reads the page too early, a leased-tab call is refused by name, or a tab is stuck at the size of a capture that never finished.
 ---
 
 # Using cdp-toolkit
@@ -13,6 +13,22 @@ Two consequences drive everything below:
 
 1. **You name one target per call.** Nothing broadcasts to all tabs.
 2. **Nothing settles for you.** After anything asynchronous, you wait on a sentinel yourself before reading.
+
+## Reaching tools that aren't in your tool list (3.0+)
+
+Over MCP, only `navigate_page`, `take_snapshot`, `click`, `fill` and `evaluate_script` are listed by default (plus `search_tools` and `call_tool`). Every other tool named in this skill (`new_page`, `take_screenshot`, cookies, leases, `wait_for_download`, ...) is still there; run it through `call_tool`:
+
+```
+call_tool {name:"take_screenshot", arguments:{...}}
+search_tools {query:"screenshot"}        # find a tool; returns docs + inputSchema
+search_tools {}                          # grouped catalog of everything available
+```
+
+- None of the five listed tools opens a tab. With no tab yet, the first call is `call_tool {name:"new_page", arguments:{url:"..."}}`.
+- `call_tool` behaves exactly like a direct call: same errors, and a `lease` token goes inside the inner `arguments`.
+- `call_tool` cannot wrap `search_tools` or `call_tool`; call those directly.
+- The `cdp` CLI is unaffected: every tool is a direct subcommand there.
+- If the host lists more tools (`CDP_TOOL_PROFILE=full` or `gateway,<groups>`), call those directly as usual.
 
 ## Prerequisites
 
