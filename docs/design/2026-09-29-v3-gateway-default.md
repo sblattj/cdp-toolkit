@@ -48,7 +48,7 @@ The default listing is 86.4% smaller in bytes than 2.7.0's default. Server instr
 ## 5. Evidence
 
 - Test suite: 1020 pass, 0 fail at `1e9f25f`.
-- Live lease e2e (headless Chrome 153, 2026-09-29), all through `call_tool`: `new_page {claim:true,label:'gw-e2e'}` returned a lease token; `call_tool navigate_page` without the lease was refused ("is leased by 'gw-e2e' ... Pass that lease's token as the 'lease' argument"); with the lease it succeeded; a direct `navigate_page` with the lease succeeded; `close_page` via `call_tool` returned `leaseReleased:true`. So the wrapper preserves lease scope and error shape.
+- Live lease e2e (headless Chrome 154, 2026-09-29; `bun run gateway:smoke` reproduces it), all through `call_tool`: `new_page {claim:true,label:'gw-e2e'}` returned a lease token; `call_tool navigate_page` without the lease was refused ("is leased by 'gw-e2e' ... Pass that lease's token as the 'lease' argument"); with the lease it succeeded; a direct `navigate_page` with the lease succeeded; `close_page` via `call_tool` returned `leaseReleased:true`. So the wrapper preserves lease scope and error shape.
 
 ## 6. Choice of the five
 
