@@ -297,7 +297,7 @@ cdp-toolkit 3.0.0 · browser=chrome · 48 tools available, 7 in tools/list (CDP_
 Run any tool with call_tool {name, arguments}; search_tools {query:<name>} returns its docs and inputSchema.
 ```
 
-**`call_tool {name, arguments?}`** unwraps and re-enters the same dispatch as a direct call, so availability errors, lease handling, and error shapes are identical to calling the tool directly. The `lease` is read from the inner `arguments`. It refuses to wrap a meta-tool (`call_tool: 'call_tool' is a meta-tool; call it directly`), requires `name` (``call_tool: `name` is required (find one with search_tools)``), and requires `arguments`, when given, to be an object (``call_tool: `arguments` must be an object``).
+**`call_tool {name, arguments?}`** unwraps and re-enters the same dispatch as a direct call, so availability errors, lease handling, and error shapes are identical to calling the tool directly. The `lease` is read from the inner `arguments`. It refuses to wrap a meta-tool (`call_tool: 'call_tool' is a meta-tool; call it directly`), requires `name` (``call_tool: `name` is required (find one with search_tools)``), and requires `arguments`, when given, to be an object (``call_tool: `arguments` must be an object``). `bun run gateway:smoke` (`test/gateway-smoke.ts`) proves the lease half against a real browser: without the inner `lease` a claimed tab is refused, with it the call succeeds.
 
 **`CDP_TOOL_PROFILE` is the only filter, and it is startup-only** — set once by whoever configures the server, then fixed for the life of the process. Every profile lists `search_tools` and `call_tool` first. Measured over raw stdio at 1e9f25f (bytes = compact JSON of the `tools` array, tokens ≈ bytes ÷ 4):
 
@@ -688,6 +688,7 @@ test/
   network_mock.test.ts # pure-logic unit tests (bun test)
   mcp-smoke.ts         # MCP handshake + live tools/call round-trip (bun run mcp:smoke)
   lease-smoke.ts       # two-process live lease harness (bun run lease:smoke)
+  gateway-smoke.ts     # call_tool lease pass-through on a live browser (bun run gateway:smoke)
   firefox-multi-agent-smoke.ts # N concurrent server PROCESSES on one shared Firefox (bun run firefox:multi:smoke)
 ```
 
