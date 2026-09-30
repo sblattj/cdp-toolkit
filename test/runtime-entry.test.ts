@@ -95,7 +95,10 @@ interface HandshakeResult {
  */
 function stdioHandshake(cmd: string, args: string[], timeoutMs = SPAWN_TIMEOUT_MS): Promise<HandshakeResult> {
   return new Promise((resolve, reject) => {
-    const child = track(spawn(cmd, args, { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] }));
+    // Never inherit the operator's CDP_TOOL_PROFILE: the count below is the default listing's.
+    const env = { ...process.env };
+    delete env.CDP_TOOL_PROFILE;
+    const child = track(spawn(cmd, args, { cwd: repoRoot, env, stdio: ["pipe", "pipe", "pipe"] }));
     let stderr = "";
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (d: string) => {
@@ -218,7 +221,8 @@ describe("issue #8: runtime entrypoints (bun + node)", () => {
     const expectHandshake = async (cmd: string, args: string[]): Promise<HandshakeResult> => {
       const res = await stdioHandshake(cmd, args);
       expect(res.serverName).toBe("cdp-toolkit");
-      expect(res.toolCount).toBeGreaterThan(40);
+      // 3.0 default (gateway): search_tools + call_tool + the 5 GATEWAY_TOOLS.
+      expect(res.toolCount).toBe(7);
       expect(res.stderr).toContain("ready");
       expect(res.exitCode).toBe(0);
       return res;
