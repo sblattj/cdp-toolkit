@@ -44,12 +44,12 @@ If [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp
 
 Every number above is runnable. `bun run bench:wedge` spawns an isolated headless Chrome, points a throwaway page at an endpoint that accepts the connection and never responds, and measures the full stuck-page lifecycle (re-run with `CDP_TIMEOUT_MS=3000` for a ~60s sample; defaults below use the 15s bound):
 
-| Phase | Measured (2026-09-16, Chrome 153, isolated headless, 8 wedges) |
+| Phase | Measured (2026-09-29, HeadlessChrome 154.0.8037.59, isolated headless, 8 wedges) |
 |---|---|
-| Healthy `evaluate_script` (50×) | p50 **1ms**, p95 **2ms** |
-| Wedged `navigate` → dead endpoint (8×) | **rejected at p50 15.03s, max 15.03s** — the configured bound, never a hang |
+| Healthy `evaluate_script` (50×) | p50 **1ms**, p95 **3ms** |
+| Wedged `navigate` → dead endpoint (8×) | **rejected at p50 15.01s, max 15.02s** — the configured bound, never a hang |
 | Witness tab evaluated mid-brick (8×) | p95 **3ms** — other tabs never stall |
-| Recovery: close bricked tab + reopen + evaluate (8×) | p95 **89ms** |
+| Recovery: close bricked tab + reopen + evaluate (8×) | p95 **33ms** |
 | `/mcp` restarts · server restarts | **0** · **0** |
 
 One honest caveat the benchmark also reports: while a navigation to a dead endpoint is pending, *that page* stays unresponsive to new sessions — the blast radius is the tab, not the server. Closing it is a browser-level command (2ms) and a fresh page answers at healthy latency; your other tabs, and the MCP server, never noticed. Exit code is nonzero unless every wedge rejected in-bound and every recovery landed under 1s, so the benchmark is CI-able.
