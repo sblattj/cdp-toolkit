@@ -43,7 +43,7 @@ import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
-import { resolveProfile, TOOL_GROUP, TOOL_GROUPS, GROUP_TOOLS } from "./toolGroups.ts";
+import { isListed, resolveProfile, TOOL_GROUP, TOOL_GROUPS, GROUP_TOOLS } from "./toolGroups.ts";
 import { TOOL_DOCS } from "./toolDocs.ts";
 import { VERSION } from "./version.ts";
 
@@ -156,8 +156,8 @@ function auditCoverage(): void {
 // payload without losing a single behavior. Kept under Claude Code's 2KB instructions
 // cap and front-loaded (grammar + leases before origin) so nothing critical is clipped.
 const INSTRUCTIONS = [
-  "cdp-toolkit drives a real browser over Chrome DevTools Protocol (or Firefox WebDriver-BiDi): open and drive pages, click/fill/type, screenshot and accessibility-snapshot, read console + network, set cookies, emulate devices, run Lighthouse and performance traces, record screencasts. Conventions shared across its tools:",
-  "TOOL AVAILABILITY: tools/list is complete and fixed for this process's life — cache it. Its one-liners are not the full docs: call describe_tool {name} on an unfamiliar tool, or describe_tool {} for the grouped catalog. CDP_TOOL_PROFILE=core (or a group list) lists only those groups; unlisted tools stay callable by name.",
+  "cdp-toolkit drives a real browser over CDP (or Firefox WebDriver-BiDi): pages, input, screenshots, snapshots, console, network, cookies, emulation, Lighthouse, traces, screencasts.",
+  "TOOLS: by default only 5 are listed (navigate_page, take_snapshot, click, fill, evaluate_script). ~45 more exist: find one with search_tools {query} (returns its schema; no query = catalog), run it with call_tool {name, arguments}. No tab yet? call_tool {name:'new_page'}. The listing is fixed for the process's life; CDP_TOOL_PROFILE=full lists everything.",
   "TARGET SELECTOR (the `target` param, unless a tool says otherwise): 'active' (default = first page) | 'index:N' (0-based) | 'url:<substr>' | 'title:<substr>' | 'label:<name>' (exact, ledger or live lease) | a 32-hex '<targetId>' of any target type — an iframe id from list_pages{all:true} drives like a tab. Chrome tools also accept 'frame:<substr>' for OOPIF iframe targets. Four Chrome-only tools (evaluate_script, list_network_requests, get_network_request, list_console_messages) also accept 'worker:<substr>' to reach a service/shared worker (e.g. an MV3 background worker); an idle-evicted worker is started first (see `wake`).",
   "LEASES (the `lease` param): claim_page, and new_page{claim:true}, mint an opaque token. Omit it for a tab THIS process already holds. It is required for a tab held by ANOTHER process, or one claimed explicitly. Under CDP_REQUIRE_LEASE the gate auto-acquires a lease for any tab this process drives — no token is surfaced, so pass `target`, not `lease` — while an explicit claim:true still demands its token on every later call.",
   "ORIGIN: list_pages and list_leases tag each tab's `origin` as 'agent' (this toolkit created it) or 'unknown' — never 'human', because the toolkit cannot prove a person opened a tab. An 'agent' tab stays findable after its creator releases the lease or dies.",
@@ -168,11 +168,16 @@ const INSTRUCTIONS = [
 // it (the 2026-07-28 revision requires the tool set not to change as a side effect of
 // other requests, which is exactly what the 2.0 browser_tools toggle did). Discovery is
 // the HOST's job per the MCP client best-practices: the client picks which of the listed
-// tools to put in front of the model. `describe_tool` is the inspect layer — one call
-// returns the full prose for any tool, listed or not — and CDP_TOOL_PROFILE is the only
-// filter, applied once at startup by whoever configures the server. A tool that the
-// profile hides is still callable by name; hiding only trims the listing's token cost.
+// tools to put in front of the model. CDP_TOOL_PROFILE is the only filter, applied once at
+// startup by whoever configures the server. 3.0 defaults it to `gateway` (5 tools) and adds
+// two STATIC meta-tools, search_tools (inspect) and call_tool (execute), so a model whose host
+// forwards only the listing can still reach every tool — without the listing ever changing.
 const PROFILE = startupProfile();
+
+/** Names handled at the MCP layer rather than dispatched to a browser tool. */
+const META_TOOLS = new Set(["search_tools", "call_tool", "describe_tool"]);
+const SEARCH_DEFAULT_LIMIT = 8;
+const SEARCH_MAX_LIMIT = 20;
 
 /** Read CDP_TOOL_PROFILE once; an unknown group name is a configuration error, not a warning. */
 function startupProfile() {
@@ -187,35 +192,53 @@ function startupProfile() {
 /**
  * The one and only tools/list payload, in manifest order (a stable order is a spec
  * SHOULD, and it keeps the response byte-identical across calls so caching is real):
- * describe_tool first, then every manifest tool the selected backend can run whose
- * group the profile advertises. Descriptions here are the compressed one-liners —
- * full prose is served on demand by describe_tool.
+ * the two meta-tools first, then every manifest tool the selected backend can run that
+ * the profile advertises. Descriptions here are the compressed one-liners — full prose
+ * is served on demand by search_tools.
  *
  * Frozen at runtime (the handler hands the SAME array to every caller); the cast back to
  * a mutable Tool[] is only because ListToolsResult declares `tools` mutable.
  */
 const LISTING: Tool[] = Object.freeze([
   {
-    name: "describe_tool",
+    name: "search_tools",
     description:
-      "Full description and per-parameter docs for any cdp-toolkit tool by name, including tools not in tools/list (unlisted tools stay callable by name). Call it before using an unfamiliar tool: the live tools/list carries only terse one-liners. With no name it returns the grouped catalog of every tool the selected browser supports.",
+      "Find a cdp-toolkit tool that is not in your tool list (cookies, network, console, screenshots, tabs, emulation, performance, recording, leases, downloads, …). Returns the best matches with full docs and inputSchema; run one with call_tool. With no query, returns the catalog of every tool by group.",
     inputSchema: {
       type: "object",
       properties: {
-        name: {
+        query: {
           type: "string",
-          description: "Tool name, e.g. take_screenshot. Omit it to get the catalog: every group, its tool names, and whether the group is in tools/list.",
+          description: "Keywords or an exact tool name, e.g. 'screenshot', 'network requests', 'new_page'. Omit for the catalog.",
+        },
+        limit: {
+          type: "integer",
+          description: `Max matches to return (default ${SEARCH_DEFAULT_LIMIT}, max ${SEARCH_MAX_LIMIT}).`,
         },
       },
       additionalProperties: false,
     } as Tool["inputSchema"],
   },
+  {
+    name: "call_tool",
+    description:
+      "Run any cdp-toolkit tool by name, including the ones not in your tool list. Look its arguments up with search_tools first. Behaves exactly like calling the tool directly (same leases, same errors).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Tool name from search_tools, e.g. new_page." },
+        arguments: { type: "object", description: "That tool's arguments, per its inputSchema.", additionalProperties: true },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    } as Tool["inputSchema"],
+  },
   ...MANIFEST
-    .filter((s) => AVAILABLE_NAMES.has(s.name) && PROFILE.groups.has(TOOL_GROUP[s.name]!))
+    .filter((s) => AVAILABLE_NAMES.has(s.name) && isListed(PROFILE, s.name))
     .map((s) => ({ name: s.name, description: s.description, inputSchema: s.inputSchema as Tool["inputSchema"] })),
 ] satisfies Tool[]) as Tool[];
 
-/** describe_tool with no name: every group the backend supports, and whether it is listed. */
+/** search_tools with no query: every group the backend supports, and what of it is listed. */
 function renderCatalog(): string {
   const lines = [
     `cdp-toolkit ${VERSION} · browser=${BROWSER} · ${AVAILABILITY.available.length} tools available, ${LISTING.length} in tools/list (CDP_TOOL_PROFILE=${PROFILE.label})`,
@@ -223,10 +246,74 @@ function renderCatalog(): string {
   for (const g of TOOL_GROUPS) {
     const shown = GROUP_TOOLS[g].filter((n) => AVAILABLE_NAMES.has(n));
     if (!shown.length) continue;
-    lines.push(`${PROFILE.groups.has(g) ? "[listed]" : "[hidden]"} ${g} (${shown.length}): ${shown.join(", ")}`);
+    const listed = shown.filter((n) => isListed(PROFILE, n));
+    const state = listed.length === shown.length ? "[listed]" : listed.length === 0 ? "[hidden]" : "[partly listed]";
+    lines.push(`${state} ${g} (${shown.length}): ${shown.join(", ")}`);
   }
-  lines.push("Unlisted tools are callable by name; describe_tool {name} documents any of them.");
+  lines.push("Run any tool with call_tool {name, arguments}; search_tools {query:<name>} returns its docs and inputSchema.");
   return lines.join("\n");
+}
+
+/** Lowercased word tokens: 'list_network_requests' and 'Network requests' both split cleanly. */
+function tokenize(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1);
+}
+
+const MANIFEST_BY_NAME = new Map(MANIFEST.map((s) => [s.name, s]));
+
+/**
+ * search_tools with a query: rank the backend's available tools against it. An exact tool
+ * name returns just that tool. Otherwise each query token scores against the tool's name
+ * (strongest), its group, and its full docs; ties keep manifest order. Capped, because an
+ * uncapped broad query would hand back the very 49-schema payload the gateway exists to avoid.
+ */
+function searchTools(query: string, rawLimit: unknown) {
+  const limit = typeof rawLimit === "number" && Number.isInteger(rawLimit) && rawLimit > 0
+    ? Math.min(rawLimit, SEARCH_MAX_LIMIT)
+    : SEARCH_DEFAULT_LIMIT;
+  const q = query.trim().toLowerCase();
+  const describe = (name: string) => {
+    const spec = MANIFEST_BY_NAME.get(name)!;
+    return {
+      name,
+      group: TOOL_GROUP[name] ?? null,
+      listed: isListed(PROFILE, name),
+      description: TOOL_DOCS[name]?.description ?? spec.description,
+      inputSchema: spec.inputSchema,
+    };
+  };
+  const candidates = MANIFEST.map((s) => s.name).filter((n) => AVAILABLE_NAMES.has(n));
+  let ranked: string[];
+  if (candidates.includes(q)) {
+    ranked = [q];
+  } else {
+    const tokens = tokenize(q);
+    const scored = candidates.map((name, order) => {
+      const nameTokens = tokenize(name);
+      const group = TOOL_GROUP[name] ?? "";
+      const docs = `${MANIFEST_BY_NAME.get(name)!.description} ${TOOL_DOCS[name]?.description ?? ""}`.toLowerCase();
+      let score = 0;
+      for (const t of tokens) {
+        if (nameTokens.includes(t)) score += 5;
+        else if (name.includes(t)) score += 3;
+        if (group === t || group.includes(t)) score += 2;
+        if (docs.includes(t)) score += 1;
+      }
+      return { name, order, score };
+    });
+    ranked = scored
+      .filter((s) => s.score > 0)
+      .sort((a, b) => b.score - a.score || a.order - b.order)
+      .map((s) => s.name);
+  }
+  const unavailable = AVAILABILITY.unavailable.find((u) => u.name === q);
+  return {
+    query,
+    total: ranked.length,
+    matches: ranked.slice(0, limit).map(describe),
+    ...(unavailable ? { unavailable: `${q} is not available under --browser ${BROWSER} (needs: ${unavailable.missing.join(", ")})` } : {}),
+    next: ranked.length ? "Run one with call_tool {name, arguments}." : "No match. Call search_tools with no query for the full catalog.",
+  };
 }
 
 /** describe_tool body: full prose for one tool from the on-demand docs map. */
@@ -273,9 +360,19 @@ export function buildServer(): Server {
     const { name } = request.params;
     const args = (request.params.arguments ?? {}) as unknown;
 
-    // describe_tool is handled at the MCP layer (it reads only static docs) and never
-    // enters the browser dispatch or a lease scope. With a name it documents one tool —
-    // listed or not; with no name it returns the grouped catalog.
+    // The meta-tools are handled at the MCP layer (they read only static docs) and never
+    // enter the browser dispatch or a lease scope.
+    if (name === "search_tools") {
+      const { query, limit } = args as { query?: unknown; limit?: unknown };
+      if (typeof query !== "string" || query.trim() === "") {
+        return { content: [{ type: "text" as const, text: renderCatalog() }] };
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(searchTools(query, limit), null, 2) }] };
+    }
+
+    // describe_tool is the 2.x inspect tool: no longer listed (search_tools {query:<name>}
+    // replaces it), still answered so 2.x callers keep working. With a name it documents
+    // one tool — listed or not; with no name it returns the grouped catalog.
     if (name === "describe_tool") {
       const requested = (args as { name?: unknown }).name;
       if (typeof requested !== "string" || requested === "") {
@@ -285,48 +382,73 @@ export function buildServer(): Server {
       return { content: [{ type: "text" as const, text: renderToolDoc(requested) }], isError: !known };
     }
 
-    if (!AVAILABLE_NAMES.has(name)) {
-      const gap = AVAILABILITY.unavailable.find((u) => u.name === name);
-      return {
-        content: [{ type: "text" as const, text: `unknown tool: ${name}${gap ? ` (not available under --browser ${BROWSER}, needs: ${gap.missing.join(", ")})` : ""}` }],
-        isError: true,
-      };
+    // call_tool unwraps to the inner tool and re-enters the SAME dispatch below, so the
+    // availability check, the lease scope (read off the INNER arguments) and the error
+    // shapes are identical to calling the tool directly. It exists because a model can
+    // only invoke tools its host put in front of it — an unlisted tool is callable by name
+    // over the wire, but not by a model whose host only forwards tools/list.
+    if (name === "call_tool") {
+      const inner = args as { name?: unknown; arguments?: unknown };
+      if (typeof inner.name !== "string" || inner.name === "") {
+        return { content: [{ type: "text" as const, text: "call_tool: `name` is required (find one with search_tools)" }], isError: true };
+      }
+      if (META_TOOLS.has(inner.name)) {
+        return { content: [{ type: "text" as const, text: `call_tool: '${inner.name}' is a meta-tool; call it directly` }], isError: true };
+      }
+      const innerArgs = inner.arguments ?? {};
+      if (typeof innerArgs !== "object" || Array.isArray(innerArgs)) {
+        return { content: [{ type: "text" as const, text: "call_tool: `arguments` must be an object" }], isError: true };
+      }
+      return runTool(inner.name, innerArgs);
     }
 
-    // ONE lease scope per dispatch, wrapping BOTH backend branches. This is the
-    // reason no tool takes a lease parameter: the token rides the async context
-    // down to whichever resolution path the tool eventually reaches, so a tool
-    // added tomorrow is covered with no action from whoever writes it. Reading
-    // 'lease' off args here is the only place the MCP layer knows the key exists.
-    return withLeaseScope(leaseFromArgs(args), async () => {
-      if (BROWSER === "chrome") {
-        const fn = dispatch[name];
-        if (!fn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
-        try {
-          const result = await fn(args);
-          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
-        }
-      }
+    return runTool(name, args);
+  });
 
-      // Firefox: one BiDi session memoized for the life of this server process (lifetime "session",
-      // ADR-001); launched lazily on the first Firefox tool call, torn down on shutdown below.
-      const neutralFn = neutralDispatch[name];
-      if (!neutralFn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
+  return server;
+}
+
+/** Dispatch one browser tool by name: the path both a direct call and call_tool take. */
+async function runTool(name: string, args: unknown) {
+  if (!AVAILABLE_NAMES.has(name)) {
+    const gap = AVAILABILITY.unavailable.find((u) => u.name === name);
+    return {
+      content: [{ type: "text" as const, text: `unknown tool: ${name}${gap ? ` (not available under --browser ${BROWSER}, needs: ${gap.missing.join(", ")})` : ""}` }],
+      isError: true,
+    };
+  }
+
+  // ONE lease scope per dispatch, wrapping BOTH backend branches. This is the
+  // reason no tool takes a lease parameter: the token rides the async context
+  // down to whichever resolution path the tool eventually reaches, so a tool
+  // added tomorrow is covered with no action from whoever writes it. Reading
+  // 'lease' off args here is the only place the MCP layer knows the key exists.
+  return withLeaseScope(leaseFromArgs(args), async () => {
+    if (BROWSER === "chrome") {
+      const fn = dispatch[name];
+      if (!fn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
       try {
-        const session = await getOrCreateFirefoxSession({ endpoint: FIREFOX_ENDPOINT });
-        const result = await neutralFn(session.driver, args);
+        const result = await fn(args);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
       }
-    });
-  });
+    }
 
-  return server;
+    // Firefox: one BiDi session memoized for the life of this server process (lifetime "session",
+    // ADR-001); launched lazily on the first Firefox tool call, torn down on shutdown below.
+    const neutralFn = neutralDispatch[name];
+    if (!neutralFn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
+    try {
+      const session = await getOrCreateFirefoxSession({ endpoint: FIREFOX_ENDPOINT });
+      const result = await neutralFn(session.driver, args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+    }
+  });
 }
 
 /**

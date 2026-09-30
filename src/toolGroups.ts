@@ -42,41 +42,72 @@ for (const group of TOOL_GROUPS) {
   }
 }
 
+/**
+ * The 3.0 default listing: the five tools nearly every browser task touches. Everything
+ * else is reached through the search_tools / call_tool meta-tools (src/mcp.ts), so an
+ * eagerly-loading host pays for 7 schemas instead of 49. evaluate_script is the escape
+ * hatch that covers most of what the other 43 do.
+ */
+export const GATEWAY_TOOLS = ["navigate_page", "take_snapshot", "click", "fill", "evaluate_script"] as const;
+
 export const PROFILES = {
+  gateway: [],
   core: ["core"],
   full: [...TOOL_GROUPS],
 } as const;
 
 export type ProfileName = keyof typeof PROFILES;
 
+/** What tools/list advertises: every tool in `groups`, plus the individual `tools`. */
+export interface ResolvedProfile {
+  groups: ReadonlySet<ToolGroup>;
+  tools: ReadonlySet<string>;
+  label: string;
+}
+
+/** True when a profile advertises `name` in tools/list. */
+export function isListed(profile: ResolvedProfile, name: string): boolean {
+  const group = TOOL_GROUP[name];
+  return profile.tools.has(name) || (group !== undefined && profile.groups.has(group));
+}
+
 /**
- * Resolve CDP_TOOL_PROFILE into the set of groups whose tools tools/list advertises.
+ * Resolve CDP_TOOL_PROFILE into what tools/list advertises.
  *
  * The profile is a STARTUP filter, read once: the listing it selects is fixed for the
  * life of the process (2.1 dropped the runtime `browser_tools` toggle, so the tool set
  * can never change as a side effect of another request — a spec MUST). Accepted
- * spellings: unset/empty or "full" (everything), "core" (the lean everyday set), or a
- * comma-separated list of group names. `core` is always included, so a list can never
- * strand the basics.
+ * spellings: unset/empty or "gateway" (the 5 GATEWAY_TOOLS; the 3.0 default), "full"
+ * (everything), "core" (the 12-tool everyday group), or a comma-separated list of group
+ * names, optionally including "gateway". A group list without "gateway" always includes
+ * `core`, so it can never strand the basics.
  */
-export function resolveProfile(spec: string | undefined): { groups: ReadonlySet<ToolGroup>; label: string } {
-  const all = (): { groups: ReadonlySet<ToolGroup>; label: string } => ({ groups: new Set(TOOL_GROUPS), label: "full" });
+export function resolveProfile(spec: string | undefined): ResolvedProfile {
+  const all = (): ResolvedProfile => ({ groups: new Set(TOOL_GROUPS), tools: new Set(), label: "full" });
   const raw = (spec ?? "").trim();
-  if (raw === "" || raw.toLowerCase() === "full") return all();
+  if (raw === "") return { groups: new Set(), tools: new Set(GATEWAY_TOOLS), label: "gateway" };
+  if (raw.toLowerCase() === "full") return all();
 
   const tokens = raw.split(",").map((t) => t.trim().toLowerCase()).filter((t) => t !== "");
   if (tokens.includes("full")) return all();
 
+  const gateway = tokens.includes("gateway");
   const known = new Set<string>(TOOL_GROUPS);
-  const picked = new Set<ToolGroup>(["core"]);
+  const picked = new Set<ToolGroup>(gateway ? [] : ["core"]);
   for (const token of tokens) {
+    if (token === "gateway") continue;
     if (!known.has(token)) {
-      throw new Error(`CDP_TOOL_PROFILE: unknown tool group '${token}'. Known: full, core, ${TOOL_GROUPS.filter((g) => g !== "core").join(", ")}`);
+      throw new Error(`CDP_TOOL_PROFILE: unknown tool group '${token}'. Known: gateway, full, core, ${TOOL_GROUPS.filter((g) => g !== "core").join(", ")}`);
     }
     picked.add(token as ToolGroup);
   }
   if (picked.size === TOOL_GROUPS.length) return all();
   // Canonical label: TOOL_GROUPS order, not the order the caller typed, so the ready
   // line and the catalog header read the same for every equivalent spelling.
-  return { groups: picked, label: TOOL_GROUPS.filter((g) => picked.has(g)).join(",") };
+  const groupLabel = TOOL_GROUPS.filter((g) => picked.has(g));
+  return {
+    groups: picked,
+    tools: new Set(gateway ? GATEWAY_TOOLS : []),
+    label: (gateway ? ["gateway", ...groupLabel] : groupLabel).join(","),
+  };
 }
