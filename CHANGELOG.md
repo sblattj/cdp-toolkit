@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-09-29
+
+### Fixed
+
+- `bench:wedge` now drives the headless Chrome it spawns (free port, HeadlessChrome check); it previously drove CDP_BASE/9222, so the 2026-09-16 README numbers were not from an isolated instance. Re-measured.
+
 ## [3.0.0] - 2026-09-29
 
 **The default MCP tool listing went from 49 tools to 7 (37,346 bytes to 5,072, -86.4%; about 9,336 tokens to about 1,268).** With `CDP_TOOL_PROFILE` unset, `tools/list` now advertises `search_tools`, `call_tool` and five core tools (`navigate_page`, `evaluate_script`, `take_snapshot`, `click`, `fill`); every other tool is found with `search_tools` and run with `call_tool`. `CDP_TOOL_PROFILE=full` restores the 2.x listing (plus the two meta-tools). The 48 underlying tools and the `cdp` CLI are unchanged, and the listing is still static: computed once at startup, `listChanged:false`, same cache hints.
