@@ -1,8 +1,8 @@
 /**
  * Wedge/stability benchmark: proves cdp-toolkit's core claim with numbers
  * anyone can re-run. Against a live Chrome (default: spawns an isolated,
- * headless instance on a throwaway profile; honors CDP_BASE to attach to your
- * own), it measures the full lifecycle of a stuck page:
+ * headless instance on a free port and throwaway profile; ignores an inherited
+ * CDP_BASE; set WEDGE_BENCH_BASE to attach to your own), it measures the full lifecycle of a stuck page:
  *
  *   1. HEALTHY  — 50 evaluate_script round-trips; p50/p95 wall-clock.
  *   2. WEDGE    — N times: open a throwaway page, navigate it to an endpoint
@@ -21,15 +21,17 @@
  * (abandoned) rejections escaped.
  *
  * Run: bun run scripts/wedge-bench.ts         (spawn + drive its own Chrome)
- *      CDP_BASE=http://127.0.0.1:9222 bun run scripts/wedge-bench.ts
+ *      WEDGE_BENCH_BASE=http://127.0.0.1:9222 bun run scripts/wedge-bench.ts
  *      CDP_TIMEOUT_MS=3000 bun run scripts/wedge-bench.ts   (fast sample)
  */
-import { TOOLS } from "../src/index.ts";
-import { DEFAULT_TIMEOUT_MS } from "../src/client.ts";
+import { createServer } from "node:net";
+
+// TOOLS / DEFAULT_TIMEOUT_MS are imported dynamically AFTER the Chrome spawn below:
+// src/client.ts evaluates CDP_BASE at import time, so a static import would bind
+// the tools to whatever browser CDP_BASE (or :9222) points at, not the spawned one.
 
 const N_HEALTHY = Number(process.env.BENCH_HEALTHY_N ?? 50);
 const N_WEDGE = Number(process.env.BENCH_WEDGE_N ?? 8);
-const BOUND = DEFAULT_TIMEOUT_MS;
 const SLACK_MS = 2_000;
 const FAST_BUDGET_MS = 1_000; // witness / close / recovery calls must stay under this
 
@@ -78,47 +80,107 @@ const server = Bun.serve({
 });
 const HANG_URL = `http://127.0.0.1:${server.port}/hang`;
 
-// --- isolated Chrome (only when CDP_BASE is not provided) ----------------------
+// --- isolated Chrome ------------------------------------------------------------
+// Always spawns an isolated headless Chrome on a free port. An inherited CDP_BASE is
+// IGNORED (a shell often exports one pointing at an everyday browser). The only
+// opt-out is an explicit WEDGE_BENCH_BASE=<url>.
 
-const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
-const spawnedChrome: { proc: Bun.Subprocess; dir: string } | null = process.env.CDP_BASE
-  ? null
-  : await (async () => {
-      const dir = (await Bun.$`mktemp -d /tmp/cdp-wedge-bench-XXXXXX`.text()).trim();
-      const candidates = [
-        process.env.CHROME_BIN,
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium-browser",
-      ].filter(Boolean) as string[];
-      const isExec = async (c: string): Promise<boolean> => (await Bun.$`test -x ${c}`.nothrow().quiet()).exitCode === 0;
-      const checks = await Promise.all(candidates.map(isExec));
-      const bin = candidates[checks.findIndex(Boolean)];
-      if (!bin) throw new Error("no Chrome found; set CHROME_BIN or CDP_BASE");
-      const port = 9333;
-      const proc = Bun.spawn(
-        [
-          bin,
-          "--headless=new",
-          `--remote-debugging-port=${port}`,
-          `--user-data-dir=${dir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "about:blank",
-        ],
-        { stdout: "ignore", stderr: "ignore" },
-      );
-      const base = `http://127.0.0.1:${port}`;
-      for (let i = 0; i < 100; i++) {
-        try {
-          const r = await fetch(`${base}/json/version`);
-          if (r.ok) return { proc, dir };
-        } catch {}
-        await new Promise((r) => setTimeout(r, 100));
+/** Pick a free loopback port by binding :0, then hand it back closed. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (addr === null || typeof addr === "string") {
+        srv.close();
+        reject(new Error("no port"));
+        return;
       }
-      proc.kill();
-      throw new Error(`Chrome did not open ${base} within 10s`);
-    })();
+      const { port } = addr;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+let spawnedChrome: { proc: Bun.Subprocess; dir: string } | null = null;
+const cleanup = async (): Promise<void> => {
+  const c = spawnedChrome;
+  spawnedChrome = null;
+  if (!c) return;
+  c.proc?.kill();
+  await c.proc?.exited; // Chrome keeps writing to the profile until it has exited
+  for (let i = 0; i < 10; i++) {
+    if ((await Bun.$`rm -rf ${c.dir}`.nothrow().quiet()).exitCode === 0) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  console.error(`warning: could not remove ${c.dir}`);
+};
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    void cleanup().finally(() => process.exit(130));
+  });
+}
+
+let BASE: string;
+try {
+  if (process.env.WEDGE_BENCH_BASE) {
+    BASE = process.env.WEDGE_BENCH_BASE;
+  } else {
+    const dir = (await Bun.$`mktemp -d /tmp/cdp-wedge-bench-XXXXXX`.text()).trim();
+    spawnedChrome = { proc: null as unknown as Bun.Subprocess, dir };
+    const candidates = [
+      process.env.CHROME_BIN,
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium-browser",
+    ].filter(Boolean) as string[];
+    const isExec = async (c: string): Promise<boolean> => (await Bun.$`test -x ${c}`.nothrow().quiet()).exitCode === 0;
+    const checks = await Promise.all(candidates.map(isExec));
+    const bin = candidates[checks.findIndex(Boolean)];
+    if (!bin) throw new Error("no Chrome found; set CHROME_BIN or WEDGE_BENCH_BASE");
+    const port = await freePort();
+    const proc = Bun.spawn(
+      [
+        bin,
+        "--headless=new",
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${dir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    spawnedChrome.proc = proc;
+    BASE = `http://127.0.0.1:${port}`;
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i++) {
+      try {
+        ready = (await fetch(`${BASE}/json/version`)).ok;
+      } catch {}
+      if (!ready) await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!ready) throw new Error(`Chrome did not open ${BASE} within 10s`);
+  }
+  const ver = (await (await fetch(`${BASE}/json/version`, { signal: AbortSignal.timeout(5_000) })).json()) as {
+    Browser?: string;
+    "User-Agent"?: string;
+  };
+  const ua = ver["User-Agent"] ?? "";
+  console.log(`browser at ${BASE}: ${ver.Browser} (${ua.includes("Headless") ? "headless" : "headed"}) UA: ${ua.match(/\S*Chrome\/\S+/)?.[0] ?? ua}`);
+  if (!ua.includes("HeadlessChrome")) {
+    throw new Error(`refusing to bench: ${BASE} is not HeadlessChrome (User-Agent: ${ua})`);
+  }
+} catch (e) {
+  console.error(String((e as Error).message ?? e));
+  await cleanup();
+  process.exit(2);
+}
+process.env.CDP_BASE = BASE;
+const { TOOLS } = await import("../src/index.ts");
+const { DEFAULT_TIMEOUT_MS } = await import("../src/client.ts");
+const BOUND = DEFAULT_TIMEOUT_MS;
 
 try {
   const boundNote = `${BOUND}ms (${process.env.CDP_TIMEOUT_MS ? "CDP_TIMEOUT_MS" : "default"})`;
@@ -210,6 +272,5 @@ try {
   process.exitCode = pass ? 0 : 1;
 } finally {
   server.stop(true);
-  spawnedChrome?.proc.kill();
-  if (spawnedChrome) await Bun.$`rm -rf ${spawnedChrome.dir}`.quiet();
+  await cleanup();
 }
