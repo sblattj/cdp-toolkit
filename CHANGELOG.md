@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2026-10-03
+
+### Fixed
+
+- CLI: `get_network_request --requestId <id>` failed with "no network request matched" for every Fetch/XHR request. CDP mints those ids as `<pid>.<n>` (e.g. `91775.34`), and the CLI coerced any numeric-looking flag value to a number, so the lookup compared a number against the stored string, and `91775.10` was mangled to `91775.1`. Flag coercion now follows the tool's schema: a key typed as a string keeps its raw text, and every other key is coerced as before. Verified live on headless Chrome 154: all 6 captured requests resolve by `--requestId` from both the source and the built CLI; on 3.0.1 the 5 Fetch requests failed and only the hex-id Document request resolved. MCP callers were not affected, since their arguments arrive already typed. (`src/cli.ts`, `test/cli-coerce.test.ts`)
+
 ## [3.0.1] - 2026-09-29
 
 ### Fixed
