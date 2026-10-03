@@ -9,9 +9,11 @@
  *   - First positional token is the tool name (a key of TOOLS).
  *   - `--json '<obj>'` parses a JSON object and merges it into the args object.
  *   - `--target <sel>` sets `args.target` (a TargetSelector string).
- *   - Any other `--key value` pair becomes `args.key`, with the value coerced:
- *       "true"/"false" -> boolean, a numeric string -> number, else the raw
- *       string. A bare `--flag` with no following value (or followed by another
+ *   - Any other `--key value` pair becomes `args.key`. When the tool's MANIFEST
+ *       inputSchema declares the key `type: "string"`, the raw string is kept
+ *       as-is (so a CDP requestId like "91775.10" is not turned into the number
+ *       91775.1). Otherwise the value is coerced: "true"/"false" -> boolean, a
+ *       numeric string -> number, else the raw string. A bare `--flag` with no following value (or followed by another
  *       --flag) is treated as boolean true.
  *   - Explicit `--key` pairs OVERRIDE keys merged from `--json` (last writer
  *     wins; --json is applied first, then the individual flags).
@@ -108,6 +110,20 @@ function coerce(raw: string): boolean | number | string {
   return raw;
 }
 
+/**
+ * Coerce one `--key value` using the tool's declared schema type. A key the
+ * schema types as "string" keeps its raw text verbatim; coercing it would turn
+ * an id that merely LOOKS numeric ("91775.10", "007") into a number that no
+ * longer matches, or into a different string entirely. Every other key (or a
+ * tool/key the manifest doesn't know) falls back to coerce().
+ */
+function coerceForTool(tool: string | undefined, key: string, raw: string): boolean | number | string {
+  const spec = tool === undefined ? undefined : MANIFEST.find((t) => t.name === tool);
+  const prop = spec?.inputSchema.properties?.[key] as { type?: unknown } | undefined;
+  if (prop?.type === "string") return raw;
+  return coerce(raw);
+}
+
 interface ParsedArgs {
   tool?: string;
   list: boolean;
@@ -117,12 +133,14 @@ interface ParsedArgs {
 }
 
 /** Parse process argv (already sliced to drop the runtime + script, and with --browser already stripped). */
-function parseArgv(argv: string[]): ParsedArgs {
+export function parseArgv(argv: string[]): ParsedArgs {
   const out: ParsedArgs = { list: false, capabilities: false, help: false, args: {} };
   // Collect flag pairs separately so --json can be merged BEFORE individual
   // flags override it, regardless of token order.
   let jsonObj: Record<string, unknown> | undefined;
-  const flagPairs: Array<[string, unknown]> = [];
+  // Raw values are kept until the tool name is known (it may follow the flags),
+  // so coercion can consult that tool's schema.
+  const flagPairs: Array<[string, string | true]> = [];
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -164,7 +182,7 @@ function parseArgv(argv: string[]): ParsedArgs {
         flagPairs.push(["target", rawValue]);
         continue;
       }
-      flagPairs.push([key, hasValue ? coerce(rawValue) : true]);
+      flagPairs.push([key, hasValue ? rawValue : true]);
       continue;
     }
     // First non-flag positional is the tool name; ignore any extras.
@@ -173,7 +191,9 @@ function parseArgv(argv: string[]): ParsedArgs {
 
   // --json first, then explicit flags win.
   if (jsonObj) Object.assign(out.args, jsonObj);
-  for (const [k, v] of flagPairs) out.args[k] = v;
+  for (const [k, v] of flagPairs) {
+    out.args[k] = v === true || k === "target" ? v : coerceForTool(out.tool, k, v);
+  }
   return out;
 }
 
