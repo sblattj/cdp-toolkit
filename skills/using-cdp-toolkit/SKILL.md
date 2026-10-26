@@ -272,7 +272,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 ## Common mistakes
 
 - **Reading in the call right after a navigation/reload.** Race. Wait on a sentinel first.
-- **Trusting `clicked:true` / `filled:true` / a returned value as proof.** It only means the command dispatched. Verify the outcome.
+- **Trusting `clicked:true` / `filled:true` / a returned value as proof.** It only means the command dispatched. Verify the outcome. The `element` field (`button "Save"`) says what was targeted, read before the action, not that the action worked.
 - **A bare arrow in `evaluate_script` returning `{}`.** You defined a function and never called it — use the IIFE form.
 - **`title:`/`url:` to *find* a tab on a shared browser.** Matches a lookalike silently. Use a targetId you created, or `label:` a tab you claimed.
 - **Hand-rolling raw CDP (`Target.attachToTarget` + `Runtime.evaluate`) to reach an MV3 extension's service worker.** Use `evaluate_script {target:"worker:<substring>"}` instead — it also handles idle-wake and lease-fencing for you.

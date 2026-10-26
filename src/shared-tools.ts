@@ -50,6 +50,7 @@ import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
+import { ACCNAME_HELPERS_SOURCE, MAX_NAME_LENGTH } from "./bidi/snapshot.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
@@ -840,13 +841,66 @@ export async function takeSnapshot(
 
 /* ------------------------------ interaction (8) ------------------------------ */
 
+/**
+ * In-page source that names the element `this` is, as a snapshot-style `role "name"` string
+ * (`button "Save"`, `textbox "Email"`). It reuses the snapshot walker's role/accname heuristics;
+ * an element with no role falls back to its tag, and one with no accessible name falls back to
+ * its own text, so a click on a bare `<div>` still says what it hit. Exported for the tests.
+ */
+export function describeElementSource(): string {
+  return `function() {
+    var MAX_NAME_LENGTH = ${MAX_NAME_LENGTH};
+    ${ACCNAME_HELPERS_SOURCE}
+    var el = this;
+    if (!el || el.nodeType !== 1) return null;
+    var role = implicitRole(el);
+    var name = accessibleName(el, !!CONTENT_NAMED_ROLES[role]);
+    if (!name) name = truncate(el.innerText || el.textContent || "");
+    return (role || el.tagName.toLowerCase()) + (name ? " " + JSON.stringify(name) : "");
+  }`;
+}
+
+/** How long describing may delay the action it precedes before it is given up on. */
+const DESCRIBE_TIMEOUT_MS = 2_000;
+
+/**
+ * Best-effort `role "name"` for the element an action is about to touch, read BEFORE the action
+ * (a click can navigate or unmount its node; fill should report the label, not the new value).
+ * Never throws and never blocks past DESCRIBE_TIMEOUT_MS: a stale or unresolvable locator is left
+ * for the action itself to fail on with its usual error, and the result just omits `element`.
+ */
+export async function describeElement(page: PageDriver, loc: ElementLocator): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<undefined>((r) => { timer = setTimeout(() => r(undefined), DESCRIBE_TIMEOUT_MS); });
+    const desc = await Promise.race([page.callOnElement(loc, describeElementSource()), timeout]);
+    return typeof desc === "string" && desc.length > 0 ? desc : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A drag destination that names an element, as opposed to a viewport point or an offset. */
+function isElementLocator(d: DragDestination): d is ElementLocator {
+  return !("x" in d) && !("dx" in d);
+}
+
+/** `{ element }` when there is a description, `{}` otherwise, for spreading into a result. */
+function elementField(element: string | undefined): { element?: string } {
+  return element === undefined ? {} : { element };
+}
+
 export async function click(
   driver: BrowserDriver,
   args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; modifiers?: string[] },
-): Promise<{ clicked: true; x: number; y: number }> {
+): Promise<{ clicked: true; element?: string; x: number; y: number }> {
+  const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
-    const { x, y } = await page.click(locatorOf(args), { button: args.button ?? "left", clickCount: args.clickCount ?? 1, modifiers: args.modifiers });
-    return { clicked: true, x, y };
+    const element = await describeElement(page, loc);
+    const { x, y } = await page.click(loc, { button: args.button ?? "left", clickCount: args.clickCount ?? 1, modifiers: args.modifiers });
+    return { clicked: true, ...elementField(element), x, y };
   });
 }
 
@@ -891,10 +945,12 @@ export async function scroll(
   });
 }
 
-export async function hover(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string }): Promise<{ hovered: true; x: number; y: number }> {
+export async function hover(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string }): Promise<{ hovered: true; element?: string; x: number; y: number }> {
+  const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
-    const { x, y } = await page.hover(locatorOf(args));
-    return { hovered: true, x, y };
+    const element = await describeElement(page, loc);
+    const { x, y } = await page.hover(loc);
+    return { hovered: true, ...elementField(element), x, y };
   });
 }
 
@@ -989,47 +1045,60 @@ export async function drag(
     mode?: "mouse" | "html5";
     steps?: number;
   },
-): Promise<{ dragged: true; mode: "mouse" | "html5"; steps: number; from: { x: number; y: number }; to: { x: number; y: number } }> {
+): Promise<{ dragged: true; element?: string; target_element?: string; mode: "mouse" | "html5"; steps: number; from: { x: number; y: number }; to: { x: number; y: number } }> {
   if (!args.from) throw new SharedToolError("drag requires { from }");
   const destination = resolveDragDestination(args);
   const steps = resolveDragSteps(args.steps);
   // Capability check BEFORE withPage: an unsupported mode must not claim a lease or open a socket.
   const mode = resolveDragMode(args.mode, driver.capabilities);
   return withPage(driver, args.target, async (page) => {
-    const { from, to } = await page.drag(locatorOf(args.from), destination, { mode, steps });
-    return { dragged: true, mode, steps, from, to };
+    const fromLoc = locatorOf(args.from);
+    const element = await describeElement(page, fromLoc);
+    const targetElement = isElementLocator(destination) ? await describeElement(page, destination) : undefined;
+    const { from, to } = await page.drag(fromLoc, destination, { mode, steps });
+    return {
+      dragged: true, ...elementField(element), ...(targetElement === undefined ? {} : { target_element: targetElement }),
+      mode, steps, from, to,
+    };
   });
 }
 
-export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string }): Promise<{ filled: true; value: string }> {
+export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string }): Promise<{ filled: true; element?: string; value: string }> {
   if (typeof args.value !== "string") throw new SharedToolError("fill requires a string { value }");
+  const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
-    await page.setValue(locatorOf(args), args.value);
-    return { filled: true, value: args.value };
+    const element = await describeElement(page, loc);
+    await page.setValue(loc, args.value);
+    return { filled: true, ...elementField(element), value: args.value };
   });
 }
 
 export async function fillForm(
   driver: BrowserDriver,
   args: { target?: TargetSelector; fields: Array<{ uid?: DriverUid; selector?: string; value: string }> },
-): Promise<{ filled: number; fields: number }> {
+): Promise<{ filled: number; fields: number; elements: Array<string | null> }> {
   if (!Array.isArray(args.fields) || args.fields.length === 0) throw new SharedToolError("fill_form requires a non-empty { fields } array");
   return withPage(driver, args.target, async (page) => {
     let filled = 0;
+    const elements: Array<string | null> = [];
     for (const f of args.fields) {
       if (typeof f.value !== "string") throw new SharedToolError("each fill_form field requires a string value");
-      await page.setValue(locatorOf(f), f.value);
+      const loc = locatorOf(f);
+      elements.push((await describeElement(page, loc)) ?? null);
+      await page.setValue(loc, f.value);
       filled++;
     }
-    return { filled, fields: args.fields.length };
+    return { filled, fields: args.fields.length, elements };
   });
 }
 
-export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string }): Promise<{ typed: true; text: string }> {
+export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string }): Promise<{ typed: true; element?: string; text: string }> {
   if (typeof args.text !== "string") throw new SharedToolError("type_text requires a string { text }");
+  const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
-    await page.typeText(locatorOf(args), args.text);
-    return { typed: true, text: args.text };
+    const element = await describeElement(page, loc);
+    await page.typeText(loc, args.text);
+    return { typed: true, ...elementField(element), text: args.text };
   });
 }
 
@@ -1042,14 +1111,16 @@ export async function pressKey(driver: BrowserDriver, args: { target?: TargetSel
   });
 }
 
-export async function uploadFile(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; files: string | string[] }): Promise<{ uploaded: string[] }> {
+export async function uploadFile(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; files: string | string[] }): Promise<{ uploaded: string[]; element?: string }> {
   const files = Array.isArray(args.files) ? args.files : [args.files];
   if (!files.length || files.some((f) => typeof f !== "string" || !f.length)) {
     throw new SharedToolError("upload_file requires { files } as a non-empty path or array of paths");
   }
   return withPage(driver, args.target, async (page) => {
-    await page.setFiles(locatorOf(args), files);
-    return { uploaded: files };
+    const loc = locatorOf(args);
+    const element = await describeElement(page, loc);
+    await page.setFiles(loc, files);
+    return { uploaded: files, ...elementField(element) };
   });
 }
 

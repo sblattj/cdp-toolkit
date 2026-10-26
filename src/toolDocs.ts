@@ -115,7 +115,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "click": {
-    "description": "Click an element via a synthetic mouse press/release at its scrolled-into-view center. Give exactly one of uid or selector. modifiers (Alt/Control/Meta/Shift) throws on the Firefox backend — use --browser chrome for a modifier-click. clickCount:3 triple-clicks (selects a line/paragraph in most editors).",
+    "description": "Click an element via a synthetic mouse press/release at its scrolled-into-view center. Give exactly one of uid or selector. modifiers (Alt/Control/Meta/Shift) throws on the Firefox backend — use --browser chrome for a modifier-click. clickCount:3 triple-clicks (selects a line/paragraph in most editors). Returns {clicked,element,x,y}; element names what was hit, snapshot-style (button \"Save\"), read before the click and omitted if it cannot be read.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
@@ -213,7 +213,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "fill": {
-    "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes — won't fire per-keypress handlers). Give exactly one of uid or selector.",
+    "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes — won't fire per-keypress handlers). Give exactly one of uid or selector. Returns {filled,element,value}; element names the field (textbox \"Email\").",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
