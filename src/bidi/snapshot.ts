@@ -50,6 +50,128 @@ export function coerceSnapshotResult(raw: unknown): StampedSnapshot {
 }
 
 /**
+ * The reduced role + accessible-name heuristics, as in-page JS source. Shared by the snapshot
+ * walker below and by `describeElementSource` (src/shared-tools.ts), which names the element an
+ * action is about to touch, so a click result and a snapshot line agree on what "button \"Save\""
+ * means. Expects a `MAX_NAME_LENGTH` var in the enclosing function; interpolates nothing itself.
+ */
+export const ACCNAME_HELPERS_SOURCE = `
+function truncate(s) {
+  s = s.trim().replace(/\\s+/g, " ");
+  if (s.length > MAX_NAME_LENGTH) return s.slice(0, MAX_NAME_LENGTH - 1) + "\\u2026";
+  return s;
+}
+
+function textOf(el) {
+  return el.textContent || "";
+}
+
+function idRefsText(doc, ids) {
+  var parts = [];
+  var list = ids.trim().split(/\\s+/);
+  for (var i = 0; i < list.length; i++) {
+    var ref = doc.getElementById(list[i]);
+    if (ref) parts.push(textOf(ref));
+  }
+  return parts.join(" ").trim();
+}
+
+// Text of a <label>, minus any nested form control's own content: a
+// label that WRAPS its control ("<label>Color <select>...</select></label>")
+// would otherwise include every option's text in the control's own name.
+function labelOwnText(label) {
+  var clone = label.cloneNode(true);
+  var controls = clone.querySelectorAll("input, select, textarea, button");
+  for (var i = 0; i < controls.length; i++) {
+    controls[i].parentNode.removeChild(controls[i]);
+  }
+  return textOf(clone);
+}
+
+// Guard: without this, an <option> inside a labelled <select> would
+// inherit the select's own label via closest("label"), not its text.
+var LABELABLE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, BUTTON: 1, METER: 1, OUTPUT: 1, PROGRESS: 1 };
+
+function nativeLabelText(el) {
+  if (!LABELABLE_TAGS[el.tagName]) return "";
+  var doc = el.ownerDocument;
+  if (el.id) {
+    var forLabel = doc.querySelector('label[for="' + el.id + '"]');
+    if (forLabel) return labelOwnText(forLabel);
+  }
+  var ancestor = el.closest ? el.closest("label") : null;
+  if (ancestor) return labelOwnText(ancestor);
+  return "";
+}
+
+// Reduced accname: aria-labelledby, then aria-label, then native label,
+// then alt/title/placeholder, then trimmed own text for content-named
+// elements. Not the full W3C accname algorithm (no recursive traversal
+// rules for nested presentational content) but covers the common cases.
+function accessibleName(el, contentNamed) {
+  var doc = el.ownerDocument;
+  var labelledby = el.getAttribute("aria-labelledby");
+  if (labelledby) {
+    var viaIds = idRefsText(doc, labelledby);
+    if (viaIds) return truncate(viaIds);
+  }
+  var ariaLabel = el.getAttribute("aria-label");
+  if (ariaLabel && ariaLabel.trim()) return truncate(ariaLabel);
+  var native = nativeLabelText(el);
+  if (native && native.trim()) return truncate(native);
+  var alt = el.getAttribute("alt");
+  if (alt && alt.trim()) return truncate(alt);
+  var title = el.getAttribute("title");
+  if (title && title.trim()) return truncate(title);
+  var placeholder = el.getAttribute("placeholder");
+  if (placeholder && placeholder.trim()) return truncate(placeholder);
+  if (contentNamed) {
+    var text = textOf(el);
+    if (text && text.trim()) return truncate(text);
+  }
+  return "";
+}
+
+var IMPLICIT_ROLE_BY_TAG = {
+  A: "link", BUTTON: "button", NAV: "navigation", MAIN: "main", FORM: "form", DIALOG: "dialog",
+  UL: "list", OL: "list", LI: "listitem", TABLE: "table", TR: "row", TD: "cell", TH: "columnheader",
+  SELECT: "combobox", OPTION: "option", TEXTAREA: "textbox", IMG: "img",
+  H1: "heading", H2: "heading", H3: "heading", H4: "heading", H5: "heading", H6: "heading",
+  PROGRESS: "progressbar", METER: "meter"
+};
+
+var INPUT_TYPE_ROLE = {
+  button: "button", submit: "button", reset: "button", checkbox: "checkbox", radio: "radio",
+  range: "slider", number: "spinbutton", search: "searchbox", email: "textbox", tel: "textbox",
+  url: "textbox", password: "textbox", text: "textbox", image: "button"
+};
+
+var CONTENT_NAMED_ROLES = {
+  button: true, link: true, heading: true, option: true, cell: true,
+  columnheader: true, listitem: true, menuitem: true, tab: true
+};
+
+function implicitRole(el) {
+  var explicit = el.getAttribute("role");
+  if (explicit) return explicit;
+  var tag = el.tagName;
+  if (tag === "INPUT") {
+    var type = (el.getAttribute("type") || "text").toLowerCase();
+    return INPUT_TYPE_ROLE[type] || "textbox";
+  }
+  if (tag === "A" && !el.getAttribute("href")) return "";
+  if (Object.prototype.hasOwnProperty.call(IMPLICIT_ROLE_BY_TAG, tag)) {
+    return IMPLICIT_ROLE_BY_TAG[tag];
+  }
+  // Deliberate divergence: Chrome's real AX tree says "generic" here,
+  // but "textbox" is the useful signal an agent needs. Chrome is out of
+  // step, do not "fix" this toward parity.
+  if (el.isContentEditable) return "textbox";
+  return "";
+}
+`;
+
+/**
  * The in-page function source. Zero-argument, self-contained: no closures
  * over TypeScript scope, no imports, nothing but plain DOM/ARIA calls that
  * exist in every browser this ships against. Kept as one string builder
@@ -102,119 +224,7 @@ export function buildSnapshotFunctionSource(): string {
       return true;
     }
 
-    function truncate(s) {
-      s = s.trim().replace(/\\s+/g, " ");
-      if (s.length > MAX_NAME_LENGTH) return s.slice(0, MAX_NAME_LENGTH - 1) + "\\u2026";
-      return s;
-    }
-
-    function textOf(el) {
-      return el.textContent || "";
-    }
-
-    function idRefsText(doc, ids) {
-      var parts = [];
-      var list = ids.trim().split(/\\s+/);
-      for (var i = 0; i < list.length; i++) {
-        var ref = doc.getElementById(list[i]);
-        if (ref) parts.push(textOf(ref));
-      }
-      return parts.join(" ").trim();
-    }
-
-    // Text of a <label>, minus any nested form control's own content: a
-    // label that WRAPS its control ("<label>Color <select>...</select></label>")
-    // would otherwise include every option's text in the control's own name.
-    function labelOwnText(label) {
-      var clone = label.cloneNode(true);
-      var controls = clone.querySelectorAll("input, select, textarea, button");
-      for (var i = 0; i < controls.length; i++) {
-        controls[i].parentNode.removeChild(controls[i]);
-      }
-      return textOf(clone);
-    }
-
-    // Guard: without this, an <option> inside a labelled <select> would
-    // inherit the select's own label via closest("label"), not its text.
-    var LABELABLE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, BUTTON: 1, METER: 1, OUTPUT: 1, PROGRESS: 1 };
-
-    function nativeLabelText(el) {
-      if (!LABELABLE_TAGS[el.tagName]) return "";
-      var doc = el.ownerDocument;
-      if (el.id) {
-        var forLabel = doc.querySelector('label[for="' + el.id + '"]');
-        if (forLabel) return labelOwnText(forLabel);
-      }
-      var ancestor = el.closest ? el.closest("label") : null;
-      if (ancestor) return labelOwnText(ancestor);
-      return "";
-    }
-
-    // Reduced accname: aria-labelledby, then aria-label, then native label,
-    // then alt/title/placeholder, then trimmed own text for content-named
-    // elements. Not the full W3C accname algorithm (no recursive traversal
-    // rules for nested presentational content) but covers the common cases.
-    function accessibleName(el, contentNamed) {
-      var doc = el.ownerDocument;
-      var labelledby = el.getAttribute("aria-labelledby");
-      if (labelledby) {
-        var viaIds = idRefsText(doc, labelledby);
-        if (viaIds) return truncate(viaIds);
-      }
-      var ariaLabel = el.getAttribute("aria-label");
-      if (ariaLabel && ariaLabel.trim()) return truncate(ariaLabel);
-      var native = nativeLabelText(el);
-      if (native && native.trim()) return truncate(native);
-      var alt = el.getAttribute("alt");
-      if (alt && alt.trim()) return truncate(alt);
-      var title = el.getAttribute("title");
-      if (title && title.trim()) return truncate(title);
-      var placeholder = el.getAttribute("placeholder");
-      if (placeholder && placeholder.trim()) return truncate(placeholder);
-      if (contentNamed) {
-        var text = textOf(el);
-        if (text && text.trim()) return truncate(text);
-      }
-      return "";
-    }
-
-    var IMPLICIT_ROLE_BY_TAG = {
-      A: "link", BUTTON: "button", NAV: "navigation", MAIN: "main", FORM: "form", DIALOG: "dialog",
-      UL: "list", OL: "list", LI: "listitem", TABLE: "table", TR: "row", TD: "cell", TH: "columnheader",
-      SELECT: "combobox", OPTION: "option", TEXTAREA: "textbox", IMG: "img",
-      H1: "heading", H2: "heading", H3: "heading", H4: "heading", H5: "heading", H6: "heading",
-      PROGRESS: "progressbar", METER: "meter"
-    };
-
-    var INPUT_TYPE_ROLE = {
-      button: "button", submit: "button", reset: "button", checkbox: "checkbox", radio: "radio",
-      range: "slider", number: "spinbutton", search: "searchbox", email: "textbox", tel: "textbox",
-      url: "textbox", password: "textbox", text: "textbox", image: "button"
-    };
-
-    var CONTENT_NAMED_ROLES = {
-      button: true, link: true, heading: true, option: true, cell: true,
-      columnheader: true, listitem: true, menuitem: true, tab: true
-    };
-
-    function implicitRole(el) {
-      var explicit = el.getAttribute("role");
-      if (explicit) return explicit;
-      var tag = el.tagName;
-      if (tag === "INPUT") {
-        var type = (el.getAttribute("type") || "text").toLowerCase();
-        return INPUT_TYPE_ROLE[type] || "textbox";
-      }
-      if (tag === "A" && !el.getAttribute("href")) return "";
-      if (Object.prototype.hasOwnProperty.call(IMPLICIT_ROLE_BY_TAG, tag)) {
-        return IMPLICIT_ROLE_BY_TAG[tag];
-      }
-      // Deliberate divergence: Chrome's real AX tree says "generic" here,
-      // but "textbox" is the useful signal an agent needs. Chrome is out of
-      // step, do not "fix" this toward parity.
-      if (el.isContentEditable) return "textbox";
-      return "";
-    }
+    ${ACCNAME_HELPERS_SOURCE}
 
     function headingLevel(el) {
       var m = /^H([1-6])$/.exec(el.tagName);

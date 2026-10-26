@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Action results now say what they touched, not just where. `click`, `hover`, `fill`, `type_text` and `upload_file` return an `element` field with a snapshot-style `role "name"` string (`{"clicked":true,"element":"button \"Save\"","x":85,"y":95}`), so a transcript shows "clicked button Save" instead of a bare uid. `fill_form` returns `elements` (one per field, `null` where none could be read) and `drag` returns `element` for the source plus `target_element` when `to` is an element. The description is read in the page before the action (a click can navigate or unmount its node; `fill` reports the field's label, not the new value), is bounded to 2s, and is omitted rather than thrown on failure, so it can never break or mask the action's own result or error. Additive: no existing field changed. (`src/shared-tools.ts`, `test/describe-element.test.ts`)
+- The role and accessible-name heuristics behind the Firefox snapshot walker are now one shared in-page source (`ACCNAME_HELPERS_SOURCE`, `src/bidi/snapshot.ts`) used by both the walker and the new describe step; the walker's generated function is byte-identical modulo whitespace. Caveat: on Chrome the snapshot comes from the native accessibility tree while `element` uses this DOM heuristic, so the two agree for buttons, links, tabs and labelled inputs but can differ on exotic accname cases.
+
 ### Fixed
 
 - `stop_screen_recording` failed on new ffmpeg (9.0.1 on Homebrew) with `Unrecognized option 'vsync'`, because `-vsync` is gone there. The encoder probe now also reads `ffmpeg -version` and uses `-fps_mode vfr` on ffmpeg 5.1 and later (and git snapshots), keeping `-vsync vfr` for 4.4 and 5.0. If `-version` fails or prints no readable version, the probe reads the option list from `-h full` instead, and if that fails too it picks `-fps_mode`, never the removed `-vsync`. Verified on ffmpeg 9.0.1: a 4 s two-frame ledger encoded to 4.04 s with `-fps_mode`; the old argv exited 8. (`src/tools/screencast.ts` `supportsFpsMode`, `test/screencast.test.ts`)
