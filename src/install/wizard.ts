@@ -63,7 +63,7 @@ export interface InstallerIO {
 
 const DEFAULT_NAME = "cdp-toolkit";
 const HARNESSES: readonly HarnessChoice[] = ["claude", "codex", "opencode"];
-const BROWSERS: readonly BrowserChoice[] = ["arc", "chrome", "firefox"];
+const BROWSERS: readonly BrowserChoice[] = ["arc", "chrome", "firefox", "vivaldi"];
 
 /* --------------------------------- pure: arg parsing --------------------------------- */
 
@@ -79,9 +79,9 @@ function parseHarness(v: string | undefined): HarnessChoice {
 }
 
 function parseBrowserChoice(v: string | undefined): BrowserChoice {
-  if (v === undefined) throw new Error("--browser requires a value: arc, chrome, or firefox");
+  if (v === undefined) throw new Error("--browser requires a value: arc, chrome, firefox, or vivaldi");
   if ((BROWSERS as readonly string[]).includes(v)) return v as BrowserChoice;
-  throw new Error(`--browser must be one of arc|chrome|firefox (got '${v}')`);
+  throw new Error(`--browser must be one of arc|chrome|firefox|vivaldi (got '${v}')`);
 }
 
 function parsePort(v: string | undefined): number {
@@ -165,8 +165,8 @@ export function parseInstallArgs(argv: string[]): InstallArgs {
  * PURE. Build the MCP stdio server config for a given browser + debug port.
  *
  * The server always runs `npx -y cdp-toolkit`. Only the env differs by browser, and even then
- * chrome and arc are IDENTICAL: both are driven over CDP, and the driver just talks CDP to
- * whatever is listening on CDP_BASE — the arc-vs-chrome distinction lives entirely in the shell
+ * chrome, arc and vivaldi are IDENTICAL: both are driven over CDP, and the driver just talks CDP to
+ * whatever is listening on CDP_BASE — the arc-vs-chrome-vs-vivaldi distinction lives entirely in the shell
  * ALIAS (which .app it launches), not in the server env. Firefox is the odd one out: it is driven
  * over WebDriver BiDi, selected by CDP_BROWSER=firefox with the port in CDP_FIREFOX_ENDPOINT.
  */
@@ -185,14 +185,14 @@ export function installHelpText(): string {
 browser-launch alias (with the remote-debugging port open) to your shell rc.
 
 Usage:
-  cdp install [--harness <claude|codex|opencode>] [--browser <arc|chrome|firefox>]
+  cdp install [--harness <claude|codex|opencode>] [--browser <arc|chrome|firefox|vivaldi>]
               [--port <n>] [--name <server-name>] [--alias-name <name>]
               [--no-alias] [--yes|-y] [--help|-h]
 
 Options:
   --harness <h>     Coding harness to register the MCP server with: claude, codex, opencode.
-  --browser <b>     Browser the alias launches: arc, chrome, firefox.
-  --port <n>        Remote-debugging port (1-65535). Default: 9222 (chrome/arc), 9223 (firefox).
+  --browser <b>     Browser the alias launches: arc, chrome, firefox, vivaldi.
+  --port <n>        Remote-debugging port (1-65535). Default: 9222 (chrome/arc/vivaldi), 9223 (firefox).
   --name <name>     MCP server name to register. Default: ${DEFAULT_NAME}.
   --alias-name <n>  Shell alias name. Default: cdp-<browser> (e.g. cdp-firefox).
   --no-alias        Register the MCP server only; skip writing the shell alias.

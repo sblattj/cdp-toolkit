@@ -42,10 +42,11 @@ async function withEnv<T>(key: string, value: string | undefined, fn: () => Prom
 /* ------------------------------- defaultAliasName ------------------------------- */
 
 describe("defaultAliasName", () => {
-  test("is cdp-<choice> for all three browsers", () => {
+  test("is cdp-<choice> for all four browsers", () => {
     expect(defaultAliasName("chrome")).toBe("cdp-chrome");
     expect(defaultAliasName("arc")).toBe("cdp-arc");
     expect(defaultAliasName("firefox")).toBe("cdp-firefox");
+    expect(defaultAliasName("vivaldi")).toBe("cdp-vivaldi");
   });
 });
 
@@ -65,6 +66,12 @@ describe("browserLaunchArgs", () => {
     expect(args.some((a) => a === "--remote-debugging-port=9223")).toBe(true);
     expect(args.some((a) => a.startsWith("--user-data-dir="))).toBe(true);
     expect(args.find((a) => a.startsWith("--user-data-dir="))).toContain("arc-profile");
+  });
+
+  test("vivaldi includes --remote-debugging-port= and --user-data-dir=", () => {
+    const args = browserLaunchArgs({ choice: "vivaldi", port: 9223 });
+    expect(args.some((a) => a === "--remote-debugging-port=9223")).toBe(true);
+    expect(args.find((a) => a.startsWith("--user-data-dir="))).toContain("vivaldi-profile");
   });
 
   test("firefox includes --remote-debugging-port, --marionette, --no-remote, --profile", () => {
@@ -131,6 +138,19 @@ describe("aliasLine", () => {
       await withEnv("ARC_BIN", binPath, () => {
         const line = aliasLine({ choice: "arc", port: 9444, aliasName: "my-arc-debug" });
         expect(line.startsWith("alias my-arc-debug=")).toBe(true);
+      });
+    });
+  });
+
+  test("vivaldi: VIVALDI_BIN override drives the alias line", async () => {
+    await withTmp(async (dir) => {
+      const binPath = join(dir, "vivaldi-bin");
+      writeFileSync(binPath, "");
+      await withEnv("VIVALDI_BIN", binPath, () => {
+        const line = aliasLine({ choice: "vivaldi", port: 9223 });
+        expect(line).toBe(
+          `alias cdp-vivaldi='${binPath} --remote-debugging-port=9223 --user-data-dir=$HOME/.cdp-toolkit/vivaldi-profile'`,
+        );
       });
     });
   });

@@ -89,6 +89,10 @@ describe("parseInstallArgs", () => {
     expect(() => parseInstallArgs(["--browser", "safari"])).toThrow(/browser/);
   });
 
+  test("--browser vivaldi is accepted", () => {
+    expect(parseInstallArgs(["--browser", "vivaldi"]).browser).toBe("vivaldi");
+  });
+
   test("unknown option is rejected", () => {
     expect(() => parseInstallArgs(["--wat"])).toThrow(/unknown option/);
   });
@@ -121,6 +125,13 @@ describe("composeServerConfig", () => {
 });
 
 /* --------------------------------- installHelpText --------------------------------- */
+
+describe("composeServerConfig vivaldi", () => {
+  test("vivaldi → identical env shape to chrome", () => {
+    const cfg = composeServerConfig("vivaldi", 9345);
+    expect(cfg.env).toEqual({ CDP_BASE: "http://127.0.0.1:9345" });
+  });
+});
 
 describe("installHelpText", () => {
   test("mentions the subcommand and all three harnesses", () => {

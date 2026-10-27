@@ -76,7 +76,7 @@ One honest caveat the benchmark also reports: while a navigation to a dead endpo
 npx -y --package cdp-toolkit cdp install     # or `cdp install` from a clone / after a global install
 ```
 
-It asks for a harness (`claude` | `codex` | `opencode`), a debug port, and a browser (`arc` | `chrome` | `firefox`), then writes an idempotent marker block into your `~/.zshrc`/`~/.bashrc`. The same flags drive it non-interactively: `--harness --browser --port --name --no-alias --yes`. The Firefox alias it writes includes `--marionette` (required for cdp-toolkit's orphaned-session auto-recovery — see [Firefox](#firefox-webdriver-bidi)). It is a CLI subcommand, **not** a 49th tool: `cdp --list` still shows 48.
+It asks for a harness (`claude` | `codex` | `opencode`), a debug port, and a browser (`arc` | `chrome` | `firefox` | `vivaldi`), then writes an idempotent marker block into your `~/.zshrc`/`~/.bashrc`. The same flags drive it non-interactively: `--harness --browser --port --name --no-alias --yes`. The Firefox alias it writes includes `--marionette` (required for cdp-toolkit's orphaned-session auto-recovery — see [Firefox](#firefox-webdriver-bidi)). It is a CLI subcommand, **not** a 49th tool: `cdp --list` still shows 48.
 
 Prefer to wire it by hand? The manual path is three steps:
 

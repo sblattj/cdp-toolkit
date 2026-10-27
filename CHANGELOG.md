@@ -5,6 +5,12 @@ All notable changes to cdp-toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `vivaldi` is now a supported `cdp install --browser` choice, wired like `arc`: binary detection (`VIVALDI_BIN`, `/Applications/Vivaldi.app/Contents/MacOS/Vivaldi`, `vivaldi` on PATH, `/usr/bin/vivaldi`), the `cdp-vivaldi` alias, the CLI choice list and help text, and the README. Vivaldi is Chromium, so it takes the same launch flags and the server env is the same as chrome and arc. (`src/install/browser.ts`, `src/install/wizard.ts`, `test/install-browser.test.ts`, `test/install-wizard.test.ts`)
+
 ## [3.0.2] - 2026-10-03
 
 ### Fixed

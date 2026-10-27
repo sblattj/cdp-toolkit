@@ -10,7 +10,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
-export type BrowserChoice = "arc" | "chrome" | "firefox";
+export type BrowserChoice = "arc" | "chrome" | "firefox" | "vivaldi";
 
 export interface BrowserInfo {
   choice: BrowserChoice;
@@ -40,7 +40,7 @@ export interface RcAppendResult {
 
 /**
  * Per-choice candidate lists, built fresh on every call so env var overrides (CHROME_BIN /
- * ARC_BIN / FIREFOX_BIN) are read live rather than captured once at module load — important for
+ * ARC_BIN / VIVALDI_BIN / FIREFOX_BIN) are read live rather than captured once at module load — important for
  * tests that set/restore these env vars around a single call.
  *
  * macOS-first, Linux fallback. Order mirrors the spec: env override, then the macOS .app bundle
@@ -56,6 +56,12 @@ const CANDIDATE_BUILDERS: Record<BrowserChoice, () => Array<string | undefined>>
     "chromium",
   ],
   arc: () => [process.env.ARC_BIN, "/Applications/Arc.app/Contents/MacOS/Arc", "arc"],
+  vivaldi: () => [
+    process.env.VIVALDI_BIN,
+    "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+    "vivaldi",
+    "/usr/bin/vivaldi",
+  ],
   firefox: () => [
     process.env.FIREFOX_BIN,
     "/Applications/Firefox.app/Contents/MacOS/firefox",
@@ -113,7 +119,7 @@ export function defaultAliasName(choice: BrowserChoice): string {
 }
 
 /**
- * The launch flags only (no binary). Chrome and Arc are both Chromium-based and Arc accepts
+ * The launch flags only (no binary). Chrome, Arc and Vivaldi are all Chromium-based and accept
  * Chrome's flags, so they share a shape: --remote-debugging-port plus a DEDICATED
  * --user-data-dir. The dedicated profile is required, not cosmetic — Chrome silently ignores
  * --remote-debugging-port when it hands off to an already-running instance on the default
