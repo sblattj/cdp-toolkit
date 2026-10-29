@@ -1691,6 +1691,56 @@ function noSuchTarget(e: unknown): never {
   if (typeof (e as { code?: unknown } | null | undefined)?.code === "string") throw e;
   throw driverError("no-such-target", e instanceof CdpError ? e.message : String(e));
 }
+/** Upper bound on waiting for a new tab to settle; see createSettledTarget. */
+export const NEW_TARGET_SETTLE_MS = 2000;
+
+/**
+ * Create a tab and return only once the browser has finished adopting it.
+ *
+ * Vivaldi wedges a tab that anything attaches to in the first few milliseconds
+ * after Target.createTarget: the tab keeps an empty URL, its renderer never
+ * answers again (Page.enable, Runtime.evaluate and runIfWaitingForDebugger all
+ * time out), and only a manual reload recovers it. new_page{claim:true} hit this
+ * every time, because the activity beacon attaches straight after creation.
+ * Measured on Vivaldi 8.2 (Chromium 152): an attach at ~0ms wedged 5/5 tabs
+ * (https and about:blank alike, page socket or flattened session alike); an
+ * attach after the tab's first Target.targetInfoChanged loaded 5/5.
+ *
+ * So: discover targets, create, and wait for that first targetInfoChanged for
+ * this id, capped at NEW_TARGET_SETTLE_MS. The listener is registered BEFORE
+ * createTarget because the event can beat the command's response. A browser
+ * that never sends the event costs at most the cap, never a failure.
+ */
+export async function createSettledTarget(
+  conn: Pick<CdpConnection, "send" | "on">,
+  url: string,
+  settleMs = NEW_TARGET_SETTLE_MS,
+): Promise<string> {
+  const changed = new Set<string>();
+  let id = "";
+  let wake: (() => void) | undefined;
+  const off = conn.on("Target.targetInfoChanged", (params) => {
+    const t = (params as { targetInfo?: { targetId?: string } }).targetInfo?.targetId;
+    if (!t) return;
+    changed.add(t);
+    if (t === id) wake?.();
+  });
+  try {
+    await conn.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
+    const { targetId } = await conn.send<{ targetId: string }>("Target.createTarget", { url });
+    if (!targetId) throw driverError("page-error", "Target.createTarget returned no targetId");
+    id = targetId;
+    if (!changed.has(targetId)) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, settleMs);
+        wake = () => { clearTimeout(timer); resolve(); };
+      });
+    }
+    return targetId;
+  } finally {
+    off();
+  }
+}
 class CdpBrowserDriver implements BrowserDriver {
   readonly scheme = "cdp";
   readonly lifetime: LifetimeModel = "per-call";
@@ -1706,8 +1756,7 @@ class CdpBrowserDriver implements BrowserDriver {
   }
   async newPage(url?: string): Promise<PageInfo> {
     return withBrowserConn(async (conn) => {
-      const { targetId } = await conn.send<{ targetId: string }>("Target.createTarget", { url: url ?? "about:blank" });
-      if (!targetId) throw driverError("page-error", "Target.createTarget returned no targetId");
+      const targetId = await createSettledTarget(conn, url ?? "about:blank");
       return { id: targetId, url: url ?? "about:blank", title: "" };
     });
   }
