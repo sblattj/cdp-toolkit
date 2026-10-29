@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-10-29
+
+### Fixed
+
+- `new_page` (and `claim_page` opening a fresh tab) wedged the tab in Vivaldi: blank content, an empty URL, a renderer that never answered again, and a 15 s `new_page` timeout under `claim:true`, until a person reloaded it. Vivaldi breaks any tab that something attaches to in its first few milliseconds, and the activity beacon attached straight after `Target.createTarget`. `newPage` now waits for the tab's first `Target.targetInfoChanged` (capped at 2 s) before returning. Verified live on Vivaldi 8.2 (Chromium 152) through `new_page {claim:true}`: on 3.0.2 two of two Fidelity tabs hung; with the fix three of three loaded in 230 to 390 ms with the beacon installed. (`src/cdp/driver.ts` `createSettledTarget`, `test/new-page-settle.test.ts`)
+
 ### Added
 
 - `vivaldi` is now a supported `cdp install --browser` choice, wired like `arc`: binary detection (`VIVALDI_BIN`, `/Applications/Vivaldi.app/Contents/MacOS/Vivaldi`, `vivaldi` on PATH, `/usr/bin/vivaldi`), the `cdp-vivaldi` alias, the CLI choice list and help text, and the README. Vivaldi is Chromium, so it takes the same launch flags and the server env is the same as chrome and arc. (`src/install/browser.ts`, `src/install/wizard.ts`, `test/install-browser.test.ts`, `test/install-wizard.test.ts`)
