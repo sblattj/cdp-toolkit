@@ -46,6 +46,7 @@ import {
   frameDurationsMs,
   imageSize,
   selectEncoder,
+  supportsFpsMode,
   startScreenRecording,
   stopScreenRecording,
   type FrameLedgerEntry,
@@ -263,6 +264,23 @@ describe("ffmpeg argv", () => {
 
   test("passes the per-frame timestamps through instead of resampling to a fixed rate", () => {
     expect(args.join(" ")).toContain("-vsync vfr");
+    expect(args).not.toContain("-fps_mode");
+  });
+
+  test("uses -fps_mode vfr when the probe says ffmpeg supports it (newer ffmpeg rejects -vsync)", () => {
+    const modern = buildFfmpegArgs("m", "o", { ...ENCODER_LADDER[0]!, fpsMode: true });
+    expect(modern.join(" ")).toContain("-fps_mode vfr");
+    expect(modern).not.toContain("-vsync");
+  });
+
+  test("supportsFpsMode reads the ffmpeg -version banner", () => {
+    expect(supportsFpsMode("ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright")).toBe(false);
+    expect(supportsFpsMode("ffmpeg version 5.0.3 Copyright")).toBe(false);
+    expect(supportsFpsMode("ffmpeg version 5.1 Copyright")).toBe(true);
+    expect(supportsFpsMode("ffmpeg version n6.1.1 Copyright")).toBe(true);
+    expect(supportsFpsMode("ffmpeg version 9.0.1 Copyright (c) 2000-2026")).toBe(true);
+    expect(supportsFpsMode("ffmpeg version N-118000-gabc123 Copyright")).toBe(true);
+    expect(supportsFpsMode("garbage")).toBe(false);
   });
 
   test("does NOT pin the duration with -t", () => {

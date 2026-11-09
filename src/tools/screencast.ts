@@ -235,6 +235,8 @@ export interface EncoderChoice {
   codec: "hevc" | "h264";
   /** -tag:v value, set on HEVC so QuickTime will play the result. */
   tag?: "hvc1";
+  /** Use `-fps_mode vfr` (ffmpeg >=5.1) instead of `-vsync vfr`; set by the probe. */
+  fpsMode?: boolean;
 }
 
 /** Preference order: hardware HEVC, hardware H.264, software HEVC, software H.264. */
@@ -278,8 +280,22 @@ export function selectEncoder(encodersOutput: string): EncoderChoice {
 }
 
 /**
- * The exact ffmpeg argv. `-vsync vfr` (not `-fps_mode`, which needs ffmpeg
- * >=5.1 and would break Ubuntu 22.04's 4.4) passes the concat demuxer's
+ * Whether this ffmpeg takes `-fps_mode` (added in 5.1). `-vsync` was deprecated
+ * then and later removed, so a new ffmpeg fails with "Unrecognized option 'vsync'",
+ * while 4.4 (Ubuntu 22.04) only knows `-vsync`. Parses `ffmpeg -version`;
+ * a git snapshot ("ffmpeg version N-1234-g...") is treated as new.
+ */
+export function supportsFpsMode(versionOutput: string): boolean {
+  const m = /ffmpeg version n?(\d+)\.(\d+)/.exec(versionOutput);
+  if (!m) return /ffmpeg version N-/.test(versionOutput);
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 5 || (major === 5 && minor >= 1);
+}
+
+/**
+ * The exact ffmpeg argv. `-fps_mode vfr` (or `-vsync vfr` on ffmpeg <5.1, see
+ * supportsFpsMode) passes the concat demuxer's
  * per-frame timestamps through instead of resampling them to a constant rate.
  * `-t` is deliberately NOT used to pin the duration: it trims at the LAST
  * frame's PTS, which throws away exactly the long final hold the ledger exists
@@ -293,7 +309,7 @@ export function buildFfmpegArgs(manifestPath: string, outPath: string, choice: E
     "-f", "concat",
     "-safe", "0",
     "-i", manifestPath,
-    "-vsync", "vfr",
+    ...(choice.fpsMode ? ["-fps_mode", "vfr"] : ["-vsync", "vfr"]),
     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
     "-c:v", choice.encoder,
     ...(choice.tag ? ["-tag:v", choice.tag] : []),
@@ -352,7 +368,9 @@ async function probeEncoder(): Promise<EncoderChoice> {
         throw new CdpError(`${FFMPEG_MISSING} (${(err as Error).message})`);
       }
       if (res.code !== 0) throw new CdpError(`${FFMPEG_MISSING} ('-encoders' exited ${res.code}: ${res.stderr.trim().slice(0, 300)})`);
-      return selectEncoder(`${res.stdout}\n${res.stderr}`);
+      const choice = selectEncoder(`${res.stdout}\n${res.stderr}`);
+      const ver = await run(FFMPEG_BIN, ["-version"]).catch(() => undefined);
+      return { ...choice, fpsMode: ver ? supportsFpsMode(`${ver.stdout}\n${ver.stderr}`) : false };
     })();
     // A failed probe must not poison every later call: forget it so a caller who
     // installs ffmpeg and retries is not told it is still missing.

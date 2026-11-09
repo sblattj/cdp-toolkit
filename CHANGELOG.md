@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `stop_screen_recording` failed on new ffmpeg (9.0.1 on Homebrew) with `Unrecognized option 'vsync'`, because `-vsync` is gone there. The encoder probe now also reads `ffmpeg -version` and uses `-fps_mode vfr` on ffmpeg 5.1 and later (and git snapshots), keeping `-vsync vfr` for 4.4 and 5.0. Verified on ffmpeg 9.0.1: a 4 s two-frame ledger encoded to 4.04 s with `-fps_mode`; the old argv exited 8. (`src/tools/screencast.ts` `supportsFpsMode`, `test/screencast.test.ts`)
+
 ## [3.1.0] - 2026-11-10
 
 ### Added
