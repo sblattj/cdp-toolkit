@@ -233,6 +233,15 @@ describe("one server, a writable default and a read-only teams endpoint (CDP_END
     expect(methodsOf(fakeB, "CHAT1").some((m) => m === "Runtime.evaluate" || m === "Runtime.callFunctionOn")).toBe(true);
   });
 
+  test("evaluate_script whose value is undefined (void 0) answers null, not an empty reply the SDK rejects", async () => {
+    // the fake's default Runtime.evaluate reply is { type: "undefined" }, what Chrome sends for `void 0`
+    delete fakeB.handlers["Runtime.evaluate"];
+    delete fakeB.handlers["Runtime.callFunctionOn"];
+    const r = await mcp.call("evaluate_script", { target: "endpoint:teams/title:Chat", expression: "void 0" });
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("null");
+  });
+
   test("take_screenshot on read-only: plain capture is allowed; renderWidth (an emulation override) is refused with no traffic", async () => {
     const shot = join(scratch, "teams-shot.png");
     const ok = await mcp.call("take_screenshot", { target: "endpoint:teams/title:Chat", savePath: shot });

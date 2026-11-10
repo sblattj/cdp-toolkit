@@ -456,7 +456,7 @@ async function runTool(name: string, args: unknown) {
         // A call_tool reaches here with the INNER name, so it cannot launder a mutating tool.
         assertAllowed(name, endpoint, toolArgs);
         const result = await withEndpointScope(endpoint, () => fn(toolArgs));
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify(result ?? null, null, 2) }] };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
@@ -476,7 +476,7 @@ async function runTool(name: string, args: unknown) {
     try {
       const session = await getOrCreateFirefoxSession({ endpoint: FIREFOX_ENDPOINT });
       const result = await neutralFn(session.driver, args);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result ?? null, null, 2) }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };

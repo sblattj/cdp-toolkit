@@ -19,7 +19,7 @@
  *     wins; --json is applied first, then the individual flags).
  *
  * Output:
- *   - success -> JSON.stringify(result, null, 2) to stdout, exit 0.
+ *   - success -> JSON.stringify(result ?? null, null, 2) to stdout, exit 0.
  *   - throw   -> JSON.stringify({ error: message }) to stderr, exit 1.
  *   - no tool -> usage message to stderr, exit 1.
  *   - --list  -> all tool names (one per line) to stdout, exit 0.
@@ -356,7 +356,7 @@ async function main(): Promise<number> {
       // The registry's value type is the union of all tool signatures; each tool
       // validates its own args at runtime, so we hand the parsed object through.
       const result = await withEndpointScope(endpoint, () => (fn as (args: unknown) => Promise<unknown>)(toolArgs));
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify(result ?? null, null, 2)}\n`);
       return 0;
     }
 
@@ -375,7 +375,7 @@ async function main(): Promise<number> {
     const session = await startFirefoxSession({ endpoint });
     try {
       const result = await neutralFn(session.driver, parsed.args as never);
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify(result ?? null, null, 2)}\n`);
       return 0;
     } finally {
       await session.dispose();
