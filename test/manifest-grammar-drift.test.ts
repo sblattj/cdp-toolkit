@@ -40,26 +40,31 @@ describe("manifest grammar drift", () => {
    * caller reading that one tool.
    */
   test("every selector description naming 'title:' also names the 'endpoint:<name>/' prefix", () => {
+    // MANIFEST states the grammar compactly ("index:/url:/title:/label:/targetId"),
+    // TOOL_DOCS longhand ("title:<substring>"); either form counts as teaching 'title:'.
+    const TEACHES_TITLE = /title:<substr|url:\/title:/;
     const offenders: string[] = [];
-    let checked = 0;
+    let manifestChecked = 0;
+    let docsChecked = 0;
     for (const tool of MANIFEST) {
       const props = (tool.inputSchema as { properties?: Record<string, { description?: string }> }).properties ?? {};
       for (const [key, schema] of Object.entries(props)) {
         const desc = schema?.description ?? "";
-        if (!/title:<substr/.test(desc)) continue;
-        checked++;
+        if (!TEACHES_TITLE.test(desc)) continue;
+        manifestChecked++;
         if (!desc.includes("endpoint:<name>/")) offenders.push(`MANIFEST ${tool.name}.${key}`);
       }
     }
     for (const [name, docs] of Object.entries(TOOL_DOCS)) {
       for (const [key, desc] of Object.entries(docs.params ?? {})) {
-        if (!/title:<substr/.test(desc ?? "")) continue;
-        checked++;
+        if (!TEACHES_TITLE.test(desc ?? "")) continue;
+        docsChecked++;
         if (!(desc ?? "").includes("endpoint:<name>/")) offenders.push(`TOOL_DOCS ${name}.${key}`);
       }
     }
-    // A guard that matched nothing would pass vacuously.
-    expect(checked).toBeGreaterThan(30);
+    // Each half must match something, or it passes vacuously.
+    expect(manifestChecked).toBeGreaterThan(30);
+    expect(docsChecked).toBeGreaterThan(30);
     expect(offenders).toEqual([]);
   });
 

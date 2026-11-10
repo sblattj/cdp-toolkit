@@ -583,6 +583,37 @@ describe("MCP dispatch (real src/mcp.ts child)", () => {
   });
 });
 
+describe("a down endpoint never reaps its own leases (strict-lease server)", () => {
+  test("list_pages{allEndpoints} and list_leases leave the dead endpoint's files; a live endpoint's stale origin IS reaped", async () => {
+    const dir = mkdtempSync(join(scratch, "reap-"));
+    process.env.CDP_ARTIFACT_DIR = dir;
+    setEnv({ CDP_BASE: browserFake.base, CDP_ENDPOINTS: `teams=${teamsFake.base},dead=${DEAD}` });
+    const DEAD_ID = "D0000000000000000000000000000001";
+    const GONE_ID = "G0000000000000000000000000000001";
+    await withEndpointScope(getEndpoint("dead"), async () => {
+      await claimLease(chromeLeaseBackend(), DEAD_ID, { label: "d", ttlMs: 1 });
+      await recordOrigin(chromeLeaseBackend(), DEAD_ID, { label: "d" });
+    });
+    // Control: an origin on the LIVE teams endpoint for an id teams does not list.
+    await withEndpointScope(getEndpoint("teams"), () => recordOrigin(chromeLeaseBackend(), GONE_ID, { label: "g" }));
+    await new Promise((r) => setTimeout(r, 10)); // the dead lease is now past its 1ms TTL
+    const before = readdirSync(dir).sort();
+    expect(before).toEqual([`lease-chrome@dead-${DEAD_ID}.json`, `origin-chrome@dead-${DEAD_ID}.json`, `origin-chrome@teams-${GONE_ID}.json`].sort());
+
+    const o = await runServer(
+      [init(), call("list_pages", { allEndpoints: true }), call("list_leases", { endpoint: "dead" })],
+      { CDP_BASE: browserFake.base, CDP_ENDPOINTS: `teams=${teamsFake.base},dead=${DEAD}`, CDP_ARTIFACT_DIR: dir, CDP_REQUIRE_LEASE: "1" },
+    );
+    const all = JSON.parse(textOf(o.res[1]!));
+    expect(all.endpoints.find((e: Json) => e.endpoint === "dead").down).toBe(true);
+    expect(o.res[2]!.result.isError).toBe(true); // unreachable endpoint: the tool fails, it does not guess
+    const after = readdirSync(dir);
+    expect(after).toContain(`lease-chrome@dead-${DEAD_ID}.json`);
+    expect(after).toContain(`origin-chrome@dead-${DEAD_ID}.json`);
+    expect(after).not.toContain(`origin-chrome@teams-${GONE_ID}.json`);
+  }, 30_000);
+});
+
 describe("MCP startup and Firefox refusal", () => {
   test("malformed CDP_ENDPOINTS is a named startup error, exit 1", async () => {
     const o = await runServer([], { CDP_ENDPOINTS: "teams=http://127.0.0.1:9333?mode=nope" });
