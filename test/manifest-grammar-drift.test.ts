@@ -33,6 +33,47 @@ describe("manifest grammar drift", () => {
   });
 
   /**
+   * The named-endpoint prefix (issue #15) is universal: it is stripped once at
+   * dispatch, before any picker, so every selector-taking tool honors it. Any
+   * description, in MANIFEST or TOOL_DOCS, that teaches the 'title:' arm must
+   * also teach 'endpoint:<name>/', or a sweep straggler hides the prefix from a
+   * caller reading that one tool.
+   */
+  test("every selector description naming 'title:' also names the 'endpoint:<name>/' prefix", () => {
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const tool of MANIFEST) {
+      const props = (tool.inputSchema as { properties?: Record<string, { description?: string }> }).properties ?? {};
+      for (const [key, schema] of Object.entries(props)) {
+        const desc = schema?.description ?? "";
+        if (!/title:<substr/.test(desc)) continue;
+        checked++;
+        if (!desc.includes("endpoint:<name>/")) offenders.push(`MANIFEST ${tool.name}.${key}`);
+      }
+    }
+    for (const [name, docs] of Object.entries(TOOL_DOCS)) {
+      for (const [key, desc] of Object.entries(docs.params ?? {})) {
+        if (!/title:<substr/.test(desc ?? "")) continue;
+        checked++;
+        if (!(desc ?? "").includes("endpoint:<name>/")) offenders.push(`TOOL_DOCS ${name}.${key}`);
+      }
+    }
+    // A guard that matched nothing would pass vacuously.
+    expect(checked).toBeGreaterThan(30);
+    expect(offenders).toEqual([]);
+  });
+
+  test("list_pages and new_page document the endpoint argument; list_pages documents allEndpoints", () => {
+    const props = (n: string) =>
+      (MANIFEST.find((t) => t.name === n)!.inputSchema as { properties: Record<string, { type?: string }> }).properties;
+    expect(props("list_pages").endpoint?.type).toBe("string");
+    expect(props("list_pages").allEndpoints?.type).toBe("boolean");
+    expect(props("new_page").endpoint?.type).toBe("string");
+    expect(TOOL_DOCS["list_pages"].params.endpoint ?? "").toContain("title:");
+    expect(TOOL_DOCS["list_pages"].params.allEndpoints ?? "").toContain("down");
+  });
+
+  /**
    * The "worker:<substring>" arm is NOT part of the universal grammar and must
    * never be swept into it the way "label:" deliberately was. It is resolved
    * only by Chrome's pickTarget, accepted by exactly the tools in
