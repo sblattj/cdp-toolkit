@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-10
+
+### Added
+
+- Named endpoints (#15): one server drives several DevTools ports, e.g. a browser and an Electron or WebView2 app such as the Microsoft Teams desktop app. Configure them with `CDP_ENDPOINTS="browser=http://127.0.0.1:9222,teams=http://127.0.0.1:9333?mode=read"` or a JSON file named by `CDP_ENDPOINTS_FILE`. Pick one per call with a `endpoint:<name>/<selector>` target prefix or an `endpoint` argument. A `chrome@<name>:` lease token also selects its own endpoint, and if the token and a prefix disagree the call is an error. Leases and origins are namespaced per endpoint. `list_pages {allEndpoints:true}` lists every endpoint, and a down one shows as `down:true`. An endpoint that is down at startup works once it comes up, with no restart. This supersedes item 5 of #12. (`src/endpoints.ts`, `src/mcp.ts`, `src/cli.ts`, `src/leases.ts`)
+- Read-only endpoints (`?mode=read`, or `"readOnly": true` in the file): only read tools run there (snapshot, screenshot, lists, `evaluate_script`, waits). A mutating tool, or a read tool with an argument that changes the page (`reload`, `renderWidth`/`renderHeight`, a body fetch that re-requests), is refused before any CDP message goes out, with error code `read_only_endpoint`. `call_tool` can't get around this, because the inner tool is checked again. Strict-lease reaping never closes tabs on a read-only endpoint. (`src/policy.ts`, `src/reap.ts`)
+- `tools/list` now carries `annotations.readOnlyHint` on every tool.
+- Existing single-`CDP_BASE` setups behave as before: same lease and origin filenames, same `chrome:` tokens, and no endpoint fields in output.
+
+### Fixed
+
+- A tool whose result was `undefined` (e.g. `evaluate_script` on `void 0`) sent a reply with no text, and the MCP SDK rejected it with JSON-RPC -32602. It now answers `null`. The CLI prints `null` too.
+
 ## [3.0.3] - 2026-10-29
 
 ### Fixed
