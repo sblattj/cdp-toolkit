@@ -6,7 +6,7 @@
 import { beaconSupported, contentionWarning, installBeacon, readHumanActiveMs } from "./activity.ts";
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage, readOrigin } from "./origins.ts";
-import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
+import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 import { pickPage, resolvePage } from "./shared-tools.ts";
 import type { TargetSelector } from "./types.ts";
 import {
@@ -312,7 +312,8 @@ export async function listLeasesTool(
   // Same reap as list_pages, and for the same reason: this is the other tool an
   // operator runs when tabs look wrong, so it must not report a lease it is
   // about to delete. Strict mode only.
-  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backend) : [];
+  // Never on a read-only endpoint (#15): reapAllowed.
+  const reaped = requireLease() && reapAllowed(driver) ? await reapStaleAgentTabs(driver, backend) : [];
   const reapedIds = new Set(reaped.map((r) => r.targetId));
   const livePages = await driver.listPages();
   const liveIds = livePages.map((p) => p.id);

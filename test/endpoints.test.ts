@@ -258,6 +258,29 @@ describe("splitEndpointSelector / stripEndpointArgs / endpointForArgs", () => {
     expect(() => stripEndpointArgs({ endpoint: 3 })).toThrow(/non-empty endpoint name/);
   });
 
+  test("a chrome@<ns> lease token selects its endpoint; a disagreeing prefix is an error", () => {
+    setEnv({ CDP_ENDPOINTS: "teams=http://127.0.0.1:9333?mode=read,ide=http://127.0.0.1:9444,ide2=http://127.0.0.1:9444" });
+    const nonce = "0123456789abcdef01234567";
+    const ideTok = mintToken("chrome@ide", "T1", nonce);
+    // No prefix: the token's namespace picks the endpoint, and args come back untouched (lease kept).
+    const args = { lease: ideTok };
+    const r = stripEndpointArgs(args);
+    expect(r.endpoint.name).toBe("ide");
+    expect(r.args).toBe(args);
+    // Plain `chrome:` is the default namespace; firefox and malformed tokens are left to the lease layer.
+    expect(endpointForArgs({ lease: mintToken("chrome", "T1", nonce) }).name).toBe("default");
+    expect(endpointForArgs({ lease: mintToken("firefox", "T1", nonce) }).name).toBe("default");
+    expect(endpointForArgs({ lease: "garbage" }).name).toBe("default");
+    // Agreeing prefix (by namespace: ide2 is an alias of ide's base, so it shares ide's lease space).
+    expect(endpointForArgs({ target: "endpoint:ide/T1", lease: ideTok }).name).toBe("ide");
+    expect(endpointForArgs({ endpoint: "ide2", lease: ideTok }).name).toBe("ide2");
+    // Disagreeing: prefix names teams, token belongs to ide; and a default token under a named prefix.
+    expect(() => stripEndpointArgs({ target: "endpoint:teams/T1", lease: ideTok })).toThrow(/conflicting endpoints.*lease token.*endpoint 'ide'/);
+    expect(() => stripEndpointArgs({ endpoint: "ide", lease: mintToken("chrome", "T1", nonce) })).toThrow(/lease token.*default endpoint/);
+    // A namespace nobody configures.
+    expect(() => stripEndpointArgs({ lease: mintToken("chrome@gone", "T1", nonce) })).toThrow(/lease token belongs to endpoint 'gone', which is not configured/);
+  });
+
   test("endpointForArgs", () => {
     setEnv(env);
     expect(endpointForArgs(undefined).name).toBe("default");
@@ -538,14 +561,17 @@ describe("MCP dispatch (real src/mcp.ts child)", () => {
       ],
       {
         CDP_BASE: browserFake.base,
-        CDP_ENDPOINTS: `teams=${teamsFake.base}?mode=read,dead=${DEAD}`,
+        // teams is WRITABLE here: release_page (MUTATING) is the prefix probe, and a read-only
+        // endpoint would refuse it before the picker ran. The read-only policy itself is
+        // covered against recording fakes in test/endpoints-acceptance.test.ts.
+        CDP_ENDPOINTS: `teams=${teamsFake.base},dead=${DEAD}`,
         CDP_ARTIFACT_DIR: mkdtempSync(join(scratch, "mcp-")),
       },
     );
   }, 30_000);
 
   test("startup log names the endpoints", () => {
-    expect(out.stderr).toContain(`CDP_BASE=${browserFake.base}, endpoints=default=${browserFake.base},teams=${teamsFake.base}(read),dead=${DEAD}`);
+    expect(out.stderr).toContain(`CDP_BASE=${browserFake.base}, endpoints=default=${browserFake.base},teams=${teamsFake.base},dead=${DEAD}`);
   });
 
   test("consecutive calls reach two endpoints with no restart", () => {

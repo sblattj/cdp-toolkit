@@ -355,17 +355,56 @@ export function stripEndpointArgs(args: unknown): { endpoint: Endpoint; args: un
     out ??= { ...a };
     delete out.endpoint;
   }
-  if (!picks.length) return { endpoint: defaultEndpoint(), args };
+  // A Chrome lease token names its endpoint too (`chrome@<ns>:<targetId>:<nonce>`), so
+  // `release_page {lease}` with no prefix acts on the endpoint the lease was taken on,
+  // not the default. The token stays in args: the lease scope still reads it.
+  const token = leaseTokenNamespace(a.lease);
+  if (!picks.length) {
+    if (token?.ns === undefined) return { endpoint: defaultEndpoint(), args };
+    return { endpoint: endpointForNamespace(token.ns), args };
+  }
   const first = picks[0]!;
   for (const p of picks.slice(1)) {
     if (p.endpoint.name !== first.endpoint.name) {
       throw new EndpointConfigError(`conflicting endpoints: ${first.from} vs ${p.from}; name one endpoint per call`);
     }
   }
+  // Compared by lease namespace, not name: two names for one base share one lease space.
+  if (token && leaseNamespace(first.endpoint) !== token.ns) {
+    throw new EndpointConfigError(
+      `conflicting endpoints: ${first.from} vs the lease token, which belongs to ${token.ns === undefined ? "the default endpoint" : `endpoint '${token.ns}'`}; name one endpoint per call`,
+    );
+  }
   return { endpoint: first.endpoint, args: out ?? a };
 }
 
-/** The endpoint a call's args select (selector prefix or `endpoint` key), else the default. */
+/**
+ * The lease namespace a Chrome lease token was minted under (leases.ts mintToken:
+ * `<backend>:<targetId>:<nonce>`, backend `chrome` or `chrome@<ns>`). `{ns: undefined}`
+ * is the default namespace (plain `chrome`). null for anything else: no token, a
+ * Firefox token, or a malformed one, which the lease layer rejects on its own terms.
+ * Parsed here rather than via leases.ts's tokenParts because this module is a leaf.
+ */
+function leaseTokenNamespace(lease: unknown): { ns: string | undefined } | null {
+  if (typeof lease !== "string") return null;
+  const colon = lease.indexOf(":");
+  if (colon <= 0) return null;
+  const head = lease.slice(0, colon);
+  if (head === "chrome") return { ns: undefined };
+  if (!head.startsWith("chrome@")) return null;
+  const ns = head.slice("chrome@".length);
+  return NAME_RE.test(ns) ? { ns } : null;
+}
+
+/** The first configured endpoint whose lease namespace is `ns` (see leaseNamespace). */
+function endpointForNamespace(ns: string): Endpoint {
+  for (const ep of endpointConfig().byName.values()) if (leaseNamespace(ep) === ns) return ep;
+  throw new EndpointConfigError(
+    `the lease token belongs to endpoint '${ns}', which is not configured (known: ${[...endpointConfig().byName.keys()].join(", ")})`,
+  );
+}
+
+/** The endpoint a call's args select (selector prefix, `endpoint` key, or a `chrome@<ns>` lease token), else the default. */
 export function endpointForArgs(args: unknown): Endpoint {
   return stripEndpointArgs(args).endpoint;
 }

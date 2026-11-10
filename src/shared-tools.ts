@@ -49,7 +49,7 @@ import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./
 import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "./origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
-import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
+import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 import { allEndpoints, currentEndpoint, isDefaultEndpoint, withEndpointScope } from "./endpoints.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -353,7 +353,8 @@ async function listPagesOne(
   // this same call is in the middle of deleting. Under strict mode only: see
   // requireLease.
   const backend = backendOf(driver);
-  const reaped = requireLease() ? await reapStaleAgentTabs(driver, backend) : [];
+  // Never on a read-only endpoint (#15): reapAllowed.
+  const reaped = requireLease() && reapAllowed(driver) ? await reapStaleAgentTabs(driver, backend) : [];
   const reapedIds = new Set(reaped.map((r) => r.targetId));
   const pages = (await driver.listPages({ all: args.all })).filter((p) => !reapedIds.has(p.id));
   // Never let provenance break the listing: originIndex does not throw, and a

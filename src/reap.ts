@@ -30,6 +30,7 @@
  * `expired` as grounds to close anything. See staleAgentTabs' condition 4.
  */
 import type { BrowserDriver } from "./driver.ts";
+import { currentEndpoint } from "./endpoints.ts";
 import { listLeases, releaseLeaseFor, type LeaseBackend, type LeaseSummary } from "./leases.ts";
 import { originIndex, type OriginSummary } from "./origins.ts";
 
@@ -123,6 +124,19 @@ export const DEFAULT_REAP_GRACE_MS = 2_700_000;
 export function reapGraceMs(): number {
   const raw = Number(process.env.CDP_REAP_GRACE_MS);
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_REAP_GRACE_MS;
+}
+
+/**
+ * Whether the strict-mode reap may run in the current dispatch scope (#15).
+ * NEVER on a read-only endpoint: the reap closes tabs (Target.closeTarget), and
+ * a read-only endpoint promises that list_pages / list_leases change nothing
+ * there. Read off currentEndpoint(), not the dispatch endpoint, because
+ * list_pages{allEndpoints} re-scopes per endpoint. The bidi (Firefox) driver
+ * has no named endpoints and never loads their config, so it is always allowed.
+ */
+export function reapAllowed(driver: BrowserDriver): boolean {
+  if (driver.scheme === "bidi") return true;
+  return !currentEndpoint().readOnly;
 }
 
 /**

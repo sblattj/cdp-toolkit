@@ -47,6 +47,7 @@ import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts
 import { allEndpoints, endpointConfig, ENDPOINTS_FIREFOX_MESSAGE, stripEndpointArgs, usesEndpointArgs, withEndpointScope } from "./endpoints.ts";
 import { isListed, resolveProfile, TOOL_GROUP, TOOL_GROUPS, GROUP_TOOLS } from "./toolGroups.ts";
 import { TOOL_DOCS } from "./toolDocs.ts";
+import { assertAllowed, toolAnnotations } from "./policy.ts";
 import { VERSION } from "./version.ts";
 
 // Bun.serve is the HTTP transport's listener: a Bun-only global, typed here (not via bun-types,
@@ -220,6 +221,8 @@ const LISTING: Tool[] = Object.freeze([
       },
       additionalProperties: false,
     } as Tool["inputSchema"],
+    // Reads static docs only.
+    annotations: { readOnlyHint: true },
   },
   {
     name: "call_tool",
@@ -234,10 +237,13 @@ const LISTING: Tool[] = Object.freeze([
       required: ["name"],
       additionalProperties: false,
     } as Tool["inputSchema"],
+    // Runs any tool, mutating ones included; the inner tool's own policy check still applies.
+    annotations: { readOnlyHint: false },
   },
   ...MANIFEST
     .filter((s) => AVAILABLE_NAMES.has(s.name) && isListed(PROFILE, s.name))
-    .map((s) => ({ name: s.name, description: s.description, inputSchema: s.inputSchema as Tool["inputSchema"] })),
+    // readOnlyHint (src/policy.ts): true for READ tools, the ones a read-only endpoint allows.
+    .map((s) => ({ name: s.name, description: s.description, inputSchema: s.inputSchema as Tool["inputSchema"], annotations: toolAnnotations(s.name) })),
 ] satisfies Tool[]) as Tool[];
 
 /** search_tools with no query: every group the backend supports, and what of it is listed. */
@@ -445,6 +451,10 @@ async function runTool(name: string, args: unknown) {
         // sees it, and every base URL below resolves through currentEndpoint(). Inside
         // the try, so an unknown endpoint name is an isError result, not a throw.
         const { endpoint, args: toolArgs } = stripEndpointArgs(args);
+        // Read-only endpoint policy (src/policy.ts), checked once the endpoint is known and
+        // BEFORE the tool runs, so a refused call sends no HTTP request and no CDP message.
+        // A call_tool reaches here with the INNER name, so it cannot launder a mutating tool.
+        assertAllowed(name, endpoint, toolArgs);
         const result = await withEndpointScope(endpoint, () => fn(toolArgs));
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {

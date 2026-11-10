@@ -63,6 +63,25 @@ a second attach against the same Firefox while a session is still open now fails
 clear error (it used to hang) rather than colliding silently; if a prior client died without
 disposing cleanly (e.g. was killed), close it or restart Firefox to free the slot.
 
+### Named endpoints (several ports, one server; Chrome only)
+
+`CDP_ENDPOINTS="teams=http://127.0.0.1:9333?mode=read"` (or `CDP_ENDPOINTS_FILE`, JSON) adds
+endpoints beside the default (`CDP_BASE`). Select one by prefixing any selector:
+`endpoint:teams/title:Chat`; tools without a `target` take `endpoint: "teams"`.
+`list_pages { allEndpoints: true }` lists every endpoint and shows a down one as `down: true`.
+
+**Read-only (`?mode=read`)**: tools that change state (click, fill, type, navigate, new/close
+page, emulate, cookie writes, ...) are refused with `'<tool>' is not allowed on endpoint
+'<name>'` before any CDP message is sent. Snapshots, screenshots, list, console and network
+reads work, and so does `evaluate_script` (by design: keep it to reads). `take_screenshot`
+with `renderWidth`/`renderHeight` and `reload: true` reads are refused. `tools/list` marks the
+allowed tools with `annotations.readOnlyHint: true`.
+
+**Teams desktop app (macOS, WebView2)**: quit Teams, then
+`open -a "Microsoft Teams" --env WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`
+and configure `teams=http://127.0.0.1:9333?mode=read`. Its first page is an empty host page:
+target the chat with `endpoint:teams/title:Chat`.
+
 ## Target selectors
 
 Every page-scoped tool takes `target`:

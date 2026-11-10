@@ -688,6 +688,61 @@ CDP_ENDPOINTS_FILE=~/.config/cdp-endpoints.json
 - **Errors:** a bad URL, duplicate name, unknown `mode` (only `read` / `write`), unknown key, or an unreadable or invalid file is a startup error for the MCP server (it prints the problem and exits 1) and a first-use error for the CLI. Names are letters, digits and `_`.
 - **Late starters:** endpoints are tried on every call, never at startup, so an app launched after the server is reachable as soon as it is up.
 - **Leases and origins** are kept per endpoint: the default endpoint's files keep their names (`lease-chrome-<id>.json`), a named one gets `lease-chrome@<name>-<id>.json`, and reap only ever compares an endpoint's leases against that endpoint's own live targets. An endpoint whose base equals the default's shares the default's lease space (two names, one browser).
+- **Lease tokens carry their endpoint.** A token minted on a named endpoint starts `chrome@<name>:`, so `release_page { lease }` (or any call that passes only a `lease`) acts on that endpoint with no prefix needed. A prefix or `endpoint` argument that names a different endpoint than the token is an error.
+
+### Read-only endpoints
+
+Mark an endpoint read-only with `?mode=read` in `CDP_ENDPOINTS`, or `"readOnly": true` (or `"mode": "read"`) in the file. On a read-only endpoint, every tool that can change page or browser state is refused **before any HTTP request or CDP message is sent**, with an error naming the tool and the endpoint:
+
+```
+Error: 'click' is not allowed on endpoint 'teams': the endpoint is read-only (tools that change state are refused before any CDP message is sent)
+```
+
+The classes live in `src/policy.ts`, and a test fails if a new tool is added without being classified. A tool that is in neither class is refused (default-deny).
+
+| Class | Tools |
+|---|---|
+| **Read** (allowed) | `list_pages`, `list_leases`, `take_snapshot`, `take_screenshot`, `wait_for`, `evaluate_script`, `extract_page`, `list_cookies`, `list_console_messages`, `get_console_message`, `list_network_requests`, `get_network_request`, `performance_analyze_insight`, `take_heapsnapshot`, `list_mocks` |
+| **Mutating** (refused) | everything else: clicks, typing, fill, drag, scroll, hover, navigation, new/close/select page, emulation and resize, dialogs, cookie writes, uploads, downloads, permissions, mocks, traces, recording, Lighthouse, `claim_page` / `release_page` |
+
+- **Argument escalation.** Some read tools change state with certain arguments, and those calls are refused too: `take_screenshot` with `renderWidth`/`renderHeight` (applies a device-metrics override), `list_console_messages` / `list_network_requests` with `reload: true`, and `get_network_request` with `includeBody` plus `url` (drives a reload capture).
+- **`evaluate_script` is allowed.** This is a deliberate choice: the script can do anything, and the agent is responsible for running only reads on a read-only endpoint. Use it to read app state that the accessibility tree misses.
+- **No reap.** Under `CDP_REQUIRE_LEASE`, `list_pages` and `list_leases` normally close abandoned agent tabs. On a read-only endpoint that reap is skipped entirely, so those reads never close a tab there.
+- **`call_tool` is checked too.** `call_tool { name: "click", arguments: { target: "endpoint:teams/..." } }` is refused exactly like a direct `click`.
+- **`tools/list` hints.** Every listed tool carries `annotations.readOnlyHint`, `true` exactly for the read class, so a client can tell which tools a read-only endpoint will accept.
+- The CLI enforces the same policy: a refused call prints `{"error": ...}` and exits 1.
+
+### Example: the Microsoft Teams desktop app, read-only
+
+The macOS Teams app is built on Edge WebView2 and opens a DevTools port when launched with an extra browser argument. Quit Teams fully first, then:
+
+```bash
+open -a "Microsoft Teams" --env WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333
+curl -s http://127.0.0.1:9333/json/version     # reports an Edg/ browser
+```
+
+Configure it next to your browser, read-only:
+
+```bash
+CDP_ENDPOINTS="teams=http://127.0.0.1:9333?mode=read"    # CDP_BASE (or 9222) stays the default
+```
+
+```json
+{ "mcpServers": { "cdp-toolkit": {
+    "command": "npx", "args": ["-y", "cdp-toolkit"],
+    "env": { "CDP_ENDPOINTS": "teams=http://127.0.0.1:9333?mode=read" } } } }
+```
+
+Then read the open chat. The app's first page is an empty host page, so select the chat window by title:
+
+```
+list_pages { endpoint: "teams" }
+take_snapshot { target: "endpoint:teams/title:Chat" }
+take_screenshot { target: "endpoint:teams/title:Chat" }
+click { target: "endpoint:teams/title:Chat", uid: "..." }   # refused: read-only
+```
+
+If Teams is not running when the server starts, `teams` just shows as down in `list_pages { allEndpoints: true }` until you launch it; no restart needed.
 
 ## How it's built
 

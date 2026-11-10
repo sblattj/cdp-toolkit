@@ -31,6 +31,7 @@ import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
 import { ENDPOINTS_FIREFOX_MESSAGE, stripEndpointArgs, usesEndpointArgs, withEndpointScope } from "./endpoints.ts";
 import { MANIFEST } from "./manifest.ts";
+import { assertAllowed } from "./policy.ts";
 import { runInstaller } from "./install/wizard.ts";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -349,6 +350,9 @@ async function main(): Promise<number> {
       // --endpoint) is resolved and stripped once, here. A bad name or a malformed
       // CDP_ENDPOINTS throws to main's catch, which prints {"error": ...} and exits 1.
       const { endpoint, args: toolArgs } = stripEndpointArgs(parsed.args);
+      // Read-only endpoint policy, before the tool runs (same check as mcp.ts's runTool).
+      // A PolicyError throws to main's catch: {"error": "'click' is not allowed on endpoint ..."}, exit 1.
+      assertAllowed(tool, endpoint, toolArgs);
       // The registry's value type is the union of all tool signatures; each tool
       // validates its own args at runtime, so we hand the parsed object through.
       const result = await withEndpointScope(endpoint, () => (fn as (args: unknown) => Promise<unknown>)(toolArgs));
