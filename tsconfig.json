@@ -15,5 +15,5 @@
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
   "comment": "*.test.ts run via `bun test` (built-in bun:test, no dep); excluded from tsc since bun-types is not an allowed devDep.",
-  "exclude": ["**/*.test.ts"]
+  "exclude": ["**/*.test.ts", "test/helpers/no-live-browser.ts"]
 }
