@@ -42,7 +42,7 @@ import { isTiledCapture } from "./driver.ts";
 import { stitchPngBandsToFile } from "./png.ts";
 import type { TargetSelector } from "./types.ts";
 import {
-  assertLeaseOk, claimLease, defaultLabel, leaseTtlMs, listLeases, releaseLeaseFor, requireLease,
+  assertLeaseOk, chromeLeaseBackend, claimLease, defaultLabel, leaseTtlMs, listLeases, releaseLeaseFor, requireLease,
   type LeaseBackend, type LeaseStaleReason, type LeaseToken,
 } from "./leases.ts";
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
@@ -50,6 +50,7 @@ import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
+import { allEndpoints, currentEndpoint, isDefaultEndpoint, withEndpointScope } from "./endpoints.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
@@ -64,7 +65,8 @@ function target3(p: PageInfo): { id: string; url: string; title: string } {
 /** Same discriminator leases-tools.ts uses: the driver's own uid scheme tag
  *  ("cdp" for Chrome, "bidi" for Firefox). */
 function backendOf(driver: BrowserDriver): LeaseBackend {
-  return driver.scheme === "bidi" ? "firefox" : "chrome";
+  // Chrome's key carries the dispatch scope's named endpoint (chrome@<name>); see LeaseBackend.
+  return driver.scheme === "bidi" ? "firefox" : chromeLeaseBackend();
 }
 
 /* -------------------------------- page acquisition -------------------------------- */
@@ -217,6 +219,12 @@ function locatorOf(args: { uid?: DriverUid; selector?: string }): ElementLocator
  * them today.
  */
 export interface ListedPage extends PageInfo {
+  /** The named CDP endpoint this page lives on (src/endpoints.ts). Present on
+   *  every row from a NON-default endpoint, and on every row of an
+   *  allEndpoints listing, so a caller can build an `endpoint:<name>/<id>`
+   *  selector. Absent on a default-endpoint listing, which keeps that output
+   *  byte-identical to before named endpoints existed. */
+  endpoint?: string;
   /** "agent" when the creation ledger has a record for this target. Otherwise
    *  "unknown", NEVER "human": the absence of a record is not proof that a
    *  person opened the tab. See src/origins.ts. */
@@ -277,7 +285,66 @@ async function reapSet(driver: BrowserDriver, pages: PageInfo[], all?: boolean):
   }
 }
 
+/** One endpoint's status in a list_pages{allEndpoints:true} result. */
+export type EndpointListing =
+  | { endpoint: string; base: string; readOnly: boolean; count: number }
+  | { endpoint: string; base: string; readOnly: boolean; down: true; error: string };
+
+/**
+ * list_pages. With allEndpoints (Chrome only) every configured endpoint is
+ * listed in its own endpoint scope, concurrently: page rows are tagged with
+ * `endpoint`, `endpoints` reports each endpoint's count, and an endpoint that
+ * cannot be reached is reported `{endpoint, down: true, error}` there instead
+ * of failing the call. Each endpoint's reap runs in its own scope, so it
+ * compares that endpoint's leases only against that endpoint's live targets,
+ * and a down endpoint reaps nothing at all.
+ */
 export async function listPages(
+  driver: BrowserDriver,
+  args: { all?: boolean; probe?: boolean; allEndpoints?: boolean } = {},
+): Promise<{ pages: ListedPage[]; count: number; reaped?: Array<ReapedTab & { endpoint?: string }>; endpoints?: EndpointListing[] }> {
+  const one = { all: args.all, probe: args.probe };
+  if (args.allEndpoints === true) {
+    if (driver.scheme === "bidi") throw new SharedToolError("list_pages: allEndpoints needs the Chrome backend; named endpoints are CDP-only");
+    const results = await Promise.all(
+      allEndpoints().map((ep) =>
+        withEndpointScope(ep, () => listPagesOne(driver, one)).then(
+          (r) => ({ ep, r }),
+          (e: unknown) => ({ ep, error: e instanceof Error ? e.message : String(e) }),
+        ),
+      ),
+    );
+    const pages: ListedPage[] = [];
+    const reaped: Array<ReapedTab & { endpoint: string }> = [];
+    const endpoints: EndpointListing[] = [];
+    for (const res of results) {
+      const { ep } = res;
+      if ("error" in res) {
+        endpoints.push({ endpoint: ep.name, base: ep.base, readOnly: ep.readOnly, down: true, error: res.error });
+        continue;
+      }
+      for (const p of res.r.pages) pages.push({ ...p, endpoint: ep.name });
+      for (const t of res.r.reaped ?? []) reaped.push({ ...t, endpoint: ep.name });
+      endpoints.push({ endpoint: ep.name, base: ep.base, readOnly: ep.readOnly, count: res.r.count });
+    }
+    return { pages, count: pages.length, ...(reaped.length ? { reaped } : {}), endpoints };
+  }
+  const res = await listPagesOne(driver, one);
+  if (driver.scheme !== "bidi") {
+    const ep = currentEndpoint();
+    if (!isDefaultEndpoint(ep)) {
+      return {
+        ...res,
+        pages: res.pages.map((p) => ({ ...p, endpoint: ep.name })),
+        ...(res.reaped ? { reaped: res.reaped.map((t) => ({ ...t, endpoint: ep.name })) } : {}),
+      };
+    }
+  }
+  return res;
+}
+
+/** One endpoint's listing: the pre-#15 list_pages body, unchanged. */
+async function listPagesOne(
   driver: BrowserDriver,
   args: { all?: boolean; probe?: boolean } = {},
 ): Promise<{ pages: ListedPage[]; count: number; reaped?: ReapedTab[] }> {

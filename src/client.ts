@@ -4,8 +4,9 @@
  * the primitives exported here. See CONTRACT.md.
  */
 import type { CdpResponse, Target, TargetSelector } from "./types.ts";
-import { assertLeaseOk } from "./leases.ts";
+import { assertLeaseOk, chromeLeaseBackend } from "./leases.ts";
 import { resolveLiveLabel } from "./origins.ts";
+import { currentEndpoint, defaultEndpoint, DEFAULT_CDP_BASE } from "./endpoints.ts";
 import {
   isWorkerSelector,
   isWorkerTargetType,
@@ -24,8 +25,21 @@ import {
   FRAME_EMPTY_NEEDLE_MESSAGE,
 } from "./frames.ts";
 
-/** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
-export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
+/**
+ * Base HTTP origin of the DEFAULT DevTools endpoint, fixed at import (CDP_BASE, else
+ * http://127.0.0.1:9222, or the default named by CDP_ENDPOINTS / CDP_ENDPOINTS_FILE).
+ * Kept for library callers; nothing in this package reads it to build a URL any more:
+ * every request resolves its base per call through currentEndpoint() (src/endpoints.ts).
+ * A malformed endpoint config must not crash the import, so this falls back to the old
+ * expression and the config error surfaces on first use (or at MCP/CLI startup).
+ */
+export const BASE: string = (() => {
+  try {
+    return defaultEndpoint().base;
+  } catch {
+    return process.env.CDP_BASE ?? DEFAULT_CDP_BASE;
+  }
+})();
 
 /** Default per-command timeout (ms). Override with CDP_TIMEOUT_MS. */
 export const DEFAULT_TIMEOUT_MS = Number(process.env.CDP_TIMEOUT_MS ?? 15_000);
@@ -194,7 +208,9 @@ export class CdpConnection {
 /* ----------------------------- endpoint discovery ----------------------------- */
 
 async function httpJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  // Resolved PER CALL, never cached: the endpoint comes from the dispatch scope, and an
+  // endpoint that was down a moment ago is simply tried again.
+  const res = await fetch(`${currentEndpoint().base}${path}`);
   if (!res.ok) throw new CdpError(`${path} -> HTTP ${res.status}`);
   return (await res.json()) as T;
 }
@@ -237,7 +253,7 @@ export async function resolveTarget(selector: TargetSelector, opts: { lease?: st
   // target we just resolved. Passing it would only suggest a check is happening
   // that is not. target-gone earns its keep on claim, and on a list_leases
   // reap, where a record's id may genuinely be absent from the browser.
-  await assertLeaseOk("chrome", hit.id, { lease: opts.lease, url: hit.url, title: hit.title });
+  await assertLeaseOk(chromeLeaseBackend(), hit.id, { lease: opts.lease, url: hit.url, title: hit.title });
   return hit;
 }
 
@@ -266,7 +282,7 @@ async function pickTarget(targets: Target[], selector: TargetSelector): Promise<
   }
   if (selector.startsWith("label:")) {
     const label = selector.slice(6);
-    const { matchIds, knownLabels } = await resolveLiveLabel("chrome", label, pages.map((t) => t.id));
+    const { matchIds, knownLabels } = await resolveLiveLabel(chromeLeaseBackend(), label, pages.map((t) => t.id));
     if (matchIds.length > 1) {
       throw new CdpError(`label 'label:${label}' matches more than one live target: ${matchIds.join(", ")}. Resolve by target id instead.`);
     }

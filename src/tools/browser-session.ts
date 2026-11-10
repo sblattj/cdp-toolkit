@@ -55,6 +55,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openBrowser, type CdpConnection } from "../client.ts";
+import { currentEndpoint } from "../endpoints.ts";
 
 /** Artifact root, captured at import exactly like every other module here (screencast, heap, ...). */
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
@@ -95,7 +96,17 @@ interface BrowserSession {
   dead: boolean;
 }
 
-let session: BrowserSession | undefined;
+/**
+ * One standing connection PER NAMED ENDPOINT, keyed by endpoint name and never shared: a
+ * download armed on the Teams app's port says nothing about the browser on 9222. Only a
+ * successfully opened connection is stored, so an endpoint that was down is simply retried
+ * on the next call.
+ */
+const sessions = new Map<string, BrowserSession>();
+
+function sessionKey(): string {
+  return currentEndpoint().name;
+}
 
 /** True for the errors that mean "this socket is gone", not "the command was rejected". */
 function isDisconnect(e: unknown): boolean {
@@ -153,12 +164,14 @@ function subscribe(s: BrowserSession): void {
  * caller unarmed while every call still reports success.
  */
 export async function getBrowserSession(): Promise<BrowserSession> {
+  const key = sessionKey();
+  const session = sessions.get(key);
   if (session && !session.dead) return session;
   const previousPath = session?.armedPath;
   const conn = await openBrowser();
   const s: BrowserSession = { conn, downloads: [], waiters: [], dead: false };
   subscribe(s);
-  session = s;
+  sessions.set(key, s);
   if (previousPath) await armDownloadsAt(previousPath);
   return s;
 }
@@ -201,7 +214,7 @@ export async function armDownloads(): Promise<{ downloadPath: string }> {
 
 /** Completed-but-uncollected downloads, oldest first. */
 export function pendingDownloads(): DownloadRecord[] {
-  return (session?.downloads ?? []).filter((d) => d.state === "completed" && !d.consumed);
+  return (sessions.get(sessionKey())?.downloads ?? []).filter((d) => d.state === "completed" && !d.consumed);
 }
 
 /**
@@ -232,15 +245,16 @@ export async function nextCompletedDownload(timeoutMs: number): Promise<Download
   });
 }
 
-/** Close the standing connection. For process shutdown and tests; safe to call when none is open. */
+/** Close every standing connection (all endpoints). For process shutdown and tests; safe to call when none is open. */
 export async function disposeBrowserSession(): Promise<void> {
-  const s = session;
-  session = undefined;
-  if (!s) return;
-  s.dead = true;
-  try {
-    s.conn.close();
-  } catch {
-    /* already gone */
+  const all = [...sessions.values()];
+  sessions.clear();
+  for (const s of all) {
+    s.dead = true;
+    try {
+      s.conn.close();
+    } catch {
+      /* already gone */
+    }
   }
 }

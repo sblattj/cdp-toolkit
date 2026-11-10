@@ -15,7 +15,8 @@
  *
  * Launch: `bunx -y cdp-toolkit`  (or `bun run src/mcp.ts` from a checkout)
  *   HTTP:  `bun run src/mcp.ts --transport streamable-http [--port 3000] [--host 127.0.0.1]`
- * Config:  CDP_BASE (default http://127.0.0.1:9222), CDP_TIMEOUT_MS, CDP_ARTIFACT_DIR,
+ * Config:  CDP_BASE (default http://127.0.0.1:9222), CDP_ENDPOINTS / CDP_ENDPOINTS_FILE (named
+ *          endpoints, Chrome only; see src/endpoints.ts), CDP_TIMEOUT_MS, CDP_ARTIFACT_DIR,
  *          CDP_TOOL_PROFILE (`full` — the default — advertises every group; `core` advertises
  *          just the 12 everyday tools; or a comma-separated group list, e.g. `core,network`.
  *          Startup-only filter on what tools/list shows; unlisted tools stay callable by name),
@@ -43,6 +44,7 @@ import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
+import { allEndpoints, endpointConfig, ENDPOINTS_FIREFOX_MESSAGE, stripEndpointArgs, usesEndpointArgs, withEndpointScope } from "./endpoints.ts";
 import { isListed, resolveProfile, TOOL_GROUP, TOOL_GROUPS, GROUP_TOOLS } from "./toolGroups.ts";
 import { TOOL_DOCS } from "./toolDocs.ts";
 import { VERSION } from "./version.ts";
@@ -158,7 +160,7 @@ function auditCoverage(): void {
 const INSTRUCTIONS = [
   "cdp-toolkit drives a real browser over CDP (or Firefox WebDriver-BiDi): pages, input, screenshots, snapshots, console, network, cookies, emulation, Lighthouse, traces, screencasts.",
   "TOOLS: by default only 5 are listed (navigate_page, take_snapshot, click, fill, evaluate_script). ~45 more exist: find one with search_tools {query} (returns its schema; no query = catalog), run it with call_tool {name, arguments}. No tab yet? call_tool {name:'new_page'}. The listing is fixed for the process's life; CDP_TOOL_PROFILE=full lists everything.",
-  "TARGET SELECTOR (the `target` param, unless a tool says otherwise): 'active' (default = first page) | 'index:N' (0-based) | 'url:<substr>' | 'title:<substr>' | 'label:<name>' (exact, ledger or live lease) | a 32-hex '<targetId>' of any target type — an iframe id from list_pages{all:true} drives like a tab. Chrome tools also accept 'frame:<substr>' for OOPIF iframe targets. Four Chrome-only tools (evaluate_script, list_network_requests, get_network_request, list_console_messages) also accept 'worker:<substr>' to reach a service/shared worker (e.g. an MV3 background worker); an idle-evicted worker is started first (see `wake`).",
+  "TARGET SELECTOR (the `target` param, unless a tool says otherwise): 'active' (default = first page) | 'index:N' (0-based) | 'url:<substr>' | 'title:<substr>' | 'label:<name>' (exact, ledger or live lease) | a 32-hex '<targetId>' of any target type — an iframe id from list_pages{all:true} drives like a tab. Chrome tools also accept 'frame:<substr>' for OOPIF iframe targets. Four Chrome-only tools (evaluate_script, list_network_requests, get_network_request, list_console_messages) also accept 'worker:<substr>' to reach a service/shared worker (e.g. MV3 background); an idle-evicted worker is started first (see `wake`). Prefix 'endpoint:<name>/' for a named CDP endpoint; an app endpoint (Teams) lists an empty host page first: use title:.",
   "LEASES (the `lease` param): claim_page, and new_page{claim:true}, mint an opaque token. Omit it for a tab THIS process already holds. It is required for a tab held by ANOTHER process, or one claimed explicitly. Under CDP_REQUIRE_LEASE the gate auto-acquires a lease for any tab this process drives — no token is surfaced, so pass `target`, not `lease` — while an explicit claim:true still demands its token on every later call.",
   "ORIGIN: list_pages and list_leases tag each tab's `origin` as 'agent' (this toolkit created it) or 'unknown' — never 'human', because the toolkit cannot prove a person opened a tab. An 'agent' tab stays findable after its creator releases the lease or dies.",
 ].join("\n\n");
@@ -408,6 +410,15 @@ export function buildServer(): Server {
   return server;
 }
 
+/** Stderr suffix naming the configured endpoints, empty unless more than one is configured
+ *  (a CDP_BASE-only setup logs exactly what it always did). */
+function endpointsLogSuffix(): string {
+  if (BROWSER !== "chrome") return "";
+  const eps = allEndpoints();
+  if (eps.length < 2) return "";
+  return `, endpoints=${eps.map((e) => `${e.name}=${e.base}${e.readOnly ? "(read)" : ""}`).join(",")}`;
+}
+
 /** Dispatch one browser tool by name: the path both a direct call and call_tool take. */
 async function runTool(name: string, args: unknown) {
   if (!AVAILABLE_NAMES.has(name)) {
@@ -428,12 +439,24 @@ async function runTool(name: string, args: unknown) {
       const fn = dispatch[name];
       if (!fn) return { content: [{ type: "text" as const, text: `unknown tool: ${name}` }], isError: true };
       try {
-        const result = await fn(args);
+        // ONE endpoint scope per dispatch, the same way and for the same reason as the
+        // lease scope above: the `endpoint:<name>/` prefix (or an `endpoint` arg) is
+        // resolved and STRIPPED here, once, so none of the three selector pickers ever
+        // sees it, and every base URL below resolves through currentEndpoint(). Inside
+        // the try, so an unknown endpoint name is an isError result, not a throw.
+        const { endpoint, args: toolArgs } = stripEndpointArgs(args);
+        const result = await withEndpointScope(endpoint, () => fn(toolArgs));
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
       }
+    }
+
+    // Named endpoints are CDP-only (issue #15): refuse them on Firefox rather than
+    // silently driving the one BiDi session as if the prefix were not there.
+    if (usesEndpointArgs(args)) {
+      return { content: [{ type: "text" as const, text: `Error: ${ENDPOINTS_FIREFOX_MESSAGE}` }], isError: true };
     }
 
     // Firefox: one BiDi session memoized for the life of this server process (lifetime "session",
@@ -461,6 +484,17 @@ async function run(argv: string[]): Promise<void> {
   // This process is the long-lived MCP server, which is what makes strict mode
   // (CDP_REQUIRE_LEASE) safe to honor here and unsafe in cli.ts. See requireLease.
   markLongLivedProcess();
+  // A malformed CDP_ENDPOINTS / CDP_ENDPOINTS_FILE is a STARTUP error under Chrome, named
+  // and fatal, the same treatment startupProfile gives a bad CDP_TOOL_PROFILE. Firefox never
+  // reads the endpoint config, so it is not checked there.
+  if (BROWSER === "chrome") {
+    try {
+      endpointConfig();
+    } catch (err) {
+      console.error(`[cdp-toolkit] ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
 
   // Per-transport state the shutdown path closes (only one is ever set).
   let stdioHandle: Awaited<ReturnType<typeof serveStdio>> | undefined;
@@ -508,7 +542,7 @@ async function run(argv: string[]): Promise<void> {
     );
     process.stdin.on("close", () => void shutdown());
     console.error(
-      `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}`,
+      `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}${endpointsLogSuffix()}`,
     );
     return;
   }
@@ -543,7 +577,7 @@ async function run(argv: string[]): Promise<void> {
   // scanner finds the real listening port first (matters under --port 0, where N is the
   // OS-assigned one and the only place it is knowable).
   console.error(
-    `[cdp-toolkit] MCP server v${VERSION} listening on streamable-http port ${listener.port} (http://${serve.host}:${listener.port}/), browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}`,
+    `[cdp-toolkit] MCP server v${VERSION} listening on streamable-http port ${listener.port} (http://${serve.host}:${listener.port}/), browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}${endpointsLogSuffix()}`,
   );
 }
 

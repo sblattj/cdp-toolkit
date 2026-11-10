@@ -7,7 +7,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "all": "Include non-page targets (service/shared workers, background pages, out-of-process (OOPIF) iframes); default false lists page-type tabs only. A returned non-page targetId is accepted as a bare id by any tool's `target` param.",
-      "probe": "Ping each page-type renderer before returning, one bounded 500ms check per target and never more, so a wedged tab can't stall the listing. Adds 'responsive' (false on timeout/exception/unreachable, never an error for the whole call) and, where the same round trip finds human input, humanActiveMs. Default false. On a backend that cannot answer the ping, responsive is absent too (not false)."
+      "probe": "Ping each page-type renderer before returning, one bounded 500ms check per target and never more, so a wedged tab can't stall the listing. Adds 'responsive' (false on timeout/exception/unreachable, never an error for the whole call) and, where the same round trip finds human input, humanActiveMs. Default false. On a backend that cannot answer the ping, responsive is absent too (not false).",
+      "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS / CDP_ENDPOINTS_FILE (Chrome only); lists that endpoint instead of the default. Every row from a non-default endpoint carries 'endpoint', so build selectors as 'endpoint:<name>/<targetId>'. An app endpoint (e.g. the Teams desktop app, a WebView2/Electron shell) often lists an empty host page first: pick the real window with 'title:'.",
+      "allEndpoints": "List every configured endpoint at once (Chrome only). Each page row carries its 'endpoint'; an 'endpoints' array reports every endpoint as {endpoint, base, readOnly, count}, or {endpoint, base, readOnly, down:true, error} for one that cannot be reached, which never fails the whole call. Default false."
     }
   },
   "new_page": {
@@ -15,6 +17,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "url": "URL to open in the new tab; defaults to about:blank.",
+      "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS / CDP_ENDPOINTS_FILE to open the tab on (Chrome only); default endpoint when omitted. Address the new tab later as 'endpoint:<name>/<targetId>'.",
       "claim": "Claim the new tab atomically and return a lease token alongside {targetId,url}. Under CDP_REQUIRE_LEASE the tab is claimed and a lease returned even without claim:true; claim:true makes it an EXPLICIT lease that demands its token on every later call, even from this process. Default false.",
       "label": "Agent label recorded on the lease when the tab is claimed; surfaced in conflict errors and list_leases. Defaults to pid-<pid>.",
       "ttlMs": "How long a claimed lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it. Ignored when not claiming."
@@ -24,21 +27,21 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Close a page target via Target.closeTarget. Requires an explicit, resolvable target; errors rather than guessing when the selector matches nothing.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions."
     }
   },
   "select_page": {
     "description": "Activate/focus a page target via Target.activateTarget and persist its bare targetId to the selected-state file (CDP_STATE_DIR/selected). Requires an explicit, resolvable target.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions."
     }
   },
   "navigate_page": {
     "description": "Navigate a target page to a URL (Page.navigate), reload it (reload:true), OR go back/forward in its session history (history:'back'|'forward'), then wait for the load milestone with a bounded timeout so a wedged renderer can't hang. Exactly one of url / reload / history per call. Returns {url,frameId,waitedFor} (plus reloaded:true on a reload, traversed:'back'|'forward' on a history move); waitUntil supports 'load'|'domcontentloaded' only (no 'networkidle'), and there is no auto-snapshot of the new page. Pass reload:true with ignoreCache:true for a hard reload that refetches every subresource (e.g. to pick up a freshly-deployed, non-content-hashed bundle the HTTP cache would serve stale).",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "url": "Destination URL to navigate to. Required unless reload:true.",
       "reload": "Reload the current page (Page.reload) instead of navigating to url. Default false.",
       "history": "Traverse this tab's session history instead of loading a url: 'back' and 'forward' are the browser's Back and Forward buttons. Mutually exclusive with 'url' and 'reload' — passing two of the three is refused by name, not resolved by precedence. Works on BOTH backends and waits for the same load milestone as an ordinary navigation. Going back from the first entry, or forward from the last, is an ERROR naming the direction — never a silent no-op. The result carries traversed:'back'|'forward' alongside the resulting url.",
@@ -51,7 +54,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Poll the target until the substring appears in document.body.innerText (Runtime.evaluate on a fixed interval), or throw on timeout. Text-substring only -- no aria/role/selector or event variants; throws rather than returning {found:false}.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "text": "Substring to wait for in document.body.innerText. Required.",
       "timeoutMs": "Total time budget in ms. Default 15000.",
       "pollMs": "Poll interval in ms. Default 250."
@@ -61,7 +64,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Run arbitrary JavaScript in the target's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args', 'expression' is a raw expression; with 'args' it must be a function literal (arrow or classic) invoked on globalThis with args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. savePath writes the value to a JSON file instead -- the response then carries only {path,bytes,type,target} and the value never appears in it, the way to read a credential (a JWT/session token from localStorage) without putting the secret in the transcript. This is the one tool that EVALUATES inside an MV3 extension's background SERVICE WORKER rather than OBSERVING it (Chrome, Capability 'worker.targets'): a worker: target reads chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started first (see 'wake').",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "wake": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions.",
       "expression": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when provided. REQUIRED -- the code always goes in this key, never in 'function', 'code', 'js', 'script', 'fn' or 'body'; a call using one of those is rejected with an error naming the wrong key.",
       "awaitPromise": "Await the result if it is a Promise. Default true.",
@@ -73,7 +76,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Read the target page's cookie store INCLUDING httpOnly cookies, which document.cookie (and therefore evaluate_script) cannot see. Page-scoped, not browser-wide: returns cookies of the resolved tab, so point at a page on the site you want. Each cookie carries name, value, domain, path, expires (Unix seconds, -1 for a session cookie), size, httpOnly, secure, sameSite ('strict'|'lax'|'none'|'default'), session. Filter with 'domain' and/or 'name'. Pass 'savePath' to write the array to a JSON file instead: the response is then {path,bytes,count,target} with no cookie value in any form, the way to capture a session cookie without putting the credential in the transcript.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "domain": "Keep only cookies for this domain. A leading dot is ignored on both sides and subdomains match too, so 'example.test' matches '.example.test' and 'app.example.test'. No wildcards.",
       "name": "Keep only the cookie with exactly this name. Exact match, not a substring.",
       "savePath": "Write the cookie array here as JSON and KEEP THE VALUES OUT OF THE RESPONSE: the result is {path,bytes,count,target} only, with no preview or truncation of any value. An absolute path (starting with /) is used as-is; a relative path resolves under the artifact dir (/tmp/cdp-toolkit); missing parents are created. Omit to get the cookies back inline."
@@ -83,7 +86,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Write one cookie into the target page's cookie store, INCLUDING httpOnly or secure cookies that document.cookie (and therefore evaluate_script) cannot create. Either 'url' or 'domain' is REQUIRED: the call is refused when neither is given, rather than guessing the page origin. The response is {set:true,target} and never echoes the value back. A 'set:true' is earned, not assumed: Chrome raises an error when it declines the cookie (a domain the url does not belong to, a secure cookie on an insecure origin, an oversized value). On Firefox 'domain' is derived from 'url' when only the url was given (BiDi has no url parameter), and a url with no host such as about:blank or a data URL is an error, not a silent no-op. Read the result back with list_cookies when you need proof.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "name": "Cookie name. Required and non-empty.",
       "value": "Cookie value. Required. It is not echoed back in the response.",
       "url": "URL the cookie is set for, e.g. 'https://example.com/'. Chrome derives domain, path and secure from it; Firefox derives only the domain from its host. Give this or 'domain'.",
@@ -99,7 +102,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Delete the named cookie from the target page's cookie store, httpOnly cookies included. Both 'name' and one of 'url' or 'domain' are REQUIRED: without a site constraint it would delete by name across the whole partition, so it is refused with an error instead. Narrow further with 'path'. The response is {deleted:true,target} and carries NO count, because neither protocol reports how many cookies it removed and a number here would be invented; call list_cookies before and after for a real count. 'deleted:true' means the backend accepted and performed the deletion, not that a matching cookie existed, since deleting an absent cookie succeeds on both backends.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "name": "Exact cookie name to delete. Required and non-empty. No wildcards: this removes a named cookie, not a swathe of them.",
       "url": "Delete cookies matching this URL, e.g. 'https://example.com/'. Give this or 'domain'. On Firefox only the host is used, because BiDi's filter has no url field.",
       "domain": "Delete cookies with this exact domain. Give this or 'url'.",
@@ -110,7 +113,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Captures the page's accessibility tree as an indented text tree, each line prefixed [uid] (a CDP backendDOMNodeId). Every interaction tool (click/hover/fill/etc.) resolves that uid via DOM.resolveNode — run this first to discover uids to act on. Cross-origin iframe subtrees are not walked (they live in a separate renderer process); the iframe node itself is emitted with a frame=\"<targetId>\" marker (also in interactiveOnly mode), so the frame is discoverable and driveable via that id or frame:<url-substring>.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "interactiveOnly": "When true, emit only interactive/meaningful nodes as a flat list; default false returns the full hierarchical tree."
     }
   },
@@ -118,7 +121,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Click an element via a synthetic mouse press/release at its scrolled-into-view center. Give exactly one of uid or selector. modifiers (Alt/Control/Meta/Shift) throws on the Firefox backend — use --browser chrome for a modifier-click. clickCount:3 triple-clicks (selects a line/paragraph in most editors).",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to click, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the element to click (document.querySelector). Exactly one of uid or selector.",
       "button": "Mouse button: 'left' (default), 'right', or 'middle'.",
@@ -130,7 +133,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Hovers the mouse over an element by dispatching a mouseMoved event at its scrolled-into-view center, firing framework hover handlers. Give exactly one of uid or selector.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to hover, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the element to hover (document.querySelector). Exactly one of uid or selector."
     }
@@ -139,7 +142,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Drags from a source element to a destination or by an offset. mode:'mouse' (default) dispatches synthetic mouse press/move/release; at the default steps:2 an HTML5 drop zone (dragover preventDefault) gets ZERO dragover events and refuses the drop. mode:'html5' replays real dragstart/dragEnter/dragOver/drop with the page's own dataTransfer instead — deterministic regardless of pointer path, but CHROME-ONLY (rejected with a clear error on the Firefox backend). 'from' takes uid or selector; destination is exactly one of 'to' (uid/selector/x+y) or 'by' ({dx,dy} offset — sliders, map panning, resize handles).",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "from": "Source element to drag from. Exactly one of uid or selector.",
       "to": "Where the drag ends: exactly one of uid, selector, or x+y. Mutually exclusive with 'by'; exactly one of to/by required.",
       "by": "Offset from the source element's center: at least one of dx/dy (other defaults to 0). Mutually exclusive with 'to'; exactly one of to/by required. For sliders (by:{dx:40}), map panning, resize handles.",
@@ -151,7 +154,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Dispatches a wheel/scroll event at an anchor point — element (uid/selector) or x+y, scrolled into view first if an element; omit all three for viewport center. At least one of deltaX/deltaY required: positive deltaY scrolls DOWN, positive deltaX scrolls RIGHT (wheel-event convention — easy to invert). Returns the resolved anchor {x,y} plus the delta actually dispatched.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to scroll into view and anchor at, from take_snapshot. At most one of uid, selector, or x+y.",
       "selector": "CSS selector for the element to anchor at (document.querySelector). At most one of uid, selector, or x+y.",
       "x": "Absolute viewport x-coordinate to anchor at; must be given with y. At most one of uid, selector, or x+y.",
@@ -164,7 +167,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Dispatches one raw mouse event (move/down/up) at absolute viewport coordinates — the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself for anything click/drag's fixed sequences can't reach: canvas drag-painting, marquee/rubber-band selection, custom hit-testing widgets. Chrome-only: absent from tools/list under the Firefox backend, never present-and-throwing.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "action": "Which raw event to dispatch: 'move' (mouseMoved), 'down' (mousePressed), or 'up' (mouseReleased).",
       "x": "Viewport x-coordinate. Required every call — CDP has no 'current pointer position' to default from.",
       "y": "Viewport y-coordinate. Required every call.",
@@ -177,7 +180,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Toggles CDP Emulation.setFocusEmulationEnabled on a tab: the page then BELIEVES it is focused (document.hasFocus()→true, visibilitychange stays 'visible', focus events fire) while the real OS window and active tab stay put — no focus theft. This is the primitive that unlocks focus-GATED UI (a button the site disables unless its tab is focused, e.g. Anthropic's Claude Code OAuth Authorize button on claude.ai/oauth/*) on a background tab. Chrome-only: WebDriver BiDi's emulation module has no focus primitive, so this tool is absent from tools/list under --browser firefox. Ports the core mechanism of the danbuhler/claude-code-auto-authorize extension. Remember to call with enabled:false to restore, or use click_focus_gated which restores automatically.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only).",
       "enabled": "true = page reports focused/visible; false = restore the real focus state."
     }
   },
@@ -185,7 +188,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "One-call compose of focus emulation + trusted click for a focus-gated button: enables Emulation.setFocusEmulationEnabled, polls until the button (located by CSS selector OR exact visible-text match, e.g. 'Authorize') exists AND is enabled, dispatches a trusted move/press/release click via Input.dispatchMouseEvent (isTrusted:true — a content script's synthesized events can never satisfy a focus gate), then restores focus emulation off unless keepFocus. Built for the Claude Code OAuth Authorize button but works on any focus-gated control on a background tab. Throws with a diagnostic ('never located' vs 'found but stayed disabled') on timeout. Chrome-only; absent under --browser firefox.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease).",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only).",
       "selector": "CSS selector of the button. Give exactly one of selector or text.",
       "text": "Exact visible-text match of the button (trims whitespace, matches button/[role=button]/submit inputs), e.g. 'Authorize'. Give exactly one of selector or text.",
       "timeoutMs": "Max ms to poll for the button to appear and become enabled. Default 30000.",
@@ -216,7 +219,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes — won't fire per-keypress handlers). Give exactly one of uid or selector.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the field to fill, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the field to fill (document.querySelector). Exactly one of uid or selector.",
       "value": "Text value to set; the field is cleared first, overwriting existing content."
@@ -226,7 +229,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Fills multiple form fields in one call; each is focused, cleared, then set via Input.insertText (overwrites existing content, same as fill). Each entry in the non-empty 'fields' array takes exactly one of uid or selector plus a string value.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "fields": "Non-empty array of fields to fill, each with exactly one of uid or selector plus a string value."
     }
   },
@@ -234,7 +237,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Focuses an element and appends text via Input.insertText without clearing first — closest primitive to typing, but still atomic (not per-character keystrokes). Give exactly one of uid or selector.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to type into, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the element to type into (document.querySelector). Exactly one of uid or selector.",
       "text": "Text to insert; appended to existing content rather than overwriting it."
@@ -244,7 +247,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Dispatches a keyDown/keyUp pair for one key with optional modifiers. 'key' is a named key (Enter, Tab, Escape, ArrowDown, Backspace, etc.) or a single printable character — the named-key table is curated, with no F-keys, numpad, or IME support.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "key": "Key to press: a named key (Enter, Tab, Escape, ArrowDown, Backspace, ...) or a single printable character.",
       "modifiers": "Modifier names held during the press: 'Control'/'Ctrl', 'Shift', 'Alt', 'Meta'/'Cmd'."
     }
@@ -253,7 +256,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Attaches one or more files to an <input type=file> element via DOM.setFileInputFiles. Give exactly one of uid or selector for the input; 'files' is an array of absolute path(s) — wrap a single path in an array too.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the file input element, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the file input element (document.querySelector). Exactly one of uid or selector.",
       "files": "Absolute path(s) to attach to the <input type=file>, as an array — wrap a single path too, e.g. [\"/tmp/a.pdf\"]. Array-only because some model APIs (Google Gemini function calling) reject union-typed parameters."
@@ -263,7 +266,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Captures the viewport (default), the full scrollable page (fullPage), or one element (uid or selector, mutually exclusive) via CDP Page.captureScreenshot. Past 16384 device px per side Chrome can hang rather than refuse, so size is checked first via Page.getLayoutMetrics; an oversized capture is auto-tiled into vertical bands stitched losslessly into one PNG (see tile) instead of wedging the tab. Writes PNG/JPEG to /tmp/cdp-toolkit (override savePath, dir auto-created); returns {path,bytes,format,target,scale} plus width/height measured from the encoded bytes (omitted if undecodable). renderSize/renderRestored(+renderRestoreError) accompany a renderWidth/renderHeight capture, tiled/bands a banded one. returnBase64 adds raw bytes to the result but is refused on a banded capture. quality applies to jpeg only.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "format": "Image format, default png. quality applies only to jpeg.",
       "quality": "JPEG quality 0-100, default 80; ignored for png.",
       "fullPage": "Capture the full scrollable height (via Page.getLayoutMetrics), not just the viewport.",
@@ -281,7 +284,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Applies any subset of Chrome emulation overrides in one call: device metrics (width+height together, +deviceScaleFactor/mobile), userAgent, cpuThrottlingRate(>=1), media type+features, networkConditions. Device-metrics overrides PERSIST on the target until cleared or the renderer navigates/reloads; every other override is session-scoped and resets when this call's connection closes. clearOverrides:true resets everything (ignoring other fields) and, as of 1.9.2, genuinely clears a device-metrics override set by a DIFFERENT process — Chrome's clearDeviceMetricsOverride is normally a no-op unless the clearing connection also set the override, so the driver re-asserts the tab's current size first, then clears, throwing rather than reporting cleared:true if it can't verify.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "width": "Device-metrics viewport width in CSS px. Must be paired with height.",
       "height": "Device-metrics viewport height in CSS px. Must be paired with width.",
       "deviceScaleFactor": "Device pixel ratio for the device-metrics override; 0 = platform default.",
@@ -298,7 +301,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Sets the page's device-metrics width/height (the narrow case of emulate), optionally deviceScaleFactor/mobile, then verifies by reading back window.innerWidth/innerHeight after applying. Requires positive width and height. The override PERSISTS on the target until cleared (emulate{clearOverrides:true}) or the renderer navigates/reloads.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "width": "Viewport width in CSS px (required, must be positive).",
       "height": "Viewport height in CSS px (required, must be positive).",
       "deviceScaleFactor": "Device pixel ratio; 0 = platform default.",
@@ -309,7 +312,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Wait for the next JavaScript dialog (alert/confirm/prompt/beforeunload) on a page and respond via Page.handleJavaScriptDialog, accepting or dismissing it. Default mode resolves with the first handled dialog or throws on timeout; set autoMs to handle every dialog opening during a fixed window and resolve with the list. Trigger the dialog out-of-band (e.g. click a button) — a blocking dialog freezes the renderer, so it cannot be triggered inline.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "accept": "Whether to accept (OK) or dismiss (Cancel) the dialog.",
       "promptText": "Text to enter for a prompt() dialog when accepting.",
       "timeoutMs": "How long to wait for the next dialog, in milliseconds (default 15000).",
@@ -320,7 +323,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Read console output (logs, warnings, exceptions) captured for the target. Reads the existing shared buffer by default (empty if no capture ran); reload:true reloads and records a fresh capture (console+network together, so a network reload never wipes console history). WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker -- its console.log arrives as Runtime.consoleAPICalled, its outbound requests from CDP's Network domain on the worker's own session -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload:true means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup message can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "reload": "Record fresh by reloading the page and capturing a window. Default false (read existing buffer). With a worker: target nothing reloads -- records for durationMs while the worker runs and keeps it alive until the capture stops.",
       "durationMs": "Capture window for reload mode, in ms. Default 2500.",
       "wake": "Worker targets only, when starting a capture. Default true: an idle-evicted MV3 service worker exists in no target listing, so it is started first (ServiceWorker.startWorker) and re-confirmed; false fails fast. Rejected on a page target, a bare target id, or a read-only call. See server instructions."
@@ -330,7 +333,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Return one console entry by zero-based index from the target's existing console buffer. Throws if the index is out of range; run list_console_messages (optionally reload:true) first to populate the buffer.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "index": "Zero-based index into the parsed console entries. Default 0."
     }
   },
@@ -338,7 +341,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Return correlated network rows (one per requestId; status/headers/state) for the target. Reads the existing buffer by default; reload:true records a fresh both-domains capture window. filterUrl keeps only URLs containing a substring. WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker's outbound requests from CDP's Network domain on the worker's own session -- what the code ACTUALLY SENT -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload:true means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup request can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "reload": "Record fresh by reloading the page and capturing a window. Default false (read existing buffer). With a worker: target nothing reloads -- records for durationMs while the worker runs and keeps it alive until the capture stops.",
       "durationMs": "Capture window for reload mode, in ms. Default 2500.",
       "filterUrl": "Return only requests whose URL contains this substring.",
@@ -349,7 +352,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Return one network request (matched by exact requestId, else url substring) with status/headers. Requires requestId or url (throws otherwise). includeBody:true drives a fresh capture (page reload, or worker listen window) matched by url ONLY -- a fresh capture re-mints requestIds, so a carried-over requestId returns metadata plus bodyUnavailableReason. WORKER capture (Chrome, Capability 'worker.targets'): a worker: target records an MV3 background service worker's outbound requests from CDP's Network domain on the worker's own session -- what the code ACTUALLY SENT -- so the two tricks callers try first fail for plain JS reasons, not worker ones: a value bound at module top level is not visible from evaluate_script's global scope, and assigning self.fetch cannot rebind a fetch the module already captured. A worker has no reload: reload means 'listen for durationMs while it runs', so trigger its work (tool call, message, alarm) during the window; a worker woken by the call already ran its top-level code, so a startup request can be missed. SIDE EFFECT: the CDP session KEEPS THE WORKER ALIVE for the capture (an idle MV3 worker is evicted in seconds); Chrome resumes evicting after.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "requestId": "Match by exact requestId (metadata only; cannot fetch a body, since a reload re-mints requestIds).",
       "url": "Match by URL substring (first match). Required for body fetch (includeBody), since url is stable across reload.",
       "includeBody": "Also fetch the response body; drives a fresh capture and requires the url selector.",
@@ -361,7 +364,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Starts a CDP trace recording on the target and holds the recording connection in-process; you MUST call performance_stop_trace from the SAME PROCESS to end it, or use performance_trace instead for a robust cross-call trace. Throws if a trace is already in progress for this target.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "categories": "Trace categories to record. Defaults to timeline + user-timing + loading + disabled-by-default timeline tracks carrying LCP/LayoutShift/RunTask."
     }
   },
@@ -369,7 +372,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Stops the in-process trace started by performance_start_trace and writes it as JSON under /tmp/cdp-toolkit, returning {path,bytes,events,metrics}. Throws if no live trace exists in THIS process (e.g. start ran in a different process) — use performance_trace instead. The target arg is accepted only for API symmetry; at most one trace is ever live per process.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions."
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions."
     }
   },
   "performance_analyze_insight": {
@@ -383,7 +386,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "RECOMMENDED entry point: one-shot trace that starts tracing, optionally reloads or navigates the page, waits durationMs (default 3000ms), stops, and writes JSON under /tmp/cdp-toolkit — returns {path,bytes,events,metrics,target}. Holds one connection open for the whole window, so unlike start/stop it is NOT limited to a single process.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "durationMs": "How long to record after the optional reload/navigate, in ms. Default 3000.",
       "reload": "Reload the page after starting the trace, to capture full navigation timing.",
       "navigateTo": "Navigate to this URL after starting the trace (alternative to reload).",
@@ -394,7 +397,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Starts recording the target tab to video via CDP Page.startScreencast, holding one persistent connection and spooling every frame to disk — MUST be paired with stop_screen_recording WITHIN THE SAME PROCESS (frames are connection-scoped and cannot be reattached from another process, so this only works under the MCP server, not the one-process-per-call CLI). Chrome only: WebDriver BiDi has no screencast primitive, so both tools are absent under --browser firefox. Frames arrive ON REPAINT not on a clock (variable rate); each is timestamped into a ledger that stop_screen_recording turns into per-frame display durations, so a still page holds one long frame instead of racing. ffmpeg is probed here (not at stop) so a missing encoder fails before frames are captured and thrown away. Throws if the target already has a recording in progress; different targets record concurrently.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "format": "Frame format, default jpeg (much smaller per repaint); png is lossless. quality applies to jpeg only.",
       "quality": "JPEG frame quality 0-100. Ignored for png; omitted leaves Chrome's own default.",
       "maxWidth": "Caps the streamed frame width in px; also pins frame size if the viewport may change mid-recording.",
@@ -415,7 +418,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Captures a V8 heap snapshot of the target page over CDP and writes it as a .heapsnapshot JSON file (loadable in the DevTools Memory panel) under /tmp/cdp-toolkit unless savePath is given. Returns {path,bytes,chunks,target} only — does NOT parse or summarize the snapshot.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "savePath": "Override the output path. Absolute paths (starting with /) are used as-is; relative paths resolve under the artifact dir (/tmp/cdp-toolkit). Defaults to an auto-named take_heapsnapshot-<targetId>-<timestamp>.heapsnapshot file."
     }
   },
@@ -489,7 +492,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "description": "Structured extraction: take the target page's HTML, clean it, and send it to an OpenAI-compatible /chat/completions endpoint along with your JSON Schema, getting back schema-conformant JSON instead of prose. THE DEFAULT ENDPOINT IS LOOPBACK - llm-ferry at http://127.0.0.1:8090/v1 with model 'schematron' - so page content stays ON THIS MACHINE unless the operator overrides baseUrl (or sets CDP_EXTRACT_BASE_URL). Configuration: CDP_EXTRACT_BASE_URL (endpoint override), CDP_EXTRACT_MODEL (model override), CDP_EXTRACT_API_KEY (bearer token; never logged and REDACTED from every error), CDP_EXTRACT_TIMEOUT_MS, CDP_EXTRACT_MAX_CHARS, CDP_EXTRACT_PROMPT. PROMPT SHAPE: by default only the cleaned HTML is sent and the schema rides in response_format, which is what the HOSTED Schematron API expects (it injects the schema server-side); set prompt:'schematron' when baseUrl points at a LOCALLY SERVED open-weight Schematron (e.g. an MLX schematron8B), because that model was fine-tuned on a prompt with the schema INSIDE the user message and an HTML-only prompt returns garbage from it even under constrained decoding. In 'schematron' mode NO response_format is sent at all - the schema already lives in the prompt, and the client validates only that the response parses as JSON. THE SCHEMA-DESCRIPTION RULE: this is prompt-driven extraction, and the extraction INSTRUCTIONS live in the schema's property descriptions - write them like prompts ('the job title, exactly as printed', 'ISO date, not 'yesterday'). A schema whose properties carry no descriptions is REJECTED up front with an error saying so, because it would produce garbage extraction with no hint why. Source: 'dom' (live DOM, the rendered, JS-executed page) is the default; 'served' (the raw server response before rendering) currently returns a not-implemented error rather than guessing. Size guard: cleaned HTML over maxChars (default 300000) fails with html_too_large naming the actual size - shrink the payload with 'selector' to scope to a subtree, clean:'aggressive' to strip harder (standard already drops scripts/styles/hidden), or a larger maxChars if you truly need it all. Endpoint failures surface as upstream_error (with status and body, API key redacted) or timeout; the response never contains the key. A completion the endpoint cut off at its 8192-token output cap fails naming finish_reason=length and the fix (narrow with 'selector', or ask the schema for less) - it is NOT reported as invalid JSON, because a truncated tail is a size problem, not a model one. COST IS ALWAYS VISIBLE: every successful call reports the endpoint's usage token counts inline, so a slow/bloated extraction is visible in the answer itself, not discovered on a bill later.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Grammar: see server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "schema": "REQUIRED JSON Schema object (type object) describing the JSON you want back. This is both the contract AND the prompt: each property's 'description' tells the extractor what to put there, so make them specific instructions. A schema with no property descriptions at all is rejected before any page work happens - empty descriptions extract garbage and the error says exactly what to fix. Nested objects and arrays of objects work; their inner descriptions count too.",
       "selector": "CSS selector scoping extraction to that subtree's HTML only (pierces open shadow roots). The cheapest fix for html_too_large: extract the article or table, not the whole page. Omit to send the full cleaned document.",
       "source": "'dom' (default) reads the live, rendered DOM - what the page shows after JS ran. 'served' would read the raw HTTP response before rendering; it currently returns a not-implemented error naming the arm, so callers can detect and fall back rather than guessing.",

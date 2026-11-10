@@ -146,7 +146,9 @@ describe("the post-merge invariant: nothing in src/ sends Input.* except sendInp
     // is the one input path that could plausibly reacquire a raw send without looking wrong.
     const source = readFileSync(join(ROOT, "tools", "dispatch-mouse.ts"), "utf8");
     expect(source).toContain('from "../activity.ts"');
-    expect(source).toMatch(/sendInput\(\s*conn\s*,\s*"chrome"/);
+    // Named endpoints (#15): the Chrome backend key is per endpoint ("chrome" for the default,
+    // "chrome@<name>" otherwise), so the call passes chromeLeaseBackend() rather than a literal.
+    expect(source).toMatch(/sendInput\(\s*conn\s*,\s*(?:"chrome"|chromeLeaseBackend\(\))/);
   });
 
   test("both drivers still hold exactly one input choke point each", () => {

@@ -29,13 +29,37 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { currentEndpoint, leaseNamespace, type Endpoint } from "./endpoints.ts";
 
 /** Opaque ownership token. Hold it, pass it back, never parse or build one. */
 export type LeaseToken = string;
 
 /** Ownership is keyed by backend plus id: a CDP targetId and a BiDi context id
- *  are not guaranteed disjoint, so a bare id could collide across browsers. */
-export type LeaseBackend = "chrome" | "firefox";
+ *  are not guaranteed disjoint, so a bare id could collide across browsers.
+ *
+ *  A NAMED CDP ENDPOINT (src/endpoints.ts) is its own browser, so it is its own
+ *  backend key: `chrome@<name>`. The default endpoint stays plain "chrome", so
+ *  lease and origin filenames, and tokens, are byte-identical to every older
+ *  process sharing the directory. Because the endpoint rides IN the key, every
+ *  existing "same backend" comparison (liveBackend scoping, reap, list_pages
+ *  annotation, token checks) scopes by endpoint with no extra code: a target
+ *  list read from one port can never mark another port's lease stale. */
+export type LeaseBackend = "chrome" | "firefox" | `chrome@${string}`;
+
+/** The Chrome lease key for an endpoint (by default the current dispatch scope's). */
+export function chromeLeaseBackend(ep: Endpoint = currentEndpoint()): LeaseBackend {
+  const ns = leaseNamespace(ep);
+  return ns === undefined ? "chrome" : `chrome@${ns}`;
+}
+
+/** Regex source for a backend key as it appears in filenames and tokens. Endpoint
+ *  names are [A-Za-z0-9_]+, so a key never contains '-' or ':'. Shared with origins.ts. */
+export const BACKEND_KEY_SOURCE = "chrome@[A-Za-z0-9_]+|chrome|firefox";
+const BACKEND_KEY_RE = new RegExp(`^(?:${BACKEND_KEY_SOURCE})$`);
+
+export function isLeaseBackend(value: string): value is LeaseBackend {
+  return BACKEND_KEY_RE.test(value);
+}
 
 export interface LeaseRecord {
   backend: LeaseBackend;
@@ -139,7 +163,7 @@ export function tokenParts(token: LeaseToken): { backend: LeaseBackend; targetId
   const last = token.lastIndexOf(":");
   if (first <= 0 || last <= first) return undefined;
   const backend = token.slice(0, first);
-  if (backend !== "chrome" && backend !== "firefox") return undefined;
+  if (!isLeaseBackend(backend)) return undefined;
   const targetId = token.slice(first + 1, last);
   const nonce = token.slice(last + 1);
   if (!targetId.length || !/^[0-9a-f]{24}$/.test(nonce)) return undefined;
@@ -532,7 +556,7 @@ export interface LeaseSummary {
   unreadable?: string;
 }
 
-const LEASE_FILE_RE = /^lease-(chrome|firefox)-(.+)\.json$/;
+const LEASE_FILE_RE = new RegExp(`^lease-(${BACKEND_KEY_SOURCE})-(.+)\\.json$`);
 
 /**
  * Enumerate every lease on disk. Diagnosis only, so it needs no token.

@@ -40,6 +40,14 @@ export const MANIFEST: ToolSpec[] = [
         "probe": {
           "type": "boolean",
           "description": "Probe renderer responsiveness."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Named CDP endpoint to list (CDP_ENDPOINTS); default endpoint when omitted."
+        },
+        "allEndpoints": {
+          "type": "boolean",
+          "description": "List every configured endpoint; rows carry endpoint, a down one is reported, not thrown."
         }
       },
       "required": [],
@@ -63,6 +71,10 @@ export const MANIFEST: ToolSpec[] = [
         "claim": {
           "type": "boolean",
           "description": "Claim the new tab."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Named CDP endpoint to open the tab on (CDP_ENDPOINTS); default endpoint when omitted."
         },
         "label": {
           "type": "string",
@@ -89,7 +101,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         }
       },
       "required": [
@@ -110,7 +122,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         }
       },
       "required": [
@@ -131,7 +143,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "url": {
           "type": "string",
@@ -181,7 +193,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "text": {
           "type": "string",
@@ -214,7 +226,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "wake": {
           "type": "boolean",
@@ -256,7 +268,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "domain": {
           "type": "string",
@@ -287,7 +299,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "name": {
           "type": "string",
@@ -351,7 +363,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "name": {
           "type": "string",
@@ -388,7 +400,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "interactiveOnly": {
           "type": "boolean",
@@ -411,7 +423,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -464,7 +476,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -491,7 +503,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "from": {
           "type": "object",
@@ -577,7 +589,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -620,7 +632,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "action": {
           "type": "string",
@@ -686,7 +698,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "enabled": {
           "type": "boolean",
@@ -711,7 +723,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "selector": {
           "type": "string",
@@ -750,7 +762,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "arm": {
           "type": "boolean",
@@ -777,7 +789,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "permissions": {
           "type": "array",
@@ -811,7 +823,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -844,7 +856,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "fields": {
           "type": "array",
@@ -890,7 +902,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -923,7 +935,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "key": {
           "type": "string",
@@ -955,7 +967,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "uid": {
           "type": "number",
@@ -991,7 +1003,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "format": {
           "type": "string",
@@ -1058,7 +1070,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "width": {
           "type": "number",
@@ -1158,7 +1170,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "width": {
           "type": "number",
@@ -1196,7 +1208,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "accept": {
           "type": "boolean",
@@ -1233,7 +1245,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "reload": {
           "type": "boolean",
@@ -1264,7 +1276,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "index": {
           "type": "number",
@@ -1287,7 +1299,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "reload": {
           "type": "boolean",
@@ -1322,7 +1334,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "requestId": {
           "type": "string",
@@ -1361,7 +1373,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "categories": {
           "type": "array",
@@ -1387,7 +1399,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         }
       },
       "required": [],
@@ -1425,7 +1437,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "durationMs": {
           "type": "number",
@@ -1463,7 +1475,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "format": {
           "type": "string",
@@ -1510,7 +1522,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "savePath": {
           "type": "string",
@@ -1533,7 +1545,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "savePath": {
           "type": "string",
@@ -1600,7 +1612,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "urlPattern": {
           "type": "string",
@@ -1689,7 +1701,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "all": {
           "type": "boolean",
@@ -1708,7 +1720,7 @@ export const MANIFEST: ToolSpec[] = [
       "properties": {
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "targetId": {
           "type": "string",
@@ -1743,7 +1755,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "close": {
           "type": "boolean",
@@ -1776,7 +1788,7 @@ export const MANIFEST: ToolSpec[] = [
         },
         "target": {
           "type": "string",
-          "description": "Page selector (index:/url:/title:/label:/targetId, default active); grammar in server instructions."
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
         },
         "schema": {
           "type": "object",

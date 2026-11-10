@@ -25,6 +25,7 @@
  */
 import { sendInput } from "../activity.ts";
 import { withPage } from "../client.ts";
+import { chromeLeaseBackend } from "../leases.ts";
 import type { TargetSelector } from "../types.ts";
 
 const CLICK_MODIFIER_BITS: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
@@ -102,7 +103,7 @@ export async function dispatchMouse(args: DispatchMouseArgs): Promise<DispatchMo
     // itself. sendInput is the shared writer CdpPageDriver.dispatchInput also delegates to — the one
     // import this module takes from outside its own raw-CDP boundary, and the reason the file header's
     // "not a PageDriver method" argument costs nothing in bookkeeping.
-    await sendInput(conn, "chrome", target.id, "Input.dispatchMouseEvent", params);
+    await sendInput(conn, chromeLeaseBackend(), target.id, "Input.dispatchMouseEvent", params);
     return { dispatched: args.action, x: args.x, y: args.y };
   });
 }

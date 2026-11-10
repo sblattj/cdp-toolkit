@@ -32,7 +32,7 @@
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserDriver, PageInfo } from "./driver.ts";
-import { defaultLabel, leaseDir, listLeases, type LeaseBackend } from "./leases.ts";
+import { BACKEND_KEY_SOURCE, defaultLabel, leaseDir, listLeases, type LeaseBackend } from "./leases.ts";
 
 /** What list_pages can say about where a tab came from. There is deliberately
  *  no "human": see the file header. */
@@ -60,7 +60,10 @@ export function originFile(backend: LeaseBackend, targetId: string): string {
   return join(leaseDir(), `origin-${backend}-${safeId(targetId)}.json`);
 }
 
-const ORIGIN_FILE_RE = /^origin-(chrome|firefox)-(.+)\.json$/;
+// Same backend-key grammar as leases.ts: `origin-chrome@teams-<id>.json` for a named
+// endpoint. listOrigins' liveBackend scoping then keeps one endpoint's target list from
+// reaping another endpoint's records.
+const ORIGIN_FILE_RE = new RegExp(`^origin-(${BACKEND_KEY_SOURCE})-(.+)\\.json$`);
 
 /**
  * Record that this toolkit just created `targetId`.

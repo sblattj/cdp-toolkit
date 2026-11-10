@@ -235,7 +235,9 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `CDP_BASE` | `http://127.0.0.1:9222` | DevTools HTTP origin (drives discovery + the lighthouse `--port`). |
+| `CDP_BASE` | `http://127.0.0.1:9222` | DevTools HTTP origin (drives discovery + the lighthouse `--port`). The endpoint named `default` when named endpoints are configured. |
+| `CDP_ENDPOINTS` | unset | Chrome only. Extra named endpoints, `name=url` comma-separated, e.g. `browser=http://127.0.0.1:9222,teams=http://127.0.0.1:9333?mode=read`. See "Named endpoints" below. |
+| `CDP_ENDPOINTS_FILE` | unset | Chrome only. Path to a JSON file defining named endpoints (same meaning as `CDP_ENDPOINTS`, merged with it). See "Named endpoints" below. |
 | `CDP_TIMEOUT_MS` | `15000` | Per-command timeout. |
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
@@ -660,6 +662,32 @@ So every tab this toolkit creates is written to a creation ledger, and `list_pag
 - No isolation. Two leased tabs on one Chrome still share cookies, `localStorage`, and every other origin-scoped store. A lease is ownership of a tab, not isolation of the browser under it.
 - No protection from humans. The lease is enforced against cdp-toolkit's own tool calls. It cannot stop someone clicking into the tab.
 - Not for the CLI. A CLI invocation is one process per call, so a lease it claimed would be reclaimable immediately by the dead-pid rule. `claim_page` is refused there. CLI calls can still present a token minted by the MCP server with `--lease`. Strict mode (`CDP_REQUIRE_LEASE`) is likewise MCP-only and for the same underlying reason, doubled: an auto-acquired lease would be reclaimable on arrival, worse than no lease at all, and reap would then be free to read that instantly-dead-pid record as an abandoned tab and close it on the next listing.
+
+## Named endpoints: several browsers or apps from one server
+
+One server can drive more than one DevTools port: your browser on `9222` and, say, the Microsoft Teams desktop app (WebView2, launched with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`) or an Electron app. Chrome backend only.
+
+```bash
+CDP_ENDPOINTS="browser=http://127.0.0.1:9222,teams=http://127.0.0.1:9333?mode=read"
+# or
+CDP_ENDPOINTS_FILE=~/.config/cdp-endpoints.json
+```
+
+```json
+{ "default": "browser",
+  "endpoints": {
+    "browser": { "base": "http://127.0.0.1:9222" },
+    "teams":   { "base": "http://127.0.0.1:9333", "readOnly": true } } }
+```
+
+- **Selecting one:** prefix any target selector with `endpoint:<name>/`, e.g. `endpoint:teams/title:Chat` or `endpoint:teams/<targetId>`. `endpoint:teams` alone means that endpoint's active page. No prefix means the default endpoint. Tools without a `target` (`new_page`, `list_pages`) take an `endpoint` argument instead; giving both, naming different endpoints, is an error.
+- **Discovery:** `list_pages { endpoint: "teams" }` lists one endpoint; `list_pages { allEndpoints: true }` lists all of them, tags each page row with `endpoint`, and adds an `endpoints` array where an unreachable endpoint shows as `{ endpoint, down: true, error }` instead of failing the call. Every row from a non-default endpoint carries `endpoint`.
+- **App endpoints** often list an empty host page first (the Teams app's first `page` target has 3 accessibility nodes); the real window is the page whose title names it, so use `title:`.
+- **The default endpoint** is the file's `"default"` key if set, else the endpoint named `default`. `CDP_BASE` is the endpoint named `default`; with neither it is `http://127.0.0.1:9222`. With only `CDP_BASE` (or nothing) set, behavior is exactly what it was before named endpoints.
+- **Precedence:** `CDP_ENDPOINTS` and the file are merged, not shadowed: a name defined in both must be defined identically, or startup fails naming it. Listing order is env string, then file.
+- **Errors:** a bad URL, duplicate name, unknown `mode` (only `read` / `write`), unknown key, or an unreadable or invalid file is a startup error for the MCP server (it prints the problem and exits 1) and a first-use error for the CLI. Names are letters, digits and `_`.
+- **Late starters:** endpoints are tried on every call, never at startup, so an app launched after the server is reachable as soon as it is up.
+- **Leases and origins** are kept per endpoint: the default endpoint's files keep their names (`lease-chrome-<id>.json`), a named one gets `lease-chrome@<name>-<id>.json`, and reap only ever compares an endpoint's leases against that endpoint's own live targets. An endpoint whose base equals the default's shares the default's lease space (two names, one browser).
 
 ## How it's built
 

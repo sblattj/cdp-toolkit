@@ -7,7 +7,8 @@
  */
 import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget } from "../client.ts";
 import type { Target, TargetSelector } from "../types.ts";
-import { LeaseConflictError } from "../leases.ts";
+import { chromeLeaseBackend, LeaseConflictError } from "../leases.ts";
+import { currentEndpoint } from "../endpoints.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
 import { resolveWorkerSelector } from "./workers.ts";
@@ -703,7 +704,7 @@ class CdpPageDriver implements PageDriver {
    * one.
    */
   private async dispatchInput<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    return sendInput<T>(this.conn, "chrome", this.info.id, method, params);
+    return sendInput<T>(this.conn, chromeLeaseBackend(), this.info.id, method, params);
   }
   /** Same as ensureDomain but tolerates the enable call itself failing (matches a legacy
    *  `.catch(() => undefined)` site); a failed enable is NOT re-attempted on the next call. */
@@ -1597,6 +1598,14 @@ class CdpPageDriver implements PageDriver {
  */
 const beaconSessions = new BeaconSessions<CdpConnection>((conn) => conn.close());
 
+/** Beacon sessions are keyed by endpoint plus target id: a target id only means
+ *  something inside one browser, and named endpoints are separate browsers. The
+ *  default endpoint keeps the bare id. */
+function beaconKey(targetId: string): string {
+  const backend = chromeLeaseBackend(currentEndpoint());
+  return backend === "chrome" ? targetId : `${backend}\u0000${targetId}`;
+}
+
 /** The page endpoint for a target id, or undefined if the browser no longer has it. */
 async function targetWsUrl(targetId: string): Promise<string | undefined> {
   const hit = (await listTargets()).find((t) => t.id === targetId);
@@ -1769,7 +1778,7 @@ class CdpBrowserDriver implements BrowserDriver {
       // Opportunistic, not load-bearing: the beacon socket dies with the tab
       // anyway, and readBeaconOver's dead-connection branch would drop it on the
       // next read. Dropping it here just avoids holding a corpse until then.
-      if (res.success !== false) beaconSessions.drop(id);
+      if (res.success !== false) beaconSessions.drop(beaconKey(id));
       return { success: res.success ?? true };
     });
   }
@@ -1821,7 +1830,8 @@ class CdpBrowserDriver implements BrowserDriver {
    * into a document that already has it adds no second set of listeners.
    */
   async installActivityBeacon(targetId: string): Promise<boolean> {
-    const held = beaconSessions.get(targetId);
+    const key = beaconKey(targetId);
+    const held = beaconSessions.get(key);
     if (held) {
       const rearmed = await held
         .send("Runtime.evaluate", { expression: BEACON_SOURCE, returnByValue: true })
@@ -1830,7 +1840,7 @@ class CdpBrowserDriver implements BrowserDriver {
       if (rearmed) return true;
       // The socket is gone (tab closed, browser restarted): fall through and
       // build a fresh one rather than reporting a beacon that is not there.
-      beaconSessions.drop(targetId);
+      beaconSessions.drop(key);
     }
     const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
     if (!wsUrl) return false;
@@ -1844,7 +1854,7 @@ class CdpBrowserDriver implements BrowserDriver {
       conn.close();
       return false;
     }
-    beaconSessions.set(targetId, conn);
+    beaconSessions.set(key, conn);
     return true;
   }
 
@@ -1859,11 +1869,12 @@ class CdpBrowserDriver implements BrowserDriver {
    * CLI, which holds nothing.
    */
   async readActivityBeacon(targetId: string): Promise<number | null> {
-    const held = beaconSessions.get(targetId);
+    const key = beaconKey(targetId);
+    const held = beaconSessions.get(key);
     if (held) {
       const value = await readBeaconOver(held);
       if (value !== undefined) return value;
-      beaconSessions.drop(targetId);
+      beaconSessions.drop(key);
     }
     const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
     if (!wsUrl) return null;
@@ -1891,7 +1902,7 @@ class CdpBrowserDriver implements BrowserDriver {
    * would let one wedged tab cost the listing two timeouts instead of one.
    */
   async probeRenderer(targetId: string, timeoutMs: number = RENDERER_PROBE_TIMEOUT_MS): Promise<{ responsive: boolean; beaconTs: number | null }> {
-    const held = beaconSessions.get(targetId);
+    const held = beaconSessions.get(beaconKey(targetId));
     if (held) return probeOver(held, timeoutMs);
     const wsUrl = await targetWsUrl(targetId).catch(() => undefined);
     if (!wsUrl) return { responsive: false, beaconTs: null };

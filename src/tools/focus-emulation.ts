@@ -28,6 +28,7 @@
  */
 import { sendInput } from "../activity.ts";
 import { withPage } from "../client.ts";
+import { chromeLeaseBackend } from "../leases.ts";
 import type { TargetSelector } from "../types.ts";
 
 export interface FocusEmulationArgs {
@@ -155,9 +156,10 @@ export async function clickFocusGated(args: ClickFocusGatedArgs): Promise<ClickF
             | undefined;
           if (btn && !btn.disabled) {
             const base = { x: btn.x, y: btn.y, button: "left", buttons: 1, clickCount: 1 };
-            await sendInput(conn, "chrome", target.id, "Input.dispatchMouseEvent", { type: "mouseMoved", x: btn.x, y: btn.y });
-            await sendInput(conn, "chrome", target.id, "Input.dispatchMouseEvent", { ...base, type: "mousePressed" });
-            await sendInput(conn, "chrome", target.id, "Input.dispatchMouseEvent", { ...base, type: "mouseReleased" });
+            const backend = chromeLeaseBackend();
+            await sendInput(conn, backend, target.id, "Input.dispatchMouseEvent", { type: "mouseMoved", x: btn.x, y: btn.y });
+            await sendInput(conn, backend, target.id, "Input.dispatchMouseEvent", { ...base, type: "mousePressed" });
+            await sendInput(conn, backend, target.id, "Input.dispatchMouseEvent", { ...base, type: "mouseReleased" });
             return {
               clicked: true,
               x: btn.x,

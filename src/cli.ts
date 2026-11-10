@@ -29,6 +29,7 @@ import { resolveBackend, stripBrowserFlag, stripConnectFlag, startFirefoxSession
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, withLeaseScope } from "./leases.ts";
+import { ENDPOINTS_FIREFOX_MESSAGE, stripEndpointArgs, usesEndpointArgs, withEndpointScope } from "./endpoints.ts";
 import { MANIFEST } from "./manifest.ts";
 import { runInstaller } from "./install/wizard.ts";
 import { realpathSync } from "node:fs";
@@ -344,9 +345,13 @@ async function main(): Promise<number> {
   return withLeaseScope(leaseFromArgs(parsed.args), async () => {
     if (browser === "chrome") {
       const fn = TOOLS[tool];
+      // Same endpoint scope as mcp.ts's runTool: the endpoint:<name>/ prefix (or
+      // --endpoint) is resolved and stripped once, here. A bad name or a malformed
+      // CDP_ENDPOINTS throws to main's catch, which prints {"error": ...} and exits 1.
+      const { endpoint, args: toolArgs } = stripEndpointArgs(parsed.args);
       // The registry's value type is the union of all tool signatures; each tool
       // validates its own args at runtime, so we hand the parsed object through.
-      const result = await (fn as (args: unknown) => Promise<unknown>)(parsed.args);
+      const result = await withEndpointScope(endpoint, () => (fn as (args: unknown) => Promise<unknown>)(toolArgs));
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;
     }
@@ -354,6 +359,10 @@ async function main(): Promise<number> {
     // Firefox: one process per invocation. Launch (or, with --connect/CDP_FIREFOX_ENDPOINT,
     // attach), run exactly one tool call, always dispose, even if the tool call itself throws —
     // in launch mode that reaps the spawned process; in attach mode it only ends the BiDi session.
+    if (usesEndpointArgs(parsed.args)) {
+      process.stderr.write(`${JSON.stringify({ error: ENDPOINTS_FIREFOX_MESSAGE })}\n`);
+      return 1;
+    }
     const neutralFn = FIREFOX_TOOLS[tool];
     if (!neutralFn) {
       process.stderr.write(`${JSON.stringify({ error: `tool '${tool}' has no Firefox implementation wired` })}\n`);

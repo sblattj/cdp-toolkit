@@ -18,6 +18,7 @@ import {
   releaseLeaseFor,
   requireLease,
   tokenParts,
+  chromeLeaseBackend,
   type LeaseBackend,
   type LeaseSummary,
   type LeaseToken,
@@ -28,7 +29,8 @@ class LeaseToolError extends Error {}
 /** The driver's uid scheme is the one stable per-backend discriminator on the
  *  BrowserDriver surface ("cdp" for Chrome, "bidi" for Firefox). */
 function backendOf(driver: BrowserDriver): LeaseBackend {
-  return driver.scheme === "bidi" ? "firefox" : "chrome";
+  // Chrome's key carries the dispatch scope's named endpoint (chrome@<name>); see LeaseBackend.
+  return driver.scheme === "bidi" ? "firefox" : chromeLeaseBackend();
 }
 
 export interface ClaimPageResult {

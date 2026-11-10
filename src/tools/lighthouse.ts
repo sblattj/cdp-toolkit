@@ -15,12 +15,14 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { CdpError } from "../client.ts";
+import { currentEndpoint } from "../endpoints.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
 
-/** Lighthouse port to attach to the already-running Chrome (matches CDP_BASE). */
+/** Lighthouse port to attach to the already-running Chrome: the current endpoint's
+ *  (CDP_BASE for the default endpoint, exactly as before). */
 function cdpPort(): number {
-  const base = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
+  const base = currentEndpoint().base;
   const m = base.match(/:(\d+)/);
   return m?.[1] ? Number(m[1]) : 9222;
 }
