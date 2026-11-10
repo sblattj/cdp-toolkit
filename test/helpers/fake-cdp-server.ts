@@ -98,11 +98,13 @@ export class FakeCdpServer {
     return `http://127.0.0.1:${this.server.port}`;
   }
 
-  async start(): Promise<{ base: string; port: number }> {
+  /** `port` 0 (the default) lets the OS pick; a fixed port lets a test start an endpoint LATE
+   *  on an address a server was already configured with. */
+  async start(port = 0): Promise<{ base: string; port: number }> {
     if (this.server) return { base: this.base, port: this.server.port as number };
     this.server = BunRuntime.serve({
       hostname: "127.0.0.1",
-      port: 0,
+      port,
       fetch: (req: Request, server: BunServer) => this.onFetch(req, server),
       websocket: {
         message: (ws: WsLike, raw: string | Buffer) => void this.onWsMessage(ws, raw),
