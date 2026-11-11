@@ -293,7 +293,15 @@ try {
   await scrollPage.navigate({ url: `${BASE_URL}/scrollable.html` });
   const beforeScrollY = Number(await scrollPage.evaluate("window.scrollY"));
   await scrollPage.scroll(undefined, { deltaY: 400 });
-  const afterScrollY = Number(await scrollPage.evaluate("window.scrollY"));
+  // Firefox applies a wheel scroll to the root viewport asynchronously (APZ): the wheel event has
+  // already fired when performActions returns, but window.scrollY can still read 0 for a frame or
+  // two. A single immediate read made this check flaky on CI (scrollY 0 -> 0 with __wheelCount=1),
+  // so poll it, bounded, instead of reading once. A scroll that never lands still fails at 2s.
+  let afterScrollY = Number(await scrollPage.evaluate("window.scrollY"));
+  for (const deadline = Date.now() + 2_000; afterScrollY === 0 && Date.now() < deadline; ) {
+    await new Promise((r) => setTimeout(r, 50));
+    afterScrollY = Number(await scrollPage.evaluate("window.scrollY"));
+  }
   const wheelCount = Number(await scrollPage.evaluate("window.__wheelCount"));
   record(
     "scroll with no anchor scrolls the Firefox viewport (BiDi wheel action)",
