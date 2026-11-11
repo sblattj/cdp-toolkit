@@ -283,14 +283,30 @@ export function selectEncoder(encodersOutput: string): EncoderChoice {
  * Whether this ffmpeg takes `-fps_mode` (added in 5.1). `-vsync` was deprecated
  * then and later removed, so a new ffmpeg fails with "Unrecognized option 'vsync'",
  * while 4.4 (Ubuntu 22.04) only knows `-vsync`. Parses `ffmpeg -version`;
- * a git snapshot ("ffmpeg version N-1234-g...") is treated as new.
+ * a git snapshot ("ffmpeg version N-1234-g...") is treated as new. Returns
+ * `undefined` when the banner has no version it can read, so the caller can
+ * look further instead of guessing.
  */
-export function supportsFpsMode(versionOutput: string): boolean {
+export function supportsFpsMode(versionOutput: string): boolean | undefined {
   const m = /ffmpeg version n?(\d+)\.(\d+)/.exec(versionOutput);
-  if (!m) return /ffmpeg version N-/.test(versionOutput);
+  if (!m) return /ffmpeg version N-/.test(versionOutput) ? true : undefined;
   const major = Number(m[1]);
   const minor = Number(m[2]);
   return major > 5 || (major === 5 && minor >= 1);
+}
+
+/**
+ * Pick `-fps_mode` vs `-vsync` from what the probe could read. The version
+ * banner decides when it parses; otherwise the option list from `-h full`
+ * decides (it names `-fps_mode` only on ffmpeg that has it). When neither could
+ * be read, choose `-fps_mode`: it is the current option, while `-vsync` is gone
+ * from new ffmpeg, so an unreadable probe must not silently pick the removed one.
+ */
+export function chooseFpsMode(versionOutput: string | undefined, helpOutput: string | undefined): boolean {
+  const byVersion = versionOutput === undefined ? undefined : supportsFpsMode(versionOutput);
+  if (byVersion !== undefined) return byVersion;
+  if (helpOutput !== undefined && /-vsync\b|-fps_mode\b/.test(helpOutput)) return /-fps_mode\b/.test(helpOutput);
+  return true;
 }
 
 /**
@@ -369,8 +385,14 @@ async function probeEncoder(): Promise<EncoderChoice> {
       }
       if (res.code !== 0) throw new CdpError(`${FFMPEG_MISSING} ('-encoders' exited ${res.code}: ${res.stderr.trim().slice(0, 300)})`);
       const choice = selectEncoder(`${res.stdout}\n${res.stderr}`);
-      const ver = await run(FFMPEG_BIN, ["-version"]).catch(() => undefined);
-      return { ...choice, fpsMode: ver ? supportsFpsMode(`${ver.stdout}\n${ver.stderr}`) : false };
+      const output = async (args: string[]): Promise<string | undefined> => {
+        const r = await run(FFMPEG_BIN, args).catch(() => undefined);
+        return r && r.code === 0 ? `${r.stdout}\n${r.stderr}` : undefined;
+      };
+      const version = await output(["-version"]);
+      const byVersion = version === undefined ? undefined : supportsFpsMode(version);
+      const help = byVersion === undefined ? await output(["-hide_banner", "-h", "full"]) : undefined;
+      return { ...choice, fpsMode: chooseFpsMode(version, help) };
     })();
     // A failed probe must not poison every later call: forget it so a caller who
     // installs ffmpeg and retries is not told it is still missing.

@@ -47,6 +47,7 @@ import {
   imageSize,
   selectEncoder,
   supportsFpsMode,
+  chooseFpsMode,
   startScreenRecording,
   stopScreenRecording,
   type FrameLedgerEntry,
@@ -280,7 +281,19 @@ describe("ffmpeg argv", () => {
     expect(supportsFpsMode("ffmpeg version n6.1.1 Copyright")).toBe(true);
     expect(supportsFpsMode("ffmpeg version 9.0.1 Copyright (c) 2000-2026")).toBe(true);
     expect(supportsFpsMode("ffmpeg version N-118000-gabc123 Copyright")).toBe(true);
-    expect(supportsFpsMode("garbage")).toBe(false);
+    expect(supportsFpsMode("garbage")).toBeUndefined();
+  });
+
+  test("chooseFpsMode: a failed or unreadable -version never falls back to the removed -vsync blindly", () => {
+    // The version banner decides when it parses.
+    expect(chooseFpsMode("ffmpeg version 4.4.2-0ubuntu0.22.04.1", undefined)).toBe(false);
+    expect(chooseFpsMode("ffmpeg version 9.0.1", "  -vsync  ...")).toBe(true);
+    // No readable version: the `-h full` option list decides.
+    expect(chooseFpsMode(undefined, "-vsync <arg>  set video sync method")).toBe(false);
+    expect(chooseFpsMode("garbage", "-fps_mode[:<stream_spec>] <arg>  set framerate mode")).toBe(true);
+    // Neither probe readable: the current option, not the removed one.
+    expect(chooseFpsMode(undefined, undefined)).toBe(true);
+    expect(chooseFpsMode("garbage", "no options here")).toBe(true);
   });
 
   test("does NOT pin the duration with -t", () => {
