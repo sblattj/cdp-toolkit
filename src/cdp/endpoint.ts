@@ -116,9 +116,15 @@ function handshake(url: string, timeoutMs: number): Promise<boolean> {
       resolve(ok);
     };
     const ws = new WebSocket(url);
-    ws.onopen = () => done(true);
-    ws.onerror = () => done(false);
-    setTimeout(() => done(false), timeoutMs);
+    const timer = setTimeout(() => done(false), timeoutMs);
+    ws.onopen = () => {
+      clearTimeout(timer);
+      done(true);
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      done(false);
+    };
   });
 }
 
@@ -172,10 +178,19 @@ export function detectEndpoint(): Promise<EndpointInfo> {
           : `no profile was searched — CDP_USER_DATA_DIR is unset, and no profile is ever scanned unless you name one. `) +
         `Set CDP_BROWSER_WS to the ws://.../devtools/browser/<uuid> URL, or CDP_USER_DATA_DIR to the profile in use.`,
     );
-  })().catch((error: unknown) => {
-    cached.delete(base);
-    throw error;
-  });
+  })().then(
+    (info) => {
+      // Keep only a browser-ws answer. An "http" one carries a `/json/version`
+      // uuid that a Chrome restart invalidates, and that endpoint can simply be
+      // asked again, as the HTTP path always has.
+      if (info.transport === "http") cached.delete(base);
+      return info;
+    },
+    (error: unknown) => {
+      cached.delete(base);
+      throw error;
+    },
+  );
   cached.set(base, detection);
   return detection;
 }

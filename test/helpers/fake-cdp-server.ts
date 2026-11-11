@@ -77,6 +77,13 @@ export class FakeCdpServer {
   targets: FakeTarget[];
   /** Per-method handlers; assign more at any time (`fake.handlers["Foo.bar"] = () => ({})`). */
   handlers: Record<string, CdpHandler>;
+  /**
+   * HTTP paths that answer 404 instead, with how many more times they do
+   * (`Infinity` = always). `{ "/json/list": 1 }` is one transient listing
+   * failure; `{ "/json/list": Infinity, "/json/version": Infinity }` is a
+   * Chrome that serves only the browser socket.
+   */
+  failHttp: Record<string, number> = {};
 
   private server: BunServer | undefined;
   private readonly initial: { browser: string; targets: FakeTarget[]; handlers: Record<string, CdpHandler> };
@@ -127,6 +134,7 @@ export class FakeCdpServer {
     this.targets = this.initial.targets.map((t) => ({ ...t }));
     this.handlers = { ...this.initial.handlers };
     this.nextTarget = 2;
+    this.failHttp = {};
   }
 
   /** Messages recorded for one target ("browser" for the browser socket). */
@@ -164,6 +172,11 @@ export class FakeCdpServer {
     }
 
     this.requests.push({ path: path + url.search });
+    const failsLeft = this.failHttp[path] ?? 0;
+    if (failsLeft > 0) {
+      this.failHttp[path] = failsLeft - 1;
+      return new Response("not found", { status: 404 });
+    }
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
 
     if (path === "/json/version") {

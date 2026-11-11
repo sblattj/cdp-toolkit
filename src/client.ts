@@ -286,6 +286,14 @@ export async function listTargets(): Promise<Target[]> {
     knownTransports.set(base, "http");
     return listing;
   } catch (httpError) {
+    // Switch only when detection says this endpoint really serves no `/json`.
+    // A Chrome that does serve it can still fail one `/json/list` (restarting,
+    // a timeout); its `/json/version` then answers, detection says "http", and
+    // pinning browser-ws here would move every later call off the per-target
+    // sockets for the rest of the process. Rethrow instead, so the next call
+    // tries HTTP again.
+    const detected = await detectEndpoint().catch(() => undefined);
+    if (detected?.transport !== "browser-ws") throw httpError;
     const targets = await getTargetsOverBrowserWs().catch(() => {
       // The HTTP failure is the one worth reporting: it names the endpoint the
       // user configured, where the fallback's failure only says a profile
@@ -297,8 +305,20 @@ export async function listTargets(): Promise<Target[]> {
   }
 }
 
-/** Browser-level WebSocket URL, for Target.* / Browser.*. */
+/**
+ * Browser-level WebSocket URL, for Target.* / Browser.*.
+ *
+ * `GET /json/version` first and on every call, as before the browser-ws
+ * transport existed: its uuid changes on every Chrome start, so a URL kept
+ * across calls goes stale after a restart. Only an endpoint already known to
+ * serve no `/json`, or one whose `/json/version` did not answer, goes through
+ * detection.
+ */
 export async function browserWsUrl(): Promise<string> {
+  if (knownTransports.get(currentEndpoint().base) !== "browser-ws") {
+    const version = await httpJson<{ webSocketDebuggerUrl: string }>("/json/version").catch(() => undefined);
+    if (version?.webSocketDebuggerUrl) return version.webSocketDebuggerUrl;
+  }
   return (await detectEndpoint()).browserWsUrl;
 }
 
