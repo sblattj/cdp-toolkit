@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-10
+
 ### Added
 
 - Action results now say what they touched, not just where. `click`, `hover`, `fill`, `type_text` and `upload_file` return an `element` field with a snapshot-style `role "name"` string (`{"clicked":true,"element":"button \"Save\"","x":85,"y":95}`), so a transcript shows "clicked button Save" instead of a bare uid. `fill_form` returns `elements` (one per field, `null` where none could be read) and `drag` returns `element` for the source plus `target_element` when `to` is an element. The description is read in the page before the action (a click can navigate or unmount its node; `fill` reports the field's label, not the new value), is bounded to 2s, and is omitted rather than thrown on failure, so it can never break or mask the action's own result or error. Additive: no existing field changed. (`src/shared-tools.ts`, `test/describe-element.test.ts`)
