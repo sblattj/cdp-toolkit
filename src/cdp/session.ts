@@ -33,7 +33,7 @@
  * call that named it.
  */
 import { CdpConnection, CdpError, DEFAULT_TIMEOUT_MS } from "../client.ts";
-import { detectEndpoint } from "./endpoint.ts";
+import { detectEndpoint, forgetEndpoint } from "./endpoint.ts";
 
 type EventHandler = (params: Record<string, unknown>, sessionId?: string) => void;
 
@@ -55,8 +55,21 @@ async function acquireBrowserConn(): Promise<CdpConnection> {
   }
   if (!opening) {
     opening = (async () => {
-      const { browserWsUrl } = await detectEndpoint();
-      const conn = await new CdpConnection(browserWsUrl).connect();
+      let { browserWsUrl } = await detectEndpoint();
+      let conn: CdpConnection;
+      try {
+        conn = await new CdpConnection(browserWsUrl).connect();
+      } catch (error) {
+        // The detection is cached, and a Chrome restart mints a new browser
+        // uuid, so a URL that stopped answering may just be stale: forget it and
+        // detect once more. Same URL again (CDP_BROWSER_WS, or Chrome really is
+        // down) means there is nothing newer to try.
+        forgetEndpoint();
+        const fresh = (await detectEndpoint().catch(() => undefined))?.browserWsUrl;
+        if (!fresh || fresh === browserWsUrl) throw error;
+        browserWsUrl = fresh;
+        conn = await new CdpConnection(browserWsUrl).connect();
+      }
       shared = { conn, refs: 0, url: browserWsUrl };
       return conn;
     })().finally(() => {

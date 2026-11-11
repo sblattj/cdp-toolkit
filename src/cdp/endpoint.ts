@@ -45,6 +45,9 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { currentEndpoint, isDefaultEndpoint } from "../endpoints.ts";
+// A cycle (client.ts imports this module), safe because CdpConnection is only
+// used at call time, never while either module is still evaluating.
+import { CdpConnection } from "../client.ts";
 
 /**
  * Which transport this endpoint serves.
@@ -100,32 +103,19 @@ async function discoverBrowserWs(base: string): Promise<string | undefined> {
 /**
  * A bounded WebSocket handshake. The port file can name a Chrome that exited,
  * and a dead port would otherwise stall the whole detection on a connect that
- * never resolves.
+ * never resolves. Goes through `CdpConnection` (CONTRIBUTING.md, code rule 2),
+ * whose connect is bounded by `timeoutMs`; the socket is closed either way.
  */
-function handshake(url: string, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-      resolve(ok);
-    };
-    const ws = new WebSocket(url);
-    const timer = setTimeout(() => done(false), timeoutMs);
-    ws.onopen = () => {
-      clearTimeout(timer);
-      done(true);
-    };
-    ws.onerror = () => {
-      clearTimeout(timer);
-      done(false);
-    };
-  });
+async function handshake(url: string, timeoutMs: number): Promise<boolean> {
+  const conn = new CdpConnection(url, { timeoutMs });
+  try {
+    await conn.connect();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    conn.close();
+  }
 }
 
 /** Keyed by endpoint base: named endpoints are separate browsers, each with its own transport. */
@@ -193,6 +183,15 @@ export function detectEndpoint(): Promise<EndpointInfo> {
   );
   cached.set(base, detection);
   return detection;
+}
+
+/**
+ * Forget the current endpoint's detection, so the next `detectEndpoint` looks
+ * again. For a browser socket that stopped answering: its URL carries a uuid
+ * Chrome mints on every start, so after a restart the cached one is stale.
+ */
+export function forgetEndpoint(): void {
+  cached.delete(currentEndpoint().base);
 }
 
 /** Test seam: drop the per-process detection cache. */
