@@ -67,6 +67,14 @@ const chrome = spawn(
   { stdio: ["ignore", "ignore", "pipe"] },
 );
 
+// Setup below can still fail (no endpoint in 30s, Chrome exits, the proxy
+// cannot bind) before the try/catch that calls cleanup() exists.
+const abortSetup = async (error: unknown): Promise<never> => {
+  chrome.kill("SIGKILL");
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  console.error(`\nFAILED during setup: ${(error as Error).message}`);
+  process.exit(1);
+};
 /** Chrome prints `DevTools listening on ws://...` to stderr once it is up. */
 const upstreamWs = await new Promise<string>((resolve, reject) => {
   let buf = "";
@@ -80,11 +88,11 @@ const upstreamWs = await new Promise<string>((resolve, reject) => {
     }
   });
   chrome.on("exit", (code) => reject(new Error(`Chrome exited (${code}) before reporting an endpoint`)));
-});
+}).catch(abortSetup);
 const upstreamBase = `http://${new URL(upstreamWs).host}`;
 console.log(`disposable Chrome: ${upstreamBase}  (profile ${profile})`);
 
-const proxy = await startBrowserWsOnlyProxy(upstreamBase);
+const proxy = await startBrowserWsOnlyProxy(upstreamBase).catch(abortSetup);
 console.log(`browser-ws-only endpoint: ${proxy.base}`);
 
 async function cleanup(): Promise<void> {

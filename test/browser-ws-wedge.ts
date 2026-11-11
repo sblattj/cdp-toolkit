@@ -74,6 +74,15 @@ const chrome = spawn(
   ],
   { stdio: ["ignore", "ignore", "pipe"] },
 );
+// Setup below can still fail (no endpoint in 30s, Chrome exits, the proxy
+// cannot bind) before the main try/finally exists: tear down what is up.
+const abortSetup = async (error: unknown): Promise<never> => {
+  chrome.kill("SIGKILL");
+  blackhole.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  console.error(`setup failed: ${(error as Error).message}`);
+  process.exit(1);
+};
 const upstreamWs = await new Promise<string>((resolve, reject) => {
   let buf = "";
   const t = setTimeout(() => reject(new Error("Chrome did not report an endpoint in 30s")), 30_000);
@@ -86,8 +95,8 @@ const upstreamWs = await new Promise<string>((resolve, reject) => {
     }
   });
   chrome.on("exit", (code) => reject(new Error(`Chrome exited (${code}) before reporting an endpoint`)));
-});
-const proxy = await startBrowserWsOnlyProxy(`http://${new URL(upstreamWs).host}`);
+}).catch(abortSetup);
+const proxy = await startBrowserWsOnlyProxy(`http://${new URL(upstreamWs).host}`).catch(abortSetup);
 
 process.env.CDP_BASE = proxy.base;
 process.env.CDP_BROWSER_WS = proxy.browserWsUrl;
