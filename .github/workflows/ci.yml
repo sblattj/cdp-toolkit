@@ -64,6 +64,28 @@ jobs:
         env:
           FIREFOX_BIN: ${{ steps.setup-firefox.outputs.firefox-path }}
 
+  browser-ws:
+    name: browser-ws transport smoke + wedge (headless Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: google-chrome --version
+      # Both scripts spawn their own disposable headless Chrome on an ephemeral
+      # port and front it with test/browser-ws-only-proxy.ts, which removes what
+      # a runtime-toggled Chrome removes (/json/* -> 404, page sockets -> 403).
+      # No shared or flaky browser is involved, so like the Firefox job this one
+      # gates: a failure is a regression in the browser-ws transport.
+      - run: bun run browser-ws:smoke
+        env:
+          CHROME_BIN: google-chrome
+      - run: bun run browser-ws:wedge
+        env:
+          CHROME_BIN: google-chrome
+
   runtime:
     name: MCP server under bun + node
     runs-on: ubuntu-latest

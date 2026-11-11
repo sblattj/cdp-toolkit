@@ -42,7 +42,10 @@ function chromeBinary(): string {
 async function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; result?: T; error?: Error }> {
   const t0 = performance.now();
   try {
-    return { ms: performance.now() - t0, result: await fn() };
+    // Await BEFORE reading the clock: in `{ ms: now() - t0, result: await fn() }`
+    // the `ms` property is evaluated first, so every success read about 0ms.
+    const result = await fn();
+    return { ms: performance.now() - t0, result };
   } catch (error) {
     return { ms: performance.now() - t0, error: error as Error };
   }

@@ -34,9 +34,10 @@ function fail(msg: string): never {
 /** Run `label` under the 60s tool budget, printing what it actually took. */
 async function phase<T>(label: string, fn: () => Promise<T>): Promise<T> {
   const t0 = Date.now();
-  const timer = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`exceeded ${TOOL_TIMEOUT_MS}ms tool budget`)), TOOL_TIMEOUT_MS),
-  );
+  let budget: ReturnType<typeof setTimeout> | undefined;
+  const timer = new Promise<never>((_, reject) => {
+    budget = setTimeout(() => reject(new Error(`exceeded ${TOOL_TIMEOUT_MS}ms tool budget`)), TOOL_TIMEOUT_MS);
+  });
   try {
     const out = await Promise.race([fn(), timer]);
     console.log(`  ok   ${label} — ${((Date.now() - t0) / 1000).toFixed(2)}s`);
@@ -44,6 +45,10 @@ async function phase<T>(label: string, fn: () => Promise<T>): Promise<T> {
   } catch (e) {
     console.log(`  FAIL ${label} — ${((Date.now() - t0) / 1000).toFixed(2)}s: ${(e as Error).message}`);
     throw e;
+  } finally {
+    // The race has settled either way; a pending 60s budget timer would keep
+    // the event loop alive after the last phase.
+    clearTimeout(budget);
   }
 }
 
