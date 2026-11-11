@@ -44,9 +44,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-
-/** Base HTTP origin of the DevTools endpoint. Override with CDP_BASE. */
-export const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
+import { currentEndpoint, isDefaultEndpoint } from "../endpoints.ts";
 
 /**
  * Which transport this endpoint serves.
@@ -70,12 +68,12 @@ export interface EndpointInfo {
  * candidate to be handshaked, never a fact; `detectEndpoint` treats a failed
  * connect as "not this profile" and moves on.
  */
-async function browserWsFromPortFile(dir: string): Promise<string | undefined> {
+async function browserWsFromPortFile(dir: string, base: string): Promise<string | undefined> {
   const raw = await readFile(join(dir, "DevToolsActivePort"), "utf8").catch(() => undefined);
   if (!raw) return undefined;
   const [port, path] = raw.split("\n");
   if (!port?.trim() || !path?.trim()) return undefined;
-  const host = new URL(BASE).hostname;
+  const host = new URL(base).hostname;
   return `ws://${host}:${port.trim()}${path.trim()}`;
 }
 
@@ -94,9 +92,9 @@ async function browserWsFromPortFile(dir: string): Promise<string | undefined> {
  * So the profile is opt-in: `CDP_USER_DATA_DIR` names it, or nothing is tried.
  * Pointing this toolkit at a browser stays a decision the user makes.
  */
-async function discoverBrowserWs(): Promise<string | undefined> {
+async function discoverBrowserWs(base: string): Promise<string | undefined> {
   const dir = process.env.CDP_USER_DATA_DIR;
-  return dir ? browserWsFromPortFile(dir) : undefined;
+  return dir ? browserWsFromPortFile(dir, base) : undefined;
 }
 
 /**
@@ -124,7 +122,8 @@ function handshake(url: string, timeoutMs: number): Promise<boolean> {
   });
 }
 
-let cached: Promise<EndpointInfo> | undefined;
+/** Keyed by endpoint base: named endpoints are separate browsers, each with its own transport. */
+const cached = new Map<string, Promise<EndpointInfo>>();
 
 /**
  * Locate the browser socket for an endpoint that serves no `/json`.
@@ -133,44 +132,55 @@ let cached: Promise<EndpointInfo> | undefined;
  * against a Chrome started with `--remote-debugging-port`. `CDP_BROWSER_WS`
  * short-circuits the profile lookup, for an endpoint the port file cannot name
  * (a container, a forwarded port, a profile outside the defaults).
+ *
+ * Per endpoint: the base comes from currentEndpoint() on each call. CDP_BROWSER_WS and
+ * CDP_USER_DATA_DIR each name ONE browser, so they apply to the default endpoint only;
+ * a named endpoint is detected from its own `/json/version`.
  */
 export function detectEndpoint(): Promise<EndpointInfo> {
   // Only a resolved detection is worth keeping. A failure here is usually
   // transient — Chrome still starting, a port file mid-rewrite — and caching
   // the rejection would make the first unlucky call poison every later one.
-  return (cached ??= (async (): Promise<EndpointInfo> => {
-    const forced = process.env.CDP_BROWSER_WS;
+  const endpoint = currentEndpoint();
+  const base = endpoint.base;
+  const isDefault = isDefaultEndpoint(endpoint);
+  const hit = cached.get(base);
+  if (hit) return hit;
+  const detection = (async (): Promise<EndpointInfo> => {
+    const forced = isDefault ? process.env.CDP_BROWSER_WS : undefined;
     if (forced) return { transport: "browser-ws", browserWsUrl: forced };
 
-    const discovered = await discoverBrowserWs();
+    const discovered = isDefault ? await discoverBrowserWs(base) : undefined;
     if (discovered && (await handshake(discovered, 5_000))) {
       return { transport: "browser-ws", browserWsUrl: discovered };
     }
 
     // Bounded for the same reason the handshake above is: a host that accepts
     // the connection and never answers would otherwise stall detection forever.
-    const version = await fetch(`${BASE}/json/version`, { signal: AbortSignal.timeout(5_000) })
+    const version = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(5_000) })
       .then((r) => (r.ok ? (r.json() as Promise<{ webSocketDebuggerUrl?: string }>) : undefined))
       .catch(() => undefined);
     if (version?.webSocketDebuggerUrl) {
       return { transport: "http", browserWsUrl: version.webSocketDebuggerUrl };
     }
 
-    const dir = process.env.CDP_USER_DATA_DIR;
+    const dir = isDefault ? process.env.CDP_USER_DATA_DIR : undefined;
     throw new Error(
-      `no DevTools endpoint at ${BASE}: GET /json/version did not answer and ` +
+      `no DevTools endpoint at ${base}: GET /json/version did not answer and ` +
         (dir
           ? `no live browser socket was named by ${dir}/DevToolsActivePort. `
           : `no profile was searched — CDP_USER_DATA_DIR is unset, and no profile is ever scanned unless you name one. `) +
         `Set CDP_BROWSER_WS to the ws://.../devtools/browser/<uuid> URL, or CDP_USER_DATA_DIR to the profile in use.`,
     );
   })().catch((error: unknown) => {
-    cached = undefined;
+    cached.delete(base);
     throw error;
-  }));
+  });
+  cached.set(base, detection);
+  return detection;
 }
 
 /** Test seam: drop the per-process detection cache. */
 export function resetEndpointCache(): void {
-  cached = undefined;
+  cached.clear();
 }
