@@ -270,11 +270,12 @@ try {
   );
   await filePage.release();
 
-  // --- 7c. the two Chrome-only P3 tools are ABSENT from this backend, not present-and-throwing ---
+  // --- 7c. the two P3 browser-scoped tools are DECLARED on this backend (Firefox 160+; see
+  //         src/bidi-browser-tools.ts and test/bidi-downloads-permissions-ff160.test.ts) ---
   const p3Caps = { downloads: driver.capabilities.has("browser.downloads"), permissions: driver.capabilities.has("browser.permissions") };
   record(
-    "wait_for_download / grant_permissions capabilities are absent on the Firefox backend (ADR-001)",
-    p3Caps.downloads === false && p3Caps.permissions === false,
+    "wait_for_download / grant_permissions capabilities are declared on the Firefox backend (Firefox 160+)",
+    p3Caps.downloads === true && p3Caps.permissions === true,
     `browser.downloads=${p3Caps.downloads} browser.permissions=${p3Caps.permissions}`,
   );
 

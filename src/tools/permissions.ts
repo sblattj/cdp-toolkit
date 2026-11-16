@@ -3,14 +3,14 @@
  * that asks for geolocation / notifications / clipboard gets a decision instead of a modal an
  * agent cannot click (1.8.0 Track P3).
  *
- * WHY THIS IS CHROME-ONLY (capability "browser.permissions"), NOT a PageDriver method
- * ==================================================================================
+ * WHY THIS IS RAW CDP (capability "browser.permissions"), NOT a PageDriver method
+ * ==============================================================================
  * Browser.grantPermissions and Browser.resetPermissions are browser-endpoint commands keyed by
  * ORIGIN, not by tab: a grant made "for" one tab applies to every tab on that origin, including
  * ones opened later. There is no page-scoped concept to put on the Driver interface, so this stays
- * a raw-CDP module like dispatch-mouse.ts. WebDriver BiDi's permission handling lives in an
- * optional module this driver does not negotiate, so under Firefox the tool is absent from
- * tools/list per ADR-001 rather than present and throwing.
+ * a raw-CDP module like dispatch-mouse.ts. This is the CHROME implementation; the Firefox 160+ one
+ * (BiDi permissions.setPermission, with a Chrome-name -> W3C-descriptor map and its asymmetries
+ * documented) is src/bidi-browser-tools.ts, reusing this file's validator and originOf.
  *
  * THE STANDING-CONNECTION REQUIREMENT (measured, not assumed)
  * ----------------------------------------------------------

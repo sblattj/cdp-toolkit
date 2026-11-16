@@ -152,8 +152,8 @@ export type Capability =
   | "input.modifierClick" // click with Alt/Control/Meta/Shift held; Chrome, and Firefox 160+ (BiDi key source ticked with the pointer)
   | "input.html5Drag" // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
   | "emulate.focus" // fake page focus without moving the OS window (focus_emulation / click_focus_gated); Chrome only — BiDi's emulation module has no focus primitive
-  | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
-  | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome only
+  | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome, Firefox 160+
+  | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome, Firefox 160+
   | "worker.targets" // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
   | "frame.targets"; // address an out-of-process (cross-origin) iframe as a target ("frame:<substr>"); Chrome only — same-site iframes are not targets at all
 

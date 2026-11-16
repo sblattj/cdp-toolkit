@@ -779,7 +779,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "grant_permissions",
-    "description": "Grant or reset browser permissions; permissions are origin-scoped and Chrome-only.",
+    "description": "Grant or reset browser permissions; permissions are origin-scoped (Chrome, Firefox 160+).",
     "inputSchema": {
       "type": "object",
       "properties": {

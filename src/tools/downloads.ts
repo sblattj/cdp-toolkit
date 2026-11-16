@@ -2,16 +2,15 @@
  * downloads.ts: `wait_for_download` — block until a file download finishes, then hand back a real
  * path on disk with the page's own filename (1.8.0 Track P3).
  *
- * WHY THIS IS CHROME-ONLY (capability "browser.downloads"), NOT a PageDriver method
- * ================================================================================
+ * WHY THIS IS RAW CDP (capability "browser.downloads"), NOT a PageDriver method
+ * ============================================================================
  * A download is browser-scoped, not page-scoped: Browser.setDownloadBehavior, Browser.downloadWillBegin
  * and Browser.downloadProgress all live on the CDP browser endpoint, and the download a caller
  * cares about may be started by a click in one tab and finish while another is focused. There is no
  * page handle to hang it off, so it stays out of the Driver interface entirely, exactly like
- * dispatch-mouse.ts and screencast.ts. WebDriver BiDi has browsingContext.downloadWillBegin and
- * downloadEnd events but NO command to redirect a download to a directory of our choosing, so
- * Firefox cannot deliver the "here is the file" half of this tool at all: per ADR-001 it is absent
- * from tools/list under --browser firefox rather than present and throwing.
+ * dispatch-mouse.ts and screencast.ts. This is the CHROME implementation. Firefox 160 added
+ * BiDi's browser.setDownloadBehavior, so the Firefox backend has its own implementation in
+ * src/bidi-browser-tools.ts, reusing this file's validator, safeFilename and nextFreeName.
  *
  * THE ORDERING RULE, and why it is a rule rather than a wart
  * ---------------------------------------------------------

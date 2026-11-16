@@ -95,8 +95,8 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "dispatch_mouse",
   "focus_emulation", // Emulation.setFocusEmulationEnabled
   "click_focus_gated",
-  "wait_for_download", // borderline: Browser.setDownloadBehavior changes browser state
-  "grant_permissions", // Browser.grantPermissions
+  "wait_for_download", // borderline: Browser.setDownloadBehavior / BiDi browser.setDownloadBehavior changes browser state
+  "grant_permissions", // Browser.grantPermissions / BiDi permissions.setPermission
   // leases: claim installs an activity beacon in the page and writes a lease; release can close a tab
   "claim_page",
   "release_page",
