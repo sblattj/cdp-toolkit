@@ -30,7 +30,7 @@ import {
   drag, resolveDragTo, resolveDragDestination, resolveDragSteps, resolveDragMode,
 } from "../src/shared-tools.ts";
 import { createCdpDriver, inputModifierBits } from "../src/cdp/driver.ts";
-import { createFirefoxDriver } from "../src/bidi/driver.ts";
+import { createFirefoxDriver, BIDI_CAPABILITY_MIN_FIREFOX } from "../src/bidi/driver.ts";
 import { modifierBits, validateDispatchMouseArgs, dispatchMouse, type DispatchMouseArgs } from "../src/tools/dispatch-mouse.ts";
 import { toolAvailability } from "../src/capabilities.ts";
 import { MANIFEST } from "../src/manifest.ts";
@@ -218,13 +218,16 @@ describe("shared-tools click() wiring", () => {
 /* --------------------------------- capability gating --------------------------------- */
 
 describe("capability gating (ADR-001: absent from tools/list, never present-and-throwing)", () => {
-  test("dispatch_mouse is chrome-only", () => {
-    const chrome = toolAvailability("chrome");
-    expect(chrome.available).toContain("dispatch_mouse");
+  test("dispatch_mouse is on both backends (Firefox declares input.raw, version-gated to 160+)", () => {
+    expect(toolAvailability("chrome").available).toContain("dispatch_mouse");
     const firefox = toolAvailability("firefox");
-    expect(firefox.available).not.toContain("dispatch_mouse");
-    const gap = firefox.unavailable.find((u) => u.name === "dispatch_mouse");
-    expect(gap?.missing).toEqual(["input.raw"]);
+    expect(firefox.available).toContain("dispatch_mouse");
+    expect(firefox.unavailable.find((u) => u.name === "dispatch_mouse")).toBeUndefined();
+    expect(BIDI_CAPABILITY_MIN_FIREFOX["input.raw"]).toBe(160);
+    expect(BIDI_CAPABILITY_MIN_FIREFOX["input.modifierClick"]).toBe(160);
+  });
+  test("input.html5Drag stays undeclared on Firefox (drag sessions never complete under BiDi on 160.0)", () => {
+    expect(createFirefoxDriver(0).capabilities.has("input.html5Drag")).toBe(false);
   });
   test("scroll is universal (both backends)", () => {
     expect(toolAvailability("chrome").available).toContain("scroll");

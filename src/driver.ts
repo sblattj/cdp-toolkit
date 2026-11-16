@@ -148,7 +148,8 @@ export type Capability =
   | "input.insertTextAtomic" // atomic value commit, not synthesized keystrokes
   | "locate.text" // find a node by visible text substring
   | "locate.xpath" // find a node by xpath
-  | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome only
+  | "input.raw" // raw single mouse-event dispatch (dispatch_mouse's move/down/up primitive); Chrome, and Firefox 160+ (BiDi)
+  | "input.modifierClick" // click with Alt/Control/Meta/Shift held; Chrome, and Firefox 160+ (BiDi key source ticked with the pointer)
   | "input.html5Drag" // real HTML5 drag events (drag's mode:"html5"); Chrome only, see PageDriver.drag
   | "emulate.focus" // fake page focus without moving the OS window (focus_emulation / click_focus_gated); Chrome only — BiDi's emulation module has no focus primitive
   | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome only
@@ -262,12 +263,23 @@ export interface NavigateResult {
   waitedFor: "load" | "domcontentloaded" | "committed" | "timeout";
 }
 
+/** One raw mouse event for PageDriver.dispatchMouse. `modifiers` are held for this one event only. */
+export interface RawMouseEvent {
+  action: "move" | "down" | "up";
+  x: number;
+  y: number;
+  button?: "left" | "right" | "middle";
+  clickCount?: number;
+  modifiers?: readonly string[];
+}
+
 export interface MouseButtonOptions {
   button?: "left" | "right" | "middle";
   clickCount?: number;
   /** "Alt" | "Control" | "Meta" | "Shift", held for the press/release. CDP bits: Alt=1,
-   *  Control=2, Meta=4, Shift=8 (cdp/driver.ts's inputModifierBits). A non-empty array is
-   *  "unsupported" on the Firefox/BiDi driver today: see click()'s implementation note. */
+   *  Control=2, Meta=4, Shift=8 (cdp/driver.ts's inputModifierBits). On the Firefox/BiDi driver a
+   *  non-empty array rides a key input source ticked with the pointer (capability
+   *  "input.modifierClick", Firefox 160+; an older Firefox gets "unsupported"). */
   modifiers?: readonly string[];
 }
 
@@ -874,6 +886,11 @@ export interface PageDriver {
    *  "wheel" input source via input.performActions. Universal: both drivers must implement it
    *  (absent from driver.ts's REQUIRED_CAPABILITIES, unlike dispatch_mouse). */
   scroll(anchor: ElementLocator | { x: number; y: number } | undefined, opts: ScrollOptions): Promise<{ x: number; y: number }>;
+  /** One raw mouse event at viewport coordinates (dispatch_mouse), capability "input.raw". Only
+   *  the Firefox/BiDi driver implements it on this interface: Chrome's dispatch_mouse is the
+   *  standalone raw-CDP tool in tools/dispatch-mouse.ts, which has no PageDriver. Callers check the
+   *  method exists; the Firefox tool handler (bidi-tools.ts) does. */
+  dispatchMouse?(event: RawMouseEvent): Promise<void>;
   /** Overwrite an element's value. One atomic commit under
    *  "input.insertTextAtomic", else synthesized keystrokes, so per-key handlers
    *  on the page WILL fire. Callers must not depend on either behavior. */

@@ -1,7 +1,12 @@
 /**
  * dispatch-mouse.ts: `dispatch_mouse` over raw CDP, the toolkit's raw mouse-event primitive.
  *
- * WHY THIS IS CHROME-ONLY (capability "input.raw", declared in ../driver.ts /
+ * UPDATE: Firefox 160+ now serves dispatch_mouse too (bidi-tools.ts's dispatchMouse over
+ * PageDriver.dispatchMouse; same schema and validator from this file). The text below is why THIS
+ * module, the Chrome path, stays a raw-CDP tool; its "Chrome-only" and "absent under firefox"
+ * statements describe the state before Firefox 160 was measured.
+ *
+ * WHY THIS IS A STANDALONE CHROME MODULE (capability "input.raw", declared in ../driver.ts /
  * ../cdp/driver.ts), NOT a PageDriver method
  * ============================================================================
  * Every other interaction (click/hover/drag/scroll) is a Driver-neutral, multi-event SEQUENCE:

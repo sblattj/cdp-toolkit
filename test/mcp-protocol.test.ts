@@ -399,13 +399,13 @@ describe("call_tool", () => {
   }, 30_000);
 
   test("a tool the backend cannot run reports the same capability gap through call_tool", async () => {
-    // dispatch_mouse is Chrome-only; under firefox the availability check fires before any
+    // focus_emulation is Chrome-only (dispatch_mouse became Firefox 160+ too); under firefox the availability check fires before any
     // browser is launched, so this needs no Firefox either.
     const ff = await runServer(
       [
         modernRpc("server/discover"),
-        modernRpc("tools/call", { name: "call_tool", arguments: { name: "dispatch_mouse", arguments: {} } }),
-        modernRpc("tools/call", { name: "dispatch_mouse", arguments: {} }),
+        modernRpc("tools/call", { name: "call_tool", arguments: { name: "focus_emulation", arguments: {} } }),
+        modernRpc("tools/call", { name: "focus_emulation", arguments: {} }),
       ],
       { CDP_BROWSER: "firefox" },
     );
