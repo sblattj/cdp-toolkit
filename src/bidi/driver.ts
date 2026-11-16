@@ -139,6 +139,10 @@ function mapBidiError(e: unknown): DriverError {
     if (code === "no such frame") return driverError("no-such-target", e.message);
     if (code === "invalid session id") return driverError("disconnected", e.message);
     if (code === "unsupported operation") return driverError("unsupported", e.message);
+    // A Firefox older than the one a capability was verified on answers a newer BiDi command with
+    // "unknown command". That is a capability gap, not a protocol fault: surface it as "unsupported"
+    // and name the version that has it (BIDI_CAPABILITY_MIN_FIREFOX).
+    if (code === "unknown command") return driverError("unsupported", `${e.message} (this Firefox predates that WebDriver BiDi command; see BIDI_CAPABILITY_MIN_FIREFOX for the version each capability needs)`);
     if (!code && /timed out/i.test(e.message)) return driverError("timeout", e.message);
     if (!code && /(disposed|not open|connection closed)/i.test(e.message)) return driverError("disconnected", e.message);
     // NS_ERROR_FILE_ACCESS_DENIED from browsingContext.navigate means the browser process was
@@ -333,8 +337,39 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * no gap here to close. It stays undeclared because it would advertise a forced-tiling primitive
  * this backend has never needed, not because band-tiling behavior is untested.
  */
+/**
+ * Capabilities verified on a Firefox NEWER than 153, keyed to the first major version they were
+ * measured on. They are declared in BIDI_CAPABILITIES (tool listing is static: capabilities.ts reads
+ * this set without opening a socket), and each method that rides one calls requireFirefox(conn,
+ * token) before touching browser state, so an older Firefox gets an "unsupported" DriverError that
+ * names the version instead of a half-applied change or a raw "unknown command".
+ */
+export const BIDI_CAPABILITY_MIN_FIREFOX: Readonly<Partial<Record<Capability, number>>> = {
+};
+
+/** Firefox major version from session.new's capabilities.browserVersion (e.g. "160.0" -> 160).
+ *  undefined when the session reported none (a stub connection in tests): treated as new enough. */
+export function firefoxMajor(conn: { capabilities: unknown }): number | undefined {
+  const v = (conn.capabilities as { browserVersion?: unknown } | undefined)?.browserVersion;
+  if (typeof v !== "string") return undefined;
+  const major = Number.parseInt(v, 10);
+  return Number.isFinite(major) ? major : undefined;
+}
+
+/** Throw "unsupported" when `token` needs a newer Firefox than the one this session is on. */
+export function requireFirefox(conn: { capabilities: unknown }, token: Capability): void {
+  const min = BIDI_CAPABILITY_MIN_FIREFOX[token];
+  if (min === undefined) return;
+  const major = firefoxMajor(conn);
+  if (major !== undefined && major < min) {
+    const v = (conn.capabilities as { browserVersion?: string }).browserVersion;
+    throw driverError("unsupported", `${token} needs Firefox ${min} or newer; this Firefox is ${v}.`);
+  }
+}
+
 const BIDI_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "emulate.deviceMetrics", "screenshot.fullPage", "screenshot.element", "screenshot.renderSize", "network.intercept", "locate.xpath",
+  ...(Object.keys(BIDI_CAPABILITY_MIN_FIREFOX) as Capability[]),
 ]);
 
 /* --------------------------------- module-scope session memoization --------------------------------- */
