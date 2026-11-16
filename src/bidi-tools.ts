@@ -113,7 +113,7 @@ export async function listNetworkRequests(
 
 export async function getNetworkRequest(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; requestId?: string; url?: string } = {},
+  args: { target?: TargetSelector; requestId?: string; url?: string; includeBody?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   refuseWorkerSelector(driver, args.target);
   if (!args.requestId && !args.url) throw new BidiToolError("get_network_request requires requestId or url");
@@ -122,6 +122,17 @@ export async function getNetworkRequest(
     const found = args.requestId
       ? buf.find((r) => r.requestId === args.requestId || r.request === args.requestId)
       : buf.find((r) => typeof r.url === "string" && (r.url as string).includes(args.url as string));
+    if (args.includeBody) {
+      // Firefox >= 160 retains response bodies per SESSION (network.responseBodyPostHoc, armed when
+      // the session is created), so a body is readable for a request made BEFORE this call, by its
+      // request id, with no reload. A requestId therefore needs no buffer entry; a url alone does,
+      // because the url -> id map is the buffer (filled by list_network_requests{reload:true}).
+      // A driver without the capability answers getResponseBody with "unsupported", surfaced as is.
+      const id = args.requestId ?? (found ? String(found.requestId ?? found.request ?? "") : "");
+      if (!id) throw new BidiToolError("get_network_request includeBody on this backend needs a requestId, or a url already present in the buffer (run list_network_requests with reload first)");
+      const { body, base64Encoded } = await page.getResponseBody(id);
+      return { ...(found ?? { requestId: id }), body, bodyBase64Encoded: base64Encoded };
+    }
     if (!found) throw new BidiToolError("no matching network request in the current buffer; run list_network_requests first");
     return found;
   });

@@ -327,8 +327,13 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * screenshot.renderSize IS declared, and it is the one screenshot capability here that is not a
  * Chrome-only gap: it rides browsingContext.setViewport, the very command emulate.deviceMetrics
  * above already rides, applied for one capture and undone afterwards. Refusing it would be dishonest
- * in the opposite direction — claiming a missing primitive this driver demonstrably has. Contrast
- * screenshot.scale, absent because captureScreenshot genuinely has no scale parameter.
+ * in the opposite direction — claiming a missing primitive this driver demonstrably has.
+ * screenshot.scale (Firefox >= 160, BIDI_CAPABILITY_MIN_FIREFOX) is the same trick one step on:
+ * captureScreenshot itself still has no scale parameter, but setViewport({devicePixelRatio}) with NO
+ * viewport key multiplies the capture and leaves the layout viewport alone (measured on 160.0:
+ * a 1366x683 capture became 2732x1366 at ratio 2, innerWidth/innerHeight unchanged), so scale rides
+ * that for one capture and undoes it, like renderSize. network.responseBodyPostHoc (Firefox >= 160)
+ * is armed per SESSION, see armPostHocBodies.
  * screenshot.tile stays undeclared, but no longer for an unmeasured reason: live-fired against
  * Firefox 153.0.3, a 20,000px-tall page captured with take_screenshot --fullPage true came back
  * as a single 1366x20000 PNG at scale 1, verified complete top-to-bottom — no clip, no bands.
@@ -345,6 +350,8 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * names the version instead of a half-applied change or a raw "unknown command".
  */
 export const BIDI_CAPABILITY_MIN_FIREFOX: Readonly<Partial<Record<Capability, number>>> = {
+  "network.responseBodyPostHoc": 160,
+  "screenshot.scale": 160,
 };
 
 /** Firefox major version from session.new's capabilities.browserVersion (e.g. "160.0" -> 160).
@@ -364,6 +371,44 @@ export function requireFirefox(conn: { capabilities: unknown }, token: Capabilit
   if (major !== undefined && major < min) {
     const v = (conn.capabilities as { browserVersion?: string }).browserVersion;
     throw driverError("unsupported", `${token} needs Firefox ${min} or newer; this Firefox is ${v}.`);
+  }
+}
+
+/**
+ * Largest single response body the session-wide collector keeps, in bytes. maxEncodedDataSize is a
+ * PER-RESPONSE cap (measured on Firefox 160.0: cap 10 dropped a 20-byte body; cap 2,000,000 kept every
+ * 1 MB body). A larger body is simply not retained and reads back as "no such network data". The
+ * TOTAL is Firefox's own and not ours to set: with a 2 MB cap or a 20 MB cap alike, 260 sequential
+ * 1 MB responses left the oldest ~60 answering "unavailable network data" (evicted) and the newest
+ * ~160 readable, so the browser's own budget is on the order of 100-200 MB regardless of this number
+ * (no pref for it was found; attach mode gets the browser default). This number only bounds how
+ * much of that budget one response can take.
+ */
+const POST_HOC_BODY_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Arm the ONE session-wide response collector that makes network.responseBodyPostHoc true.
+ *
+ * WHY HERE. network.addDataCollector is scoped to the BiDi SESSION, and it only retains bodies of
+ * requests that start after it exists. This toolkit shares ONE real session per browser (the holder
+ * path of getConnection, which the mux daemon reaches through hostFirefoxMux), so the place that
+ * covers every client, every tab and every request since the session began is the moment that real
+ * session is created: no `contexts`/`userContexts`, so tabs opened later are covered too. A JOINED
+ * connection must NOT arm another: its commands are forwarded to the same upstream session and a
+ * second collector would double-retain every body. Best-effort and silent on a Firefox older than
+ * 160 (the capability is version-gated, see requireFirefox): a failed arm leaves reads answering
+ * "no such network data" rather than failing the connection the caller asked for.
+ */
+async function armPostHocBodies(conn: BidiConnection): Promise<void> {
+  try {
+    requireFirefox(conn, "network.responseBodyPostHoc");
+  } catch {
+    return;
+  }
+  try {
+    await conn.send("network.addDataCollector", { dataTypes: ["response"], maxEncodedDataSize: POST_HOC_BODY_MAX_BYTES });
+  } catch (e) {
+    console.error(`[cdp-toolkit] firefox response-body collector not armed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -753,6 +798,8 @@ async function getConnection(endpoint: string, timeoutMs?: number, attached = fa
     }
     connections.set(endpoint, conn);
     bumpEpoch(endpoint, conn);
+    // We own the real session: arm the post-hoc body collector on it (never on a joined one).
+    await armPostHocBodies(conn);
     // We are the HOLDER. Front our one real session with a loopback BiDi mux and advertise it in
     // the slot record, so any other process that wants this Firefox JOINS us instead of being told
     // the slot is busy. Strictly additive and strictly best-effort: any failure here leaves a
@@ -1280,13 +1327,28 @@ class BidiPageDriver implements PageDriver {
       opts?.renderWidth !== undefined && opts?.renderHeight !== undefined
         ? { width: opts.renderWidth, height: opts.renderHeight }
         : undefined;
-    if (!renderSize) return this.capture(opts);
+    const scale = opts?.scale !== undefined && opts.scale !== 1 ? opts.scale : undefined;
+    if (!renderSize && scale === undefined) return this.capture(opts);
+    if (scale !== undefined) requireFirefox(this.conn, "screenshot.scale");
     const previous = await readViewportRecord(this.browser.scheme, this.contextId);
+    // BiDi's devicePixelRatio REPLACES the page's ratio, where Chrome's clip.scale MULTIPLIES it, so
+    // a scale of 2 on a ratio-2 display must send 4 or it would be a silent no-op. The base is the
+    // ratio this toolkit last emulated, else the live window.devicePixelRatio.
+    let dprOverride: number | undefined;
+    if (scale !== undefined) {
+      const base = previous?.deviceScaleFactor ?? Number(await this.evaluate("window.devicePixelRatio").catch(() => 1));
+      dprOverride = (Number.isFinite(base) && base > 0 ? base : 1) * scale;
+    }
     try {
-      // devicePixelRatio is deliberately not sent: this changes the render SIZE, and omitting the
-      // field leaves whatever ratio an earlier emulate set in place (the CDP path inherits it the
-      // same way).
-      await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: { width: renderSize.width, height: renderSize.height } });
+      // With a render size only, devicePixelRatio is deliberately not sent: that changes the render
+      // SIZE, and omitting the field leaves whatever ratio an earlier emulate set in place (the CDP
+      // path inherits it the same way). With a scale, the ratio is sent and, when no render size is
+      // asked for, so is no viewport at all (measured: the layout viewport is left as it was).
+      await this.conn.send("browsingContext.setViewport", {
+        context: this.contextId,
+        ...(renderSize ? { viewport: { width: renderSize.width, height: renderSize.height } } : {}),
+        ...(dprOverride !== undefined ? { devicePixelRatio: dprOverride } : {}),
+      });
     } catch (e) {
       throw mapBidiError(e);
     }
@@ -1305,19 +1367,32 @@ class BidiPageDriver implements PageDriver {
         await this.conn.send("browsingContext.setViewport", {
           context: this.contextId,
           viewport: { width: previous.width, height: previous.height },
-          ...(previous.deviceScaleFactor != null ? { devicePixelRatio: previous.deviceScaleFactor } : {}),
+          // A scaled capture changed the ratio, so it is always put back: to the recorded one, or to
+          // null (the real display's) when no emulated ratio was ever recorded.
+          ...(previous.deviceScaleFactor != null ? { devicePixelRatio: previous.deviceScaleFactor } : scale !== undefined ? { devicePixelRatio: null } : {}),
         });
       } else {
-        await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: null });
+        await this.conn.send("browsingContext.setViewport", {
+          context: this.contextId,
+          ...(renderSize ? { viewport: null } : {}),
+          ...(scale !== undefined ? { devicePixelRatio: null } : {}),
+        });
       }
     } catch (e) {
       restoreError = e instanceof Error ? e.message : String(e);
     }
     if (!shot) {
       if (restoreError !== undefined && captureError instanceof Error) {
-        captureError.message = `${captureError.message} ${renderRestoreFailureNote(renderSize, restoreError)}`;
+        captureError.message = renderSize
+          ? `${captureError.message} ${renderRestoreFailureNote(renderSize, restoreError)}`
+          : `${captureError.message} (and restoring the device pixel ratio failed too, the tab may still be emulated at ratio ${dprOverride}: ${restoreError})`;
       }
       throw captureError;
+    }
+    if (!renderSize) {
+      // Scale-only capture: no render size to report, but a failed restore is still never swallowed.
+      if (restoreError !== undefined) throw driverError("page-error", `screenshot captured, but restoring the device pixel ratio failed (the tab may still be emulated at ratio ${dprOverride}): ${restoreError}`);
+      return shot;
     }
     const result: ScreenshotResult = { ...shot, renderSize, renderRestored: restoreError === undefined };
     if (restoreError !== undefined) result.renderRestoreError = restoreError;
@@ -1326,18 +1401,8 @@ class BidiPageDriver implements PageDriver {
   /** The capture itself, with no viewport emulation of its own. Split out so screenshot()'s restore
    *  wraps EVERY way this can fail, the throwing paths included. */
   private async capture(opts?: ScreenshotOptions): Promise<ScreenshotResult> {
-    // ADR-001 param-level gap, same shape as drag's mode:"html5" (see resolveDragMode in
-    // ../shared-tools.ts): browsingContext.captureScreenshot has NO scale parameter — its only
-    // knobs are origin, format and clip — so a scale asked for here is refused outright rather
-    // than silently captured at 1x, which would hand back an image the caller never asked for.
-    if (opts?.scale !== undefined && opts.scale !== 1) {
-      throw driverError(
-        "unsupported",
-        `screenshot scale ${opts.scale} is not supported by this backend (WebDriver BiDi's ` +
-          "browsingContext.captureScreenshot has no scale parameter). Call emulate with " +
-          `deviceScaleFactor:${opts.scale} first and capture at scale 1, or use --browser chrome.`,
-      );
-    }
+    // `scale` never reaches here: screenshot() applies it as a one-capture devicePixelRatio
+    // override (captureScreenshot itself still has no scale parameter) and puts it back.
     // Same ADR-001 param-level shape, but now a measured non-gap rather than an unmeasured one.
     // Live-fired against Firefox 153.0.3: a 20,000px-tall page captured with take_screenshot
     // --fullPage true came back as one 1366x20000 PNG at scale 1, verified complete top-to-bottom,
@@ -1594,11 +1659,29 @@ class BidiPageDriver implements PageDriver {
     };
   }
   async getResponseBody(requestId: string): Promise<{ body: string; base64Encoded: boolean }> {
-    if (!this.bodyCollector) throw driverError("unsupported", "getResponseBody: call startBodyCapture() first (network.responseBodyPostHoc is not supported)");
+    // On Firefox >= 160 the session-wide collector (armPostHocBodies) already holds the body, so no
+    // collector id is passed and startBodyCapture is optional. An older Firefox has no such collector:
+    // only a body armed through this page's own startBodyCapture is readable there.
+    let collector: string | undefined;
     try {
-      const { bytes } = await this.conn.send("network.getData", { dataType: "response", collector: this.bodyCollector, request: requestId });
+      requireFirefox(this.conn, "network.responseBodyPostHoc");
+    } catch (e) {
+      if (!this.bodyCollector) {
+        throw driverError("unsupported", `${(e as Error).message} Call startBodyCapture() before the request to read its body on this Firefox.`);
+      }
+      collector = this.bodyCollector;
+    }
+    try {
+      const { bytes } = await this.conn.send("network.getData", { dataType: "response", request: requestId, ...(collector ? { collector } : {}) });
       return bytes.type === "base64" ? { body: bytes.value, base64Encoded: true } : { body: bytes.value, base64Encoded: false };
     } catch (e) {
+      // Two distinct BiDi answers, measured on Firefox 160.0. Never surface either as an empty body.
+      if (e instanceof BidiError && e.code === "unavailable network data") {
+        throw driverError("page-error", `getResponseBody: the body of request ${requestId} was collected but has been evicted (Firefox keeps only a bounded recent window of response bodies, on the order of 100-200 MB). Re-issue the request, then read it sooner.`);
+      }
+      if (e instanceof BidiError && e.code === "no such network data") {
+        throw driverError("page-error", `getResponseBody: no body is held for request ${requestId}. Firefox cannot say which of these applies: the id is wrong, the request started before this Firefox session did, the response was larger than ${POST_HOC_BODY_MAX_BYTES} bytes (not retained), or it has no body.`);
+      }
       throw mapBidiError(e);
     }
   }
@@ -1935,10 +2018,14 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     this one. Neither insertText route synthesizes a <br> or a block break.
  *   - trace.performance / heap.snapshot / audit.lighthouse: not declared, Chrome-only domains with
  *     no BiDi equivalent at all.
- *   - screenshot.scale: not declared. browsingContext.captureScreenshot's parameters are context,
- *     origin, format and clip — no scale anywhere, and its clip types (box/element) carry no
- *     multiplier either. A `scale` other than 1 is a refusal in screenshot() (ADR-001 param-level
- *     gap, like drag's html5 mode), pointing at emulate's deviceScaleFactor as the real workaround.
+ *   - screenshot.scale: DECLARED for Firefox >= 160 (BIDI_CAPABILITY_MIN_FIREFOX; requireFirefox
+ *     gives an older one "unsupported"). browsingContext.captureScreenshot still has no scale
+ *     parameter, so screenshot() sets browsingContext.setViewport({devicePixelRatio: base * scale})
+ *     for the one capture (no viewport key: the layout viewport is untouched) and puts the ratio back
+ *     (the recorded emulate ratio, else null). base is the recorded or live window.devicePixelRatio
+ *     because BiDi's ratio replaces where Chrome's clip.scale multiplies. Measured on 160.0 headless:
+ *     1366x683 at scale 1, 2732x1366 at ratio 2, ratio back to 1 after setViewport({devicePixelRatio:
+ *     null}). Limit: a ratio emulated by ANOTHER process with no viewport record is restored to null.
  *   - screenshot.renderSize: DECLARED, and the one screenshot capability here that is not a gap. It
  *     rides browsingContext.setViewport — the same command emulate.deviceMetrics already uses —
  *     applied for one capture and restored to the tracked viewport (or `viewport:null`) afterwards.
@@ -1959,9 +2046,16 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
  *     emulation have no verified-working BiDi path in this environment, so emulate() never claims
  *     them and silently ignores the `mobile` flag (no BiDi mobile-viewport emulation exists either).
- *   - network.responseBodyPostHoc: not declared, deliberately, mirroring cdp/driver.ts's own call.
- *     network.addDataCollector must be armed before the request; there is no reading a body for a
- *     request that predates arming, so an honest capability set omits it exactly as Chrome's does.
+ *   - network.responseBodyPostHoc: DECLARED for Firefox >= 160. A collector is session-scoped and
+ *     retains only requests that start after it, so armPostHocBodies adds ONE (all contexts, 2 MB per
+ *     response) the moment the real session is created, in the holder path of getConnection (which
+ *     the mux daemon also runs); joined connections never arm. A body the page fetched before any
+ *     tool call is then readable by request id (getData, no collector id) as text or base64. Limits:
+ *     Firefox's own total budget evicts the oldest bodies ("unavailable network data" -> clear
+ *     DriverError), over-cap/unknown ids read "no such network data" (also a DriverError, never empty
+ *     text), and the request id must come from somewhere (a network.response event, or
+ *     get_network_request): a request that predates this process's own subscription has no id here.
+ *     Chrome still does not declare it (cdp/driver.ts).
  *   - NavigateResult.waitedFor never returns "timeout": BiDi's navigate/reload block server-side on
  *     `wait`, so an unreachable milestone is a thrown "timeout" DriverError, not CDP's soft return.
  *   - LifetimeModel's "MUST re-establish itself transparently if the transport dies" is NOT

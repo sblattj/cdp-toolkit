@@ -15,8 +15,8 @@
  * 2. THE RANGE IS REFUSED, NOT CLAMPED. scale is a browser-side multiplier on a real render, so a
  *    fat-fingered value must fail before a socket is opened (resolveScreenshotScale, mirroring
  *    resolveDragSteps/resolveDragMode).
- * 3. THE PARAM-LEVEL GAP (ADR-001). `scale` needs Capability "screenshot.scale", which only the
- *    Chrome driver declares. take_screenshot must stay AVAILABLE on both backends (every other
+ * 3. THE PARAM-LEVEL GAP (ADR-001). `scale` needs Capability "screenshot.scale", which Chrome
+ *    declares, and Firefox since 160 (see test/bidi-body-scale-ff160.test.ts). take_screenshot must stay AVAILABLE on both backends (every other
  *    argument works on Firefox) while a scale on Firefox is a clear refusal — never a silent 1x
  *    capture, which would return an image the caller never asked for and cannot tell apart from
  *    the one they wanted. Proved against the REAL bidi capability set, not a hand-written one.
@@ -105,6 +105,9 @@ describe("imagePixelSize", () => {
 
 const CHROME_CAPS = createCdpDriver().capabilities;
 const FIREFOX_CAPS = createFirefoxDriver(0).capabilities;
+/** A backend that lacks the capability (what the tool layer sees for any driver that does not declare
+ *  it). Firefox declares screenshot.scale since 160, so the refusal path is proved on this stand-in. */
+const NO_SCALE_CAPS: ReadonlySet<Capability> = new Set([...FIREFOX_CAPS].filter((c) => c !== "screenshot.scale"));
 
 describe("resolveScreenshotScale", () => {
   test("omitted is 1 on any backend, and costs no capability", () => {
@@ -112,7 +115,7 @@ describe("resolveScreenshotScale", () => {
     expect(resolveScreenshotScale(undefined, CHROME_CAPS)).toBe(1);
   });
   test("an explicit 1 is allowed even where scale is unsupported: it asks for nothing", () => {
-    expect(resolveScreenshotScale(1, FIREFOX_CAPS)).toBe(1);
+    expect(resolveScreenshotScale(1, NO_SCALE_CAPS)).toBe(1);
   });
   test("valid scales pass through untouched, fractions included", () => {
     expect(resolveScreenshotScale(2, CHROME_CAPS)).toBe(2);
@@ -125,8 +128,9 @@ describe("resolveScreenshotScale", () => {
     }
   });
   test("a scale other than 1 without the capability is refused, naming the workaround", () => {
-    expect(() => resolveScreenshotScale(2, FIREFOX_CAPS)).toThrow(/deviceScaleFactor:2/);
-    expect(() => resolveScreenshotScale(2, FIREFOX_CAPS)).toThrow(/not supported by this backend/);
+    expect(() => resolveScreenshotScale(2, NO_SCALE_CAPS)).toThrow(/deviceScaleFactor:2/);
+    expect(() => resolveScreenshotScale(2, NO_SCALE_CAPS)).toThrow(/not supported by this backend/);
+    expect(resolveScreenshotScale(2, FIREFOX_CAPS)).toBe(2);
   });
 });
 
@@ -206,8 +210,8 @@ describe("takeScreenshot() wiring", () => {
     expect((err as Error).constructor.name).toBe("SharedToolError");
   });
   test("a scale on a backend without screenshot.scale is refused before a socket is opened", async () => {
-    const { driver, shotCalls } = stubDriver(FIREFOX_CAPS, pngHeader(10, 10));
-    await expect(shoot(driver, { scale: 2 })).rejects.toThrow(/no scale parameter/);
+    const { driver, shotCalls } = stubDriver(NO_SCALE_CAPS, pngHeader(10, 10));
+    await expect(shoot(driver, { scale: 2 })).rejects.toThrow(/not supported by this backend/);
     expect(shotCalls).toEqual([]);
   });
   test("scale:1 is fine on that same backend: it asks the backend for nothing new", async () => {
@@ -507,9 +511,9 @@ describe("screenshot.renderSize capability (a PARAM gap, and NOT a Chrome-only o
 });
 
 describe("screenshot.scale capability (ADR-001: a PARAM gap, not a whole-tool one)", () => {
-  test("only Chrome declares it", () => {
+  test("Chrome declares it, and so does Firefox (version-gated per call to >= 160)", () => {
     expect(CHROME_CAPS.has("screenshot.scale")).toBe(true);
-    expect(FIREFOX_CAPS.has("screenshot.scale")).toBe(false);
+    expect(FIREFOX_CAPS.has("screenshot.scale")).toBe(true);
   });
   test("take_screenshot itself stays available on BOTH backends", () => {
     expect(toolAvailability("chrome").available).toContain("take_screenshot");
