@@ -16,7 +16,9 @@ import { isDriverError } from "../src/driver.ts";
 import { getNetworkRequest } from "../src/bidi-tools.ts";
 import { imagePixelSize, takeScreenshot } from "../src/shared-tools.ts";
 
-const HAVE_FIREFOX = existsSync("/Applications/Firefox.app/Contents/MacOS/firefox") || !!Bun.which("firefox");
+// Same gate as bidi-input-ff160: an explicit FIREFOX_BIN or the macOS app. A bare `firefox` on PATH (a CI
+// runner's stub) can take longer than the launch timeout to open its debug port on a cold start.
+const HAVE_FIREFOX = Boolean(process.env.FIREFOX_BIN) || existsSync("/Applications/Firefox.app/Contents/MacOS/firefox");
 const live = HAVE_FIREFOX ? describe : describe.skip;
 
 const BINARY = new Uint8Array([0, 1, 2, 255, 254, 128, 0, 200]);
