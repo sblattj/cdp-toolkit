@@ -744,6 +744,26 @@ export interface BidiCommands {
   "emulation.setUserAgentOverride": { params: EmulationSetUserAgentOverrideParameters; result: EmulationSetUserAgentOverrideResult };
   /** Firefox 153: not implemented. */
   "emulation.setViewportMetaOverride": { params: EmulationSetViewportMetaOverrideParameters; result: EmulationSetViewportMetaOverrideResult };
+
+  /** Measured on Firefox 160.0 (not present on 153): `allowed` + destinationFolder redirects every
+   *  download; `null` restores the browser's own behavior. See ../bidi-browser-tools.ts. */
+  "browser.setDownloadBehavior": { params: BrowserSetDownloadBehaviorParameters; result: BidiEmptyResult };
+  /** WebDriver BiDi permissions extension module, measured on Firefox 160.0. */
+  "permissions.setPermission": { params: PermissionsSetPermissionParameters; result: BidiEmptyResult };
+}
+
+// --- browser.setDownloadBehavior / permissions extension -----------------
+export type BrowserDownloadBehavior =
+  | { type: "allowed"; destinationFolder: string }
+  | { type: "denied" };
+export interface BrowserSetDownloadBehaviorParameters {
+  downloadBehavior: BrowserDownloadBehavior | null; userContexts?: BrowserUserContext[];
+}
+export interface PermissionsPermissionDescriptor { name: string; [extra: string]: unknown }
+export type PermissionsPermissionState = "granted" | "denied" | "prompt";
+export interface PermissionsSetPermissionParameters {
+  descriptor: PermissionsPermissionDescriptor; state: PermissionsPermissionState; origin: string;
+  embeddedOrigin?: string; userContext?: string;
 }
 export type BidiMethod = keyof BidiCommands;
 

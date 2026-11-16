@@ -343,8 +343,19 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * this set without opening a socket), and each method that rides one calls requireFirefox(conn,
  * token) before touching browser state, so an older Firefox gets an "unsupported" DriverError that
  * names the version instead of a half-applied change or a raw "unknown command".
+ *
+ * browser.downloads (160): browser.setDownloadBehavior {type:"allowed", destinationFolder} plus the
+ * browsingContext.downloadWillBegin/downloadEnd events, measured on headless Firefox 160.0 — the
+ * file landed in the folder, downloadEnd carried status "complete" and its filepath, and
+ * `downloadBehavior: null` put a later download back in the profile's own download dir. Drives
+ * wait_for_download through ../bidi-browser-tools.ts.
+ * browser.permissions (160): permissions.setPermission {descriptor, state, origin}, measured on
+ * Firefox 160.0 — navigator.permissions.query followed granted/denied/prompt. Drives
+ * grant_permissions through ../bidi-browser-tools.ts, which also documents the Chrome asymmetries.
  */
 export const BIDI_CAPABILITY_MIN_FIREFOX: Readonly<Partial<Record<Capability, number>>> = {
+  "browser.downloads": 160,
+  "browser.permissions": 160,
 };
 
 /** Firefox major version from session.new's capabilities.browserVersion (e.g. "160.0" -> 160).
@@ -416,6 +427,9 @@ const connecting = new Map<string, Promise<BidiConnection>>();
 const sessionEpochs = new Map<string, number>();
 // Reverse lookup so resolveContext (which only has a BidiConnection) can find its endpoint's epoch.
 const connEndpoints = new WeakMap<BidiConnection, string>();
+// Per-endpoint cleanup BidiBrowserDriver.dispose() runs on the live connection before session.end
+// (see setDisposeHook). Keyed by endpoint, then by the registering feature.
+const disposeHooks = new Map<string, Map<string, (conn: BidiConnection) => Promise<void>>>();
 
 function bumpEpoch(endpoint: string, conn: BidiConnection): void {
   sessionEpochs.set(endpoint, (sessionEpochs.get(endpoint) ?? 0) + 1);
@@ -1777,7 +1791,43 @@ class BidiBrowserDriver implements BrowserDriver {
     }
   }
 
+  /**
+   * Run `fn` against this endpoint's live BiDi connection, for BROWSER-scoped commands that have
+   * no page to hang off (browser.setDownloadBehavior, permissions.setPermission). Retains and
+   * releases a holder exactly like page() does. NOT a lease gate: callers resolve their target
+   * through page() first (resolveContext is the gate), then come here for the browser-wide work.
+   */
+  async withBrowserConnection<T>(fn: (conn: BidiConnection) => Promise<T>): Promise<T> {
+    const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
+    try {
+      return await fn(conn);
+    } finally {
+      conn.release();
+    }
+  }
+
+  /**
+   * Register cleanup that must run against the LIVE connection before dispose() ends the session —
+   * browser state this process changed that would otherwise outlive it (a download redirect left
+   * armed, a permission grant that Firefox persists in the profile). Keyed by `key` so re-registering
+   * replaces rather than stacks. Hooks are best-effort and run once.
+   */
+  setDisposeHook(key: string, hook: ((conn: BidiConnection) => Promise<void>) | undefined): void {
+    let hooks = disposeHooks.get(this.endpoint);
+    if (!hooks) { hooks = new Map(); disposeHooks.set(this.endpoint, hooks); }
+    if (hook) hooks.set(key, hook);
+    else hooks.delete(key);
+  }
+
   async dispose(): Promise<void> {
+    // Browser-state restores first, while the connection (and, for a mux holder, every joiner's
+    // shared session) is still alive.
+    const hooks = disposeHooks.get(this.endpoint);
+    disposeHooks.delete(this.endpoint);
+    const live = connections.get(this.endpoint);
+    if (hooks && live) {
+      for (const hook of hooks.values()) await hook(live).catch(() => undefined);
+    }
     for (const key of [...bidiBeaconScripts.keys()]) {
       if (key.startsWith(`${this.endpoint}:`)) bidiBeaconScripts.delete(key);
     }
@@ -1905,7 +1955,9 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  * (create, close, activate, getTree, navigate, reload, locateNodes, captureScreenshot, setViewport,
  * handleUserPrompt); script (evaluate, callFunction); input (performActions, setFiles); network
  * (addDataCollector, removeDataCollector, getData, addIntercept, removeIntercept, continueRequest,
- * provideResponse, failRequest, beforeRequestSent event); emulation (setUserAgentOverride). Events
+ * provideResponse, failRequest, beforeRequestSent event); emulation (setUserAgentOverride);
+ * browser (setDownloadBehavior) and permissions (setPermission), both via withBrowserConnection
+ * from ../bidi-browser-tools.ts. Events
  * subscribed via BidiConnection.on/waitFor: browsingContext.navigationCommitted/userPromptOpened/
  * contextDestroyed, log.entryAdded, network.beforeRequestSent/responseCompleted.
  *

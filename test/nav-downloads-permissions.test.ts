@@ -16,8 +16,8 @@
  * 3. ARGUMENT REFUSALS. Both new tools validate before touching the browser (and, for
  *    grant_permissions, before the standing connection is even opened), so the refusals are
  *    testable with no browser and no network.
- * 4. CAPABILITY GATING (ADR-001). Both new tools must be chrome-only, and navigate_page must stay
- *    universal even though it gained a param — asserted against the REAL
+ * 4. CAPABILITY GATING (ADR-001). Both new tools are declared on Chrome and on Firefox (160+), and
+ *    navigate_page must stay universal even though it gained a param — asserted against the REAL
  *    createFirefoxDriver(0).capabilities set, the way P2 pinned drag's html5 gap.
  */
 import { describe, expect, test } from "bun:test";
@@ -268,25 +268,24 @@ describe("capability gating (absent from tools/list, never present-and-throwing)
   const chrome = toolAvailability("chrome");
   const firefox = toolAvailability("firefox");
 
-  test("wait_for_download is chrome-only", () => {
+  // Firefox 160 gained browser.setDownloadBehavior and permissions.setPermission, so both tools are
+  // now listed on both backends (src/bidi-browser-tools.ts; an older Firefox is refused at call
+  // time by requireFirefox, see test/bidi-downloads-permissions-ff160.test.ts).
+  test("wait_for_download is listed on both backends", () => {
     expect(chrome.available).toContain("wait_for_download");
-    expect(firefox.available).not.toContain("wait_for_download");
-    expect(firefox.unavailable.find((u) => u.name === "wait_for_download")?.missing).toEqual(["browser.downloads"]);
+    expect(firefox.available).toContain("wait_for_download");
   });
-  test("grant_permissions is chrome-only", () => {
+  test("grant_permissions is listed on both backends", () => {
     expect(chrome.available).toContain("grant_permissions");
-    expect(firefox.available).not.toContain("grant_permissions");
-    expect(firefox.unavailable.find((u) => u.name === "grant_permissions")?.missing).toEqual(["browser.permissions"]);
+    expect(firefox.available).toContain("grant_permissions");
   });
 
   test("the REAL driver capability sets back those gates", () => {
-    // Asserted against the drivers themselves, not against toolAvailability's view of them, so a
-    // capability quietly added to BIDI_CAPABILITIES cannot make these tools appear under Firefox
-    // while this test still passes.
+    // Asserted against the drivers themselves, not against toolAvailability's view of them.
     expect(chromeCaps.has("browser.downloads")).toBe(true);
     expect(chromeCaps.has("browser.permissions")).toBe(true);
-    expect(firefoxCaps.has("browser.downloads")).toBe(false);
-    expect(firefoxCaps.has("browser.permissions")).toBe(false);
+    expect(firefoxCaps.has("browser.downloads")).toBe(true);
+    expect(firefoxCaps.has("browser.permissions")).toBe(true);
   });
 
   test("navigate_page stays UNIVERSAL even though it gained a param", () => {
