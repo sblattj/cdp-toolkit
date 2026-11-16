@@ -1207,8 +1207,9 @@ const MAX_SCREENSHOT_SCALE = 8;
 /**
  * take_screenshot's `scale`, plus the second backend gate in this file (resolveDragMode is the
  * first, and this follows its shape exactly). scale needs Capability "screenshot.scale", which
- * only the Chrome driver declares: Page.captureScreenshot takes a per-call clip.scale, while
- * WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter at all. Per ADR-001
+ * Chrome declares (Page.captureScreenshot takes a per-call clip.scale) and Firefox >= 160 declares
+ * too (a one-capture devicePixelRatio override; captureScreenshot itself has no scale parameter, and
+ * an older Firefox's driver refuses with "unsupported" from requireFirefox). Per ADR-001
  * this is a PARAM-level gap, not a whole-tool one — take_screenshot stays in tools/list on Firefox
  * because every other argument works there, and asking for a scale on Firefox is a clear
  * validation error, never a silent 1x capture that would return an image the caller never asked
@@ -1221,7 +1222,7 @@ export function resolveScreenshotScale(scale: number | undefined, capabilities: 
   }
   if (scale !== 1 && !capabilities.has("screenshot.scale")) {
     throw new SharedToolError(
-      "take_screenshot: 'scale' is not supported by this backend (WebDriver BiDi's browsingContext.captureScreenshot has no scale parameter). " +
+      "take_screenshot: 'scale' is not supported by this backend (no per-capture scale primitive). " +
         `Call emulate with deviceScaleFactor:${scale} first and capture at scale 1, or use --browser chrome for a per-capture scale.`,
     );
   }
