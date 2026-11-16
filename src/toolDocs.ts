@@ -164,7 +164,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "dispatch_mouse": {
-    "description": "Dispatches one raw mouse event (move/down/up) at absolute viewport coordinates — the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself for anything click/drag's fixed sequences can't reach: canvas drag-painting, marquee/rubber-band selection, custom hit-testing widgets. Chrome-only: absent from tools/list under the Firefox backend, never present-and-throwing.",
+    "description": "Dispatches one raw mouse event (move/down/up) at absolute viewport coordinates — the toolkit's lowest-level input primitive. Compose move/down/move/up calls yourself for anything click/drag's fixed sequences can't reach: canvas drag-painting, marquee/rubber-band selection, custom hit-testing widgets. Works on Chrome and on Firefox 160 or newer (WebDriver BiDi: a press held by 'down' in one call is released by 'up' in a later call); an older Firefox gets an unsupported error naming the version.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
@@ -172,7 +172,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "x": "Viewport x-coordinate. Required every call — CDP has no 'current pointer position' to default from.",
       "y": "Viewport y-coordinate. Required every call.",
       "button": "Mouse button: 'left' (default), 'right', or 'middle'.",
-      "clickCount": "Click-run length for a 'down' or 'up' event (2 = second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1.",
+      "clickCount": "Click-run length for a 'down' or 'up' event (2 = second half of a double-click, 3 = triple-click). Ignored for 'move'; defaults to 1. Ignored on Firefox (click counts follow native timing).",
       "modifiers": "Modifier keys held for this one event, e.g. ['Shift']."
     }
   },

@@ -10,6 +10,7 @@
 import type { BrowserDriver, InterceptRule, PageDriver, PageInfo } from "./driver.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "./tools/network_mock.ts";
 import type { TargetSelector } from "./types.ts";
+import { modifierBits, validateDispatchMouseArgs, type DispatchMouseArgs, type DispatchMouseResult } from "./tools/dispatch-mouse.ts";
 import { isWorkerSelector, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 
 class BidiToolError extends Error {}
@@ -21,6 +22,20 @@ async function withPage<T>(driver: BrowserDriver, target: TargetSelector | undef
   } finally {
     await page.release();
   }
+}
+
+/* ------------------------------ dispatch_mouse (Firefox 160+) ------------------------------ */
+// Same schema, validator and result shape as Chrome's tools/dispatch-mouse.ts (capability "input.raw");
+// the event itself rides PageDriver.dispatchMouse (bidi/driver.ts, one pointer action per call).
+// A page driver without that method (Chrome's, which never reaches this registry) is "unsupported".
+export async function dispatchMouse(driver: BrowserDriver, args: DispatchMouseArgs): Promise<DispatchMouseResult> {
+  validateDispatchMouseArgs(args);
+  modifierBits(args.modifiers); // validates the closed Alt/Control/Meta/Shift enum, same refusal text as Chrome
+  return withPage(driver, args.target, async (page) => {
+    if (!page.dispatchMouse) throw new BidiToolError("dispatch_mouse: this page driver has no raw mouse dispatch");
+    await page.dispatchMouse({ action: args.action, x: args.x, y: args.y, button: args.button, clickCount: args.clickCount, modifiers: args.modifiers });
+    return { dispatched: args.action, x: args.x, y: args.y };
+  });
 }
 
 /* ------------------------------ console + network (4) ------------------------------ */
@@ -202,7 +217,7 @@ export async function clearMocks(
 // `intercept(rules)` surface rather than re-implementing.
 void selectRule; void buildFulfillParams; void effectiveAction;
 
-/** The 7 Firefox-only tools: no Chrome equivalent is wired through this file (see header). */
+/** The 7 Firefox-only tools, plus dispatch_mouse (a Firefox handler beside Chrome's tools/dispatch-mouse.ts). */
 export const BIDI_ONLY_TOOLS = {
   list_console_messages: listConsoleMessages,
   get_console_message: getConsoleMessage,
@@ -211,4 +226,5 @@ export const BIDI_ONLY_TOOLS = {
   mock_request: mockRequest,
   list_mocks: listMocks,
   clear_mocks: clearMocks,
+  dispatch_mouse: dispatchMouse,
 } satisfies Record<string, (driver: BrowserDriver, args: never) => Promise<unknown>>;

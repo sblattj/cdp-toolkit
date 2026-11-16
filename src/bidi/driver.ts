@@ -39,7 +39,7 @@ import {
   type DragDestination, type DragOptions,
   type SetCookieParams,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel,
-  type MouseButtonOptions, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
+  type MouseButtonOptions, type RawMouseEvent, type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo,
   type ScreenshotOptions, type ScreenshotResult, type ScrollOptions, type SnapshotNode, type UidStability,
   type BandConsumer, type CaptureDelivery,
 } from "../driver.ts";
@@ -295,6 +295,47 @@ const KEY_VALUES: Record<string, string> = {
 };
 const MODIFIER_VALUES: Record<string, string> = { shift: "\uE008", control: "\uE009", ctrl: "\uE009", alt: "\uE00A", meta: "\uE03D", cmd: "\uE03D", command: "\uE03D" };
 const BUTTON_CODES: Record<"left" | "right" | "middle", number> = { left: 0, middle: 1, right: 2 };
+const RAW_MOUSE_SOURCE_ID = "cdp-raw-mouse";
+
+/** Modifier names (Alt/Control/Meta/Shift, any case, plus the aliases pressKey takes) to WebDriver
+ *  key values, in the order given. Unknown names are refused, never skipped. */
+function modifierKeyValues(mods: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const m of mods ?? []) {
+    const v = MODIFIER_VALUES[m.toLowerCase()];
+    if (v === undefined) throw driverError("page-error", `unknown modifier '${m}' (use Alt, Control, Meta, or Shift)`);
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * The input sources for pointer `actions` with `keys` held across them. With no keys it is the plain
+ * pointer source. With keys, a "key" source is TICK-ALIGNED with the pointer source in the same
+ * performActions call: [keyDown x k, pause x n, keyUp x k] against [pause x k, ...actions, pause x k],
+ * so every modifier is down before the first pointer action and released after the last. This is the
+ * shape measured on Firefox 160.0 (a lone key source or a misaligned one did not reach the click).
+ */
+function modifierChord(pointerId: string, actions: InputPointerSourceAction[], keys: readonly string[]): InputSourceActions[] {
+  const pointer: InputPointerSourceAction[] = actions;
+  if (keys.length === 0) return [{ type: "pointer", id: pointerId, actions: pointer }];
+  const k = keys.length;
+  const pause = (): { type: "pause" } => ({ type: "pause" });
+  const keyActions: InputKeySourceAction[] = [
+    ...keys.map((v): InputKeySourceAction => ({ type: "keyDown", value: v })),
+    ...pointer.map(pause),
+    ...[...keys].reverse().map((v): InputKeySourceAction => ({ type: "keyUp", value: v })),
+  ];
+  const pointerActions: InputPointerSourceAction[] = [
+    ...Array.from({ length: k }, pause),
+    ...pointer,
+    ...Array.from({ length: k }, pause),
+  ];
+  return [
+    { type: "key", id: "cdp-keyboard", actions: keyActions },
+    { type: "pointer", id: pointerId, actions: pointerActions },
+  ];
+}
 
 /** Same scroll-settle technique as cdp/driver.ts's ARM_SCROLL_SETTLE_WATCH / awaitScrollSettle,
  *  see that file's doc comment for the full rationale: a capture-phase 'scroll' listener on
@@ -343,8 +384,20 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * this set without opening a socket), and each method that rides one calls requireFirefox(conn,
  * token) before touching browser state, so an older Firefox gets an "unsupported" DriverError that
  * names the version instead of a half-applied change or a raw "unknown command".
+ *
+ * input.raw (dispatch_mouse) and input.modifierClick (click with modifiers), measured on headless
+ * Firefox 160.0: a pointerDown issued in one input.performActions call stays held for a pointerUp in
+ * a LATER call that reuses the same pointer source id (page saw mousedown, then mouseup+click), so
+ * one raw event per call works; and a modifier chord works when a "key" source (keyDown of the
+ * modifier, pauses, keyUp) is TICK-ALIGNED with the pointer source in ONE call (page saw
+ * shiftKey/ctrlKey/altKey/metaKey on the click). input.html5Drag is NOT declared: on 160.0 a
+ * pointer drag starts a real drag session (dragstart, dragenter, dragover reach the page) but the
+ * session never completes under BiDi input (no drop, no dragend, no mouseup, even after a pause or
+ * a second performActions call), so a drag cannot be delivered; see test/bidi-input-ff160.test.ts.
  */
 export const BIDI_CAPABILITY_MIN_FIREFOX: Readonly<Partial<Record<Capability, number>>> = {
+  "input.raw": 160,
+  "input.modifierClick": 160,
 };
 
 /** Firefox major version from session.new's capabilities.browserVersion (e.g. "160.0" -> 160).
@@ -1093,25 +1146,40 @@ class BidiPageDriver implements PageDriver {
     await this.performActions([{ type: "pointer", id: "cdp-mouse", actions: [{ type: "pointerMove", x, y, duration: 0 }] }]);
     return { x, y };
   }
-  // modifiers is new in 1.8.0 (Track P1). Chrome expresses it as a bitmask on the same
-  // mousePressed/mouseReleased events (cdp/driver.ts's inputModifierBits); WebDriver BiDi has no
-  // equivalent field on a pointerDown/pointerUp action; a modifier chord instead requires a SECOND
-  // "key" input source ticked in lockstep with the pointer source across the same performActions
-  // call, which the spec explicitly permits skipping ("throw a clear error when modifiers are
-  // passed on firefox" — see cdp-toolkit's 1.8.0 spec, Track P1 §3) and this driver was not
-  // verified against real Firefox for this pass, so it throws "unsupported" rather than guess at
-  // untested tick-synchronization semantics.
+  // modifiers (1.8.0 Track P1). Chrome expresses it as a bitmask on the same mousePressed/mouseReleased
+  // events (cdp/driver.ts's inputModifierBits); BiDi has no such field on pointerDown/pointerUp, so a
+  // chord is a SECOND "key" source ticked in lockstep with the pointer source inside ONE
+  // performActions call (modifierChord below). Measured on Firefox 160.0 (shift+click saw
+  // shiftKey=true); an older Firefox is refused by requireFirefox("input.modifierClick").
   async click(loc: ElementLocator, opts?: MouseButtonOptions): Promise<{ x: number; y: number }> {
-    if (opts?.modifiers && opts.modifiers.length > 0) {
-      throw driverError("unsupported", "click: 'modifiers' is not supported by the Firefox/BiDi driver; omit 'modifiers' or use --browser chrome for a modifier click.");
-    }
+    const hasModifiers = !!opts?.modifiers && opts.modifiers.length > 0;
+    if (hasModifiers) requireFirefox(this.conn, "input.modifierClick");
+    const keys = modifierKeyValues(opts?.modifiers);
     const ref = await resolveElementLocator(this.conn, this.contextId, loc);
     const { x, y } = await this.centerOf(ref);
     const button = BUTTON_CODES[opts?.button ?? "left"];
     const actions: InputPointerSourceAction[] = [{ type: "pointerMove", x, y, duration: 0 }];
     for (let i = 0; i < (opts?.clickCount ?? 1); i++) actions.push({ type: "pointerDown", button }, { type: "pointerUp", button });
-    await this.performActions([{ type: "pointer", id: "cdp-mouse", actions }]);
+    await this.performActions(modifierChord("cdp-mouse", actions, keys));
     return { x, y };
+  }
+  // dispatch_mouse on Firefox (capability "input.raw", 160+): ONE raw pointer event per call. BiDi's
+  // pointer source is a virtual device with session-lifetime state, so a "down" in one call stays held
+  // for an "up" in a later call as long as the source id is the same: RAW_MOUSE_SOURCE_ID is a constant
+  // for that reason (and distinct from click/drag's "cdp-mouse", which always finish their own press).
+  // The state lives in the shared BiDi session (bidi/mux.ts), not in this driver instance, so it
+  // survives the per-tool-call driver acquisition. Unlike CDP, BiDi has no coordinate-less event: every
+  // action is a pointerMove to (x,y) first, so a "down"/"up" also emits a mousemove if the pointer
+  // was elsewhere. clickCount is not a BiDi field (the browser derives click counts from timing), so
+  // it is ignored here.
+  async dispatchMouse(event: RawMouseEvent): Promise<void> {
+    requireFirefox(this.conn, "input.raw");
+    const keys = modifierKeyValues(event.modifiers);
+    const button = BUTTON_CODES[event.button ?? "left"];
+    const actions: InputPointerSourceAction[] = [{ type: "pointerMove", x: event.x, y: event.y, duration: 0 }];
+    if (event.action === "down") actions.push({ type: "pointerDown", button });
+    else if (event.action === "up") actions.push({ type: "pointerUp", button });
+    await this.performActions(modifierChord(RAW_MOUSE_SOURCE_ID, actions, keys));
   }
   // 1.8.0 Track P1: BiDi's "wheel" input source (a distinct source type from "pointer"/"key")
   // carries x/y/deltaX/deltaY directly on its one "scroll" action — no tick synchronization with

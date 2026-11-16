@@ -622,7 +622,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "dispatch_mouse",
-    "description": "Dispatch one raw mouse event at viewport coordinates; Chrome-only.",
+    "description": "Dispatch one raw mouse event at viewport coordinates; Firefox needs 160 or newer.",
     "inputSchema": {
       "type": "object",
       "properties": {
