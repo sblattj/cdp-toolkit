@@ -466,6 +466,10 @@ const POST_HOC_BODY_MAX_BYTES = 2 * 1024 * 1024;
  * "no such network data" rather than failing the connection the caller asked for.
  */
 async function armPostHocBodies(conn: BidiConnection): Promise<void> {
+  // Opt-out for an everyday Firefox where retaining response bodies is unwanted. With it off, a
+  // body is readable only after startBodyCapture, and an unarmed read is the "no such network
+  // data" DriverError, the same as on a Firefox older than 160.
+  if (process.env.CDP_FIREFOX_BODY_COLLECTOR === "off") return;
   try {
     requireFirefox(conn, "network.responseBodyPostHoc");
   } catch {
