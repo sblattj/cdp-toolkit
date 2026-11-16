@@ -590,7 +590,7 @@ export type LogEntry = LogGenericLogEntry | LogConsoleLogEntry | LogJavascriptLo
 // --- emulation module ----------------------------------------------------
 
 export type EmulationForcedColorsModeTheme = "light" | "dark";
-/** Firefox 153: not implemented. */
+/** Firefox 160: not implemented. */
 export interface EmulationSetForcedColorsModeThemeOverrideParameters {
   theme: EmulationForcedColorsModeTheme | null; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[];
 }
@@ -614,9 +614,8 @@ export interface EmulationSetLocaleOverrideParameters { locale: string | null; c
 export type EmulationSetLocaleOverrideResult = BidiEmptyResult;
 
 export interface EmulationMediaFeature { name: string; value: string }
-/** Firefox 153: not implemented. */
 export interface EmulationSetMediaFeaturesOverrideParameters {
-  features: EmulationMediaFeature[] | null; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[];
+  features: Record<string, string> | null; /* feature name -> value; null resets */ contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[];
 }
 export type EmulationSetMediaFeaturesOverrideResult = BidiEmptyResult;
 
@@ -649,7 +648,7 @@ export type EmulationSetUserAgentOverrideResult = BidiEmptyResult;
 export interface EmulationSetViewportMetaOverrideParameters { viewportMeta: true | null; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[] }
 export type EmulationSetViewportMetaOverrideResult = BidiEmptyResult;
 
-/** Firefox 153: not implemented. */
+/** Firefox 160: not implemented. */
 export interface EmulationSetScriptingEnabledParameters { enabled: false | null; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[] }
 export type EmulationSetScriptingEnabledResult = BidiEmptyResult;
 
@@ -662,7 +661,7 @@ export type EmulationSetScrollbarTypeOverrideResult = BidiEmptyResult;
 export interface EmulationSetTimezoneOverrideParameters { timezone: string | null; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[] }
 export type EmulationSetTimezoneOverrideResult = BidiEmptyResult;
 
-/** Firefox 153: not implemented. */
+/** Firefox 160: not implemented. */
 export interface EmulationSetTouchOverrideParameters {
   maxTouchPoints: BidiJsUint | null /* .ge 1 */; contexts?: BrowsingContextId[]; userContexts?: BrowserUserContext[];
 }
@@ -725,21 +724,20 @@ export interface BidiCommands {
   "storage.getCookies": { params: StorageGetCookiesParameters; result: StorageGetCookiesResult };
   "storage.setCookie": { params: StorageSetCookieParameters; result: StorageSetCookieResult };
 
-  /** Firefox 153: not implemented. */
+  /** Firefox 160: not implemented. */
   "emulation.setForcedColorsModeThemeOverride": { params: EmulationSetForcedColorsModeThemeOverrideParameters; result: EmulationSetForcedColorsModeThemeOverrideResult };
   "emulation.setGeolocationOverride": { params: EmulationSetGeolocationOverrideParameters; result: EmulationSetGeolocationOverrideResult };
   "emulation.setLocaleOverride": { params: EmulationSetLocaleOverrideParameters; result: EmulationSetLocaleOverrideResult };
-  /** Firefox 153: not implemented. */
   "emulation.setMediaFeaturesOverride": { params: EmulationSetMediaFeaturesOverrideParameters; result: EmulationSetMediaFeaturesOverrideResult };
   "emulation.setNetworkConditions": { params: EmulationSetNetworkConditionsParameters; result: EmulationSetNetworkConditionsResult };
   "emulation.setScreenOrientationOverride": { params: EmulationSetScreenOrientationOverrideParameters; result: EmulationSetScreenOrientationOverrideResult };
   "emulation.setScreenSettingsOverride": { params: EmulationSetScreenSettingsOverrideParameters; result: EmulationSetScreenSettingsOverrideResult };
-  /** Firefox 153: not implemented. */
+  /** Firefox 160: not implemented. */
   "emulation.setScriptingEnabled": { params: EmulationSetScriptingEnabledParameters; result: EmulationSetScriptingEnabledResult };
   /** Firefox 153: not implemented. */
   "emulation.setScrollbarTypeOverride": { params: EmulationSetScrollbarTypeOverrideParameters; result: EmulationSetScrollbarTypeOverrideResult };
   "emulation.setTimezoneOverride": { params: EmulationSetTimezoneOverrideParameters; result: EmulationSetTimezoneOverrideResult };
-  /** Firefox 153: not implemented. */
+  /** Firefox 160: not implemented. */
   "emulation.setTouchOverride": { params: EmulationSetTouchOverrideParameters; result: EmulationSetTouchOverrideResult };
   "emulation.setUserAgentOverride": { params: EmulationSetUserAgentOverrideParameters; result: EmulationSetUserAgentOverrideResult };
   /** Firefox 153: not implemented. */

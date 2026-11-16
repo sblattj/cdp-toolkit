@@ -307,8 +307,8 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
 /**
  * Firefox 153 capabilities. Only what was empirically verified is declared: emulate.deviceMetrics
  * (browsingContext.setViewport) and the userAgent path (universal, no capability token) both work.
- * emulate.mediaFeatures, emulate.cpuThrottling, emulate.networkConditions, trace.performance,
- * heap.snapshot, audit.lighthouse, input.insertTextAtomic and snapshot.accessibilityTree are all
+ * emulate.cpuThrottling, trace.performance (emulate.mediaFeatures and emulate.networkConditions were
+ * added later at Firefox 160, see BIDI_CAPABILITY_MIN_FIREFOX), heap.snapshot, audit.lighthouse, input.insertTextAtomic and snapshot.accessibilityTree are all
  * deliberately absent, several because Firefox 153 does not implement the underlying BiDi command
  * at all (see protocol.ts's "Firefox 153: not implemented" tags), the rest because this driver has
  * no accessibility-tree source or CPU-multiplier primitive to offer. locate.xpath rides
@@ -345,6 +345,8 @@ const AWAIT_SCROLL_SETTLE_SOURCE = "function(){return window.__cdpScrollSettle;}
  * names the version instead of a half-applied change or a raw "unknown command".
  */
 export const BIDI_CAPABILITY_MIN_FIREFOX: Readonly<Partial<Record<Capability, number>>> = {
+  "emulate.mediaFeatures": 160,
+  "emulate.networkConditions": 160,
 };
 
 /** Firefox major version from session.new's capabilities.browserVersion (e.g. "160.0" -> 160).
@@ -1369,9 +1371,10 @@ class BidiPageDriver implements PageDriver {
       throw mapBidiError(e);
     }
   }
-  // Only userAgent and width/height/deviceScaleFactor are applied: mediaFeatures, cpuThrottling
-  // and networkConditions are not in BIDI_CAPABILITIES (see its comment) and this method never
-  // claims them. `mobile` has no BiDi viewport-emulation equivalent and is silently ignored,
+  // Applied: userAgent, width/height/deviceScaleFactor, and (Firefox 160+, BIDI_CAPABILITY_MIN_FIREFOX)
+  // mediaFeatures and offline-only networkConditions. cpuThrottling is not in BIDI_CAPABILITIES and
+  // this method never claims it; a media TYPE and a throttled network are refused as "unsupported".
+  // `mobile` has no BiDi viewport-emulation equivalent and is silently ignored,
   // a real parity gap noted in the footer rather than smoothed over.
   async emulate(opts: EmulationOptions): Promise<{ applied: string[] }> {
     if (opts.clearOverrides) {
@@ -1391,11 +1394,29 @@ class BidiPageDriver implements PageDriver {
       // no "set-then-clear" workaround needed; left as it was.
       await this.conn.send("emulation.setUserAgentOverride", { userAgent: null, contexts: [this.contextId] }).catch(() => undefined);
       await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: null, devicePixelRatio: null }).catch(() => undefined);
+      // Best-effort like the two above: a Firefox older than 160 has neither command, and then
+      // there is nothing of ours to clear. The overrides are session-scoped (one shared BiDi
+      // session per browser, see mux.ts), so this clears what ANY driver instance on this browser set.
+      await this.conn.send("emulation.setMediaFeaturesOverride", { features: null, contexts: [this.contextId] }).catch(() => undefined);
+      await this.conn.send("emulation.setNetworkConditions", { networkConditions: null, contexts: [this.contextId] }).catch(() => undefined);
       // No override of ours left to put back: a render-size capture should restore to null.
       await clearViewportRecord(this.browser.scheme, this.contextId);
       return { applied: [] };
     }
     const applied: string[] = [];
+    // Refusals first, before ANY browser state changes, so a refused call never half-applies.
+    if (opts.media != null && opts.media !== "") {
+      throw driverError("unsupported", `emulate media "${opts.media}": WebDriver BiDi's emulation.setMediaFeaturesOverride takes media features (prefers-color-scheme, ...) but has no print/screen media-type override. Use mediaFeatures, or --browser chrome for media type emulation.`);
+    }
+    const net = opts.networkConditions;
+    if (net != null) {
+      const throttled = (net.latency ?? 0) > 0 || (net.downloadThroughput ?? -1) >= 0 || (net.uploadThroughput ?? -1) >= 0;
+      if (throttled) {
+        throw driverError("unsupported", "emulate networkConditions: Firefox only emulates offline (emulation.setNetworkConditions has the single type \"offline\"); latency and download/upload throughput throttling are not available. Pass only {offline:true|false}, or use --browser chrome.");
+      }
+      requireFirefox(this.conn, "emulate.networkConditions");
+    }
+    if (opts.mediaFeatures != null) requireFirefox(this.conn, "emulate.mediaFeatures");
     try {
       if (opts.width != null && opts.height != null) {
         await this.conn.send("browsingContext.setViewport", { context: this.contextId, viewport: { width: opts.width, height: opts.height }, ...(opts.deviceScaleFactor != null ? { devicePixelRatio: opts.deviceScaleFactor } : {}) });
@@ -1411,6 +1432,22 @@ class BidiPageDriver implements PageDriver {
       if (opts.userAgent != null) {
         await this.conn.send("emulation.setUserAgentOverride", { userAgent: opts.userAgent, contexts: [this.contextId] });
         applied.push("userAgent");
+      }
+      if (opts.mediaFeatures != null) {
+        // BiDi takes an OBJECT {name: value}; null resets (an empty list mirrors Chrome's "clear").
+        const features = Object.fromEntries(opts.mediaFeatures.map((f) => [f.name, f.value]));
+        await this.conn.send("emulation.setMediaFeaturesOverride", {
+          features: opts.mediaFeatures.length > 0 ? features : null,
+          contexts: [this.contextId],
+        });
+        applied.push("mediaFeatures");
+      }
+      if (net != null) {
+        await this.conn.send("emulation.setNetworkConditions", {
+          networkConditions: net.offline ? { type: "offline" } : null,
+          contexts: [this.contextId],
+        });
+        applied.push("networkConditions");
       }
     } catch (e) {
       throw mapBidiError(e);
@@ -1955,10 +1992,12 @@ export { BidiBrowserDriver, BidiPageDriver, resolveContext };
  *     tile:true) has nothing to do here. `tile:true` is still a refusal in screenshot() naming
  *     --browser chrome; the default (auto) still never bands on this backend — both unchanged, now
  *     for a documented reason instead of an untested one.
- *   - emulate.mediaFeatures / emulate.cpuThrottling / emulate.networkConditions: not declared.
- *     Firefox 153 does not implement setMediaFeaturesOverride; CPU throttling and network condition
- *     emulation have no verified-working BiDi path in this environment, so emulate() never claims
- *     them and silently ignores the `mobile` flag (no BiDi mobile-viewport emulation exists either).
+ *   - emulate.mediaFeatures / emulate.networkConditions: declared via BIDI_CAPABILITY_MIN_FIREFOX
+ *     at 160 (measured on 160.0: emulation.setMediaFeaturesOverride takes features as an OBJECT,
+ *     features:null resets; setNetworkConditions has only {type:"offline"}, null resets). A media
+ *     TYPE (print/screen) and any latency/throughput throttle are refused "unsupported", never
+ *     ignored. emulate.cpuThrottling: not declared; CPU throttling has no BiDi path, so emulate()
+ *     never claims it and silently ignores the `mobile` flag (no BiDi mobile-viewport emulation exists either).
  *   - network.responseBodyPostHoc: not declared, deliberately, mirroring cdp/driver.ts's own call.
  *     network.addDataCollector must be armed before the request; there is no reading a body for a
  *     request that predates arming, so an honest capability set omits it exactly as Chrome's does.
