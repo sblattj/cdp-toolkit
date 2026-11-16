@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-16
+
+### Added
+
+- **Firefox 160 parity.** Eight capabilities the BiDi backend lacked on Firefox 153 now work on Firefox 160 or newer, each measured against a real Firefox 160.0. They are version-gated (`BIDI_CAPABILITY_MIN_FIREFOX`, `src/bidi/driver.ts`): on an older Firefox the same call returns `unsupported` naming the version it needs. Under `--browser firefox`, 38 of the 48 tools are now available (was 35).
+  - `dispatch_mouse` (`input.raw`), with a press held across calls. `clickCount` is ignored on Firefox.
+  - `click` `modifiers` (new capability token `input.modifierClick`, also declared by Chrome). On macOS, Firefox turns Ctrl+click into a context-menu gesture with no `click`.
+  - `emulate` `mediaFeatures` and offline `networkConditions`. Latency/throughput throttling and a media type are refused `unsupported`, never ignored.
+  - `wait_for_download` (`browser.setDownloadBehavior`, re-armed per call) and `grant_permissions` (`permissions.setPermission`, with a W3C name mapping and restore-on-reset/dispose, because Firefox grants persist in the profile). New `src/bidi-browser-tools.ts`.
+  - `get_network_request` `includeBody` reads a body fetched before any capture call (`network.addDataCollector`, 2 MB per response, Firefox-managed total budget). Evicted or unknown bodies are clear errors. Chrome does not have this.
+  - `take_screenshot` `scale` via a one-capture `devicePixelRatio` change that is then restored.
+- `CDP_FIREFOX_BODY_COLLECTOR=off` skips the session-wide response-body collector.
+
+### Notes
+
+- Still unimplemented in Firefox 160: forced-colors emulation, disabling scripting, touch emulation, `locateNodes` by `innerText`, and HTML5 drag (a BiDi pointer drag never fires `drop` or `dragend`).
+
 ## [3.2.0] - 2026-11-10
 
 ### Added
