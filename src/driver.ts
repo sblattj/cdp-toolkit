@@ -749,7 +749,6 @@ export interface InterceptRule {
  */
 export type LifetimeModel = "per-call" | "session";
 
-/** Browser-scoped operations. One per browser process. */
 /**
  * How a setValue/typeText commit actually reached the page (Chrome driver). "trusted": the
  * Input.insertText commit landed. A background tab never receives trusted keyboard input, so the
@@ -761,6 +760,7 @@ export type LifetimeModel = "per-call" | "session";
  */
 export type TextInputPath = "trusted" | "execCommand" | "setter" | "skipped";
 
+/** Browser-scoped operations. One per browser process. */
 export interface BrowserDriver {
   /** Uid scheme tag owned by this driver, e.g. "cdp" or "bidi". */
   readonly scheme: string;
