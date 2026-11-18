@@ -16,6 +16,8 @@ import { resetTransportCache } from "../../src/client.ts";
 // They name a live browser profile or socket; a test that needs one sets it itself.
 delete process.env.CDP_BROWSER_WS;
 delete process.env.CDP_USER_DATA_DIR;
+// Fake browsers never raise an app; never touch the developer's frontmost app from a test.
+process.env.CDP_RESTORE_FRONT_APP = "0";
 
 const blockedPorts = new Set(["9222"]);
 if (process.env.CDP_BASE) {

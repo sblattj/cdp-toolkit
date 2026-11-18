@@ -7,6 +7,7 @@
  */
 import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTarget, type PageConnection } from "../client.ts";
 import { openSession } from "./session.ts";
+import { keepFrontApp } from "../frontApp.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { chromeLeaseBackend, LeaseConflictError } from "../leases.ts";
 import { currentEndpoint } from "../endpoints.ts";
@@ -1846,7 +1847,9 @@ export async function createSettledTarget(
   });
   try {
     await conn.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
-    const { targetId } = await conn.send<{ targetId: string }>("Target.createTarget", { url, background: opts.focus !== true });
+    const create = () => conn.send<{ targetId: string }>("Target.createTarget", { url, background: opts.focus !== true });
+    // A background createTarget still brings the browser app forward on macOS: put the user's app back.
+    const { targetId } = opts.focus === true ? await create() : await keepFrontApp(create);
     if (!targetId) throw driverError("page-error", "Target.createTarget returned no targetId");
     id = targetId;
     if (!changed.has(targetId)) {

@@ -13,7 +13,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "new_page": {
-    "description": "Open a new browser tab via Target.createTarget and return {targetId,url}. The tab opens in the BACKGROUND (createTarget background:true; browsingContext.create background:true on Firefox), so the user's visible tab and keyboard focus stay put; pass focus:true to open it in the foreground. Defaults to about:blank; navigation is not awaited here (use navigate_page to load and wait).",
+    "description": "Open a new browser tab via Target.createTarget and return {targetId,url}. The tab opens in the BACKGROUND (createTarget background:true; browsingContext.create background:true on Firefox), so the user's visible tab and keyboard focus stay put (on macOS the user's frontmost app is put back if the browser app came forward; CDP_RESTORE_FRONT_APP=0 turns that off); pass focus:true to open it in the foreground. Defaults to about:blank; navigation is not awaited here (use navigate_page to load and wait).",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "url": "URL to open in the new tab; defaults to about:blank.",

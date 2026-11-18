@@ -11,6 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Nothing the toolkit does implicitly takes focus or switches the user's visible tab any more.** This is a behavior change:
   - `new_page`, and `claim_page` when it opens a fresh tab, now open the tab in the background (CDP `Target.createTarget` `background:true`; Firefox `browsingContext.create` `background:true`). Before, Chromium browsers foregrounded every new tab. New optional `focus` boolean (default false) opens it in the foreground as before. `claim_page` ignores `focus` on takeover.
+  - On macOS a background `Target.createTarget` still brings the browser app in front of the user's current app (measured on Vivaldi: the active tab stays put, the window comes forward). `new_page` / `claim_page` now note the frontmost app before opening a background tab and put it back if it lost the front (`lsappinfo` to read, System Events to restore). `CDP_RESTORE_FRONT_APP=0` turns this off; it never runs off macOS or with `focus:true`.
   - `select_page` now only writes the selected-state file by default and no longer sends `Target.activateTarget` / `browsingContext.activate`. New optional `focus` boolean (default false) raises the tab as before. The result gains `focused`.
 
 ### Fixed

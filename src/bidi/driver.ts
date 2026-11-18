@@ -29,6 +29,7 @@
  * function through script.callFunction and PARSE its text back into SnapshotNode[], which is
  * genuinely new integration work, not a reimplementation of the walker itself.
  */
+import { keepFrontApp } from "../frontApp.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -1894,7 +1895,8 @@ class BidiBrowserDriver implements BrowserDriver {
   async newPage(url?: string, opts?: { focus?: boolean }): Promise<PageInfo> {
     const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
-      const { context } = await conn.send("browsingContext.create", bidiCreateTabParams(opts)).catch((e) => { throw mapBidiError(e); });
+      const create = () => conn.send("browsingContext.create", bidiCreateTabParams(opts)).catch((e) => { throw mapBidiError(e); });
+      const { context } = opts?.focus === true ? await create() : await keepFrontApp(create);
       // Established fact: navigating the default about:home context to a data: URL is rejected,
       // so a fresh context is created here FIRST and only then navigated, never reused as-is.
       if (url) await conn.send("browsingContext.navigate", { context, url, wait: "complete" }).catch((e) => { throw mapBidiError(e); });
