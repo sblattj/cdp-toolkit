@@ -2,7 +2,7 @@
 // trusted Input.insertText commit stays first, is verified, and an in-page
 // commit runs only when it did not land. press_key reports a definite miss.
 import { expect, test } from "bun:test";
-import { insertTextVerified, pressKeyObserved } from "../src/cdp/driver.ts";
+import { insertTextVerified, pressKeyObserved, setValueOnObject } from "../src/cdp/driver.ts";
 import { fill, fillForm, pressKey, typeText } from "../src/shared-tools.ts";
 import type { BrowserDriver, PageDriver, TextInputPath } from "../src/driver.ts";
 
@@ -116,4 +116,37 @@ test("press_key reports delivered:false with a note only on a definite miss", as
   const miss = await pressKey(pageDriver(undefined, { delivered: false }), { key: "Enter" });
   expect(miss.delivered).toBe(false);
   expect(miss.note).toContain("background tab");
+});
+
+// fill / fill_form must never clear a field the user could not edit either.
+function clearConn(state: "ok" | "readonly" | "disabled") {
+  const calls: string[] = [];
+  const conn = {
+    calls,
+    async send<T>(_m: string, params?: Record<string, unknown>): Promise<T> {
+      const fn = String(params?.functionDeclaration);
+      if (fn.includes("this.focus&&this.focus()")) { calls.push("focus"); return {} as T; }
+      if (fn.includes("this.readOnly)return")) { calls.push("clear?"); return { result: { value: state } } as T; }
+      if (fn.includes("__cdpSawInput=false")) { calls.push("snapshot"); return { result: { value: "" } } as T; }
+      if (fn.includes("function(before)")) { calls.push("landed?"); return { result: { value: true } } as T; }
+      calls.push("other");
+      return {} as T;
+    },
+  };
+  const sendInput = async (method: string) => { calls.push(method); return {}; };
+  return { conn, sendInput, calls };
+}
+
+test("setValue refuses a readonly or disabled field before clearing it, and inserts nothing", async () => {
+  for (const state of ["readonly", "disabled"] as const) {
+    const c = clearConn(state);
+    await expect(setValueOnObject(c.conn as never, "OBJ", "nope", c.sendInput)).rejects.toThrow(`cannot fill a ${state} field`);
+    expect(c.calls).toEqual(["focus", "clear?"]);
+  }
+});
+
+test("setValue on an editable field clears, then commits", async () => {
+  const c = clearConn("ok");
+  expect(await setValueOnObject(c.conn as never, "OBJ", "v", c.sendInput)).toBe("trusted");
+  expect(c.calls).toEqual(["focus", "clear?", "snapshot", "Input.insertText", "landed?"]);
 });

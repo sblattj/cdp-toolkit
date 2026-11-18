@@ -1360,8 +1360,12 @@ class BidiPageDriver implements PageDriver {
       await this.callFunctionValue(BidiPageDriver.INSERT_TEXT_SOURCE, [value, false], ref);
       return;
     }
-    const clear = "function(){this.focus&&this.focus();if('value' in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}}";
-    await this.callFunctionValue(clear, [], ref);
+    // Refuse a disabled or read-only field before the clear, as the Chrome driver does.
+    const clear = "function(){if(this.disabled||this.readOnly)return this.disabled?'disabled':'readonly';this.focus&&this.focus();if('value' in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}return 'ok';}";
+    const state = await this.callFunctionValue(clear, [], ref);
+    if (state === "disabled" || state === "readonly") {
+      throw driverError("page-error", `cannot fill a ${state} field: it was left unchanged`);
+    }
     await this.sendKeys(value);
   }
   async typeText(loc: ElementLocator, text: string): Promise<void> {

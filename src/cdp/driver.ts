@@ -213,15 +213,20 @@ async function awaitScrollSettle(conn: PageConnection): Promise<void> {
 // connection, so this function's dispatch is logged like every other (see ../activity.ts).
 // It is a parameter rather than a `conn.send` here because the choke point is per-PAGE
 // (it knows the target id) and this helper only has a connection.
-async function setValueOnObject(
+export async function setValueOnObject(
   conn: PageConnection,
   objectId: string,
   value: string,
   sendInput: (method: string, params: Record<string, unknown>) => Promise<unknown>,
 ): Promise<TextInputPath> {
   await focusElement(conn, objectId);
-  const fn = "function(){if('value'in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}else if(this.isContentEditable){this.textContent='';}}";
-  await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true });
+  // A disabled or read-only field is refused BEFORE the clear: clearing it would destroy a value
+  // the user could not have changed either, and reporting filled:true for it would be a lie.
+  const fn = "function(){if(this.disabled||this.readOnly)return this.disabled?'disabled':'readonly';if('value'in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}else if(this.isContentEditable){this.textContent='';}return 'ok';}";
+  const { result } = await conn.send<{ result?: { value?: unknown } }>("Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true });
+  if (result?.value === "disabled" || result?.value === "readonly") {
+    throw driverError("page-error", `cannot fill a ${result.value} field: it was left unchanged`);
+  }
   // The one behavioral departure from input.ts: the commit is verified, with an in-page fallback
   // for a background tab (see insertTextVerified).
   return value.length ? insertTextVerified(conn, objectId, value, sendInput) : "trusted";

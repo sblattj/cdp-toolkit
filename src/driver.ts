@@ -755,8 +755,9 @@ export type LifetimeModel = "per-call" | "session";
  * Input.insertText commit landed. A background tab never receives trusted keyboard input, so the
  * driver falls back in-page: "execCommand" (document.execCommand('insertText'), which fires real
  * beforeinput/input events) or "setter" (native value setter plus input/change events, for a
- * field execCommand cannot edit). "skipped": a disabled, read-only or non-text element, which
- * trusted typing would not have changed either.
+ * field execCommand cannot edit). "skipped": type_text on a disabled, read-only or non-text
+ * element, which trusted typing would not have changed either (setValue refuses a disabled or
+ * read-only field with a page-error instead, before clearing it).
  */
 export type TextInputPath = "trusted" | "execCommand" | "setter" | "skipped";
 
