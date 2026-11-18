@@ -218,7 +218,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "fill": {
-    "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes — won't fire per-keypress handlers). Give exactly one of uid or selector. Returns {filled,element,value}; element names the field (textbox \"Email\").",
+    "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes, so it won't fire per-keypress handlers). Give exactly one of uid or selector. Returns {filled,element,value}; element names the field (textbox \"Email\"). On a background tab (Chrome) focus is emulated for the input and restored after; the tab is not raised.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
@@ -228,7 +228,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "fill_form": {
-    "description": "Fills multiple form fields in one call; each is focused, cleared, then set via Input.insertText (overwrites existing content, same as fill). Each entry in the non-empty 'fields' array takes exactly one of uid or selector plus a string value.",
+    "description": "Fills multiple form fields in one call; each is focused, cleared, then set via Input.insertText (overwrites existing content, same as fill). Each entry in the non-empty 'fields' array takes exactly one of uid or selector plus a string value. On a background tab (Chrome) focus is emulated for the input and restored after; the tab is not raised.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
@@ -236,7 +236,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "type_text": {
-    "description": "Focuses an element and appends text via Input.insertText without clearing first — closest primitive to typing, but still atomic (not per-character keystrokes). Give exactly one of uid or selector.",
+    "description": "Focuses an element and appends text via Input.insertText without clearing first: the closest primitive to typing, but still atomic (not per-character keystrokes). Give exactly one of uid or selector. On a background tab (Chrome) focus is emulated for the input and restored after; the tab is not raised.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
@@ -246,7 +246,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "press_key": {
-    "description": "Dispatches a keyDown/keyUp pair for one key with optional modifiers. 'key' is a named key (Enter, Tab, Escape, ArrowDown, Backspace, etc.) or a single printable character — the named-key table is curated, with no F-keys, numpad, or IME support.",
+    "description": "Dispatches a keyDown/keyUp pair for one key with optional modifiers. 'key' is a named key (Enter, Tab, Escape, ArrowDown, Backspace, etc.) or a single printable character; the named-key table is curated, with no F-keys, numpad, or IME support. On a background tab (Chrome) focus is emulated for the input and restored after; the tab is not raised.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",

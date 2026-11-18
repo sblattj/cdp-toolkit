@@ -92,6 +92,30 @@ async function centerOf(conn: PageConnection, objectId: string): Promise<{ x: nu
   if (!result.value) throw driverError("page-error", "element has zero size / is not visible; cannot compute a click point");
   return result.value;
 }
+/**
+ * Run keyboard input (Input.insertText / Input.dispatchKeyEvent) so it lands on a BACKGROUND tab
+ * without raising it. Chromium delivers that input only to a page that has focus: on a tab
+ * new_page opened in the background, fill reported success while the field stayed empty
+ * (document.hasFocus() false, visibilityState hidden). So when the page reports no focus, turn
+ * Emulation.setFocusEmulationEnabled on for the input and off again afterwards.
+ *
+ * No-op when document.hasFocus() is already true: the tab really has focus, or focus emulation is
+ * already on (focus_emulation / click_focus_gated keepFocus), which must be left exactly as the
+ * caller set it. A probe that fails also leaves the page alone, which is the pre-change behavior.
+ * The restore runs on every exit so a failed input never strands the page fake-focused.
+ */
+export async function withInputFocus<T>(conn: Pick<PageConnection, "send">, run: () => Promise<T>): Promise<T> {
+  const probe = await conn
+    .send<{ result?: { value?: unknown } }>("Runtime.evaluate", { expression: "document.hasFocus()", returnByValue: true })
+    .catch(() => undefined);
+  if (probe?.result?.value !== false) return run();
+  await conn.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+  try {
+    return await run();
+  } finally {
+    await conn.send("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => undefined);
+  }
+}
 async function focusElement(conn: PageConnection, objectId: string): Promise<void> {
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){this.focus&&this.focus();}", returnByValue: true });
 }
@@ -1062,12 +1086,14 @@ class CdpPageDriver implements PageDriver {
   }
   async setValue(loc: ElementLocator, value: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
-    await setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params));
+    await withInputFocus(this.conn, () => setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params)));
   }
   async typeText(loc: ElementLocator, text: string): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
-    await focusElement(this.conn, objectId);
-    if (text.length) await this.dispatchInput("Input.insertText", { text });
+    await withInputFocus(this.conn, async () => {
+      await focusElement(this.conn, objectId);
+      if (text.length) await this.dispatchInput("Input.insertText", { text });
+    });
   }
   // Copied dispatch logic verbatim from src/tools/input.ts `pressKey`.
   async pressKey(press: KeyPress): Promise<void> {
@@ -1081,8 +1107,10 @@ class CdpPageDriver implements PageDriver {
     const suppressText = (modBits & ~(MODIFIER_BITS.shift as number)) !== 0;
     const down: Record<string, unknown> = { type: "keyDown", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits };
     if (spec.text && !suppressText) down.text = spec.text;
-    await this.dispatchInput("Input.dispatchKeyEvent", down);
-    await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits });
+    await withInputFocus(this.conn, async () => {
+      await this.dispatchInput("Input.dispatchKeyEvent", down);
+      await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits });
+    });
   }
   async setFiles(loc: ElementLocator, files: readonly string[]): Promise<void> {
     const { objectId } = await resolveElementLocator(this.conn, loc);

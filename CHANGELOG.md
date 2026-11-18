@@ -13,6 +13,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   - `new_page`, and `claim_page` when it opens a fresh tab, now open the tab in the background (CDP `Target.createTarget` `background:true`; Firefox `browsingContext.create` `background:true`). Before, Chromium browsers foregrounded every new tab. New optional `focus` boolean (default false) opens it in the foreground as before. `claim_page` ignores `focus` on takeover.
   - `select_page` now only writes the selected-state file by default and no longer sends `Target.activateTarget` / `browsingContext.activate`. New optional `focus` boolean (default false) raises the tab as before. The result gains `focused`.
 
+### Fixed
+
+- **Keyboard input on a background tab (Chrome).** `fill`, `fill_form`, `type_text` and `press_key` send `Input.insertText` / `Input.dispatchKeyEvent`, which Chromium only delivers to a page that has focus, so on a background tab `fill` reported success while the field stayed empty. When the page reports `document.hasFocus()` false, these calls now turn `Emulation.setFocusEmulationEnabled` on for the input and off afterwards; the tab is never raised. A page that already has focus, or has focus emulation on from `focus_emulation`, is left untouched. Firefox needs no change: its key input runs through `input.performActions` and script, with no page-focus gate in the toolkit's code (not measured live).
+
 ## [3.3.0] - 2026-11-16
 
 ### Added
