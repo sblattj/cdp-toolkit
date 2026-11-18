@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-11-18
+
 ### Changed
 
 - **Nothing the toolkit does implicitly takes focus or switches the user's visible tab any more.** This is a behavior change:
