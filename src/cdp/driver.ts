@@ -21,7 +21,7 @@ import {
   type DragDestination, type DragOptions,
   type DriverUid, type ElementLocator, type EmulationOptions, type InterceptRule, type KeyPress, type LifetimeModel, type MouseButtonOptions,
   type NavigateOptions, type NavigateResult, type PageDriver, type PageInfo, type ScreenshotOptions, type ScrollOptions, type SnapshotNode, type UidStability,
-  type BandConsumer, type BandedCapture, type CaptureDelivery, type TiledScreenshotResult,
+  type BandConsumer, type BandedCapture, type CaptureDelivery, type TiledScreenshotResult, type TextInputPath,
 } from "../driver.ts";
 /* ------------------------------ error + uid codec ------------------------------ */
 function driverError(code: DriverErrorCode, message: string, data?: unknown): DriverError {
@@ -93,28 +93,87 @@ async function centerOf(conn: PageConnection, objectId: string): Promise<{ x: nu
   return result.value;
 }
 /**
- * Run keyboard input (Input.insertText / Input.dispatchKeyEvent) so it lands on a BACKGROUND tab
- * without raising it. Chromium delivers that input only to a page that has focus: on a tab
- * new_page opened in the background, fill reported success while the field stayed empty
- * (document.hasFocus() false, visibilityState hidden). So when the page reports no focus, turn
- * Emulation.setFocusEmulationEnabled on for the input and off again afterwards.
+ * Keyboard input on a BACKGROUND tab. Measured on Vivaldi (Chromium 156) with one page connection
+ * held open: on a tab that never had a trusted click, Input.insertText and Input.dispatchKeyEvent
+ * (keyDown with text, and type:"char") changed nothing in an input, a textarea or a
+ * contenteditable, and no keydown event fired at all. Emulation.setFocusEmulationEnabled made
+ * document.hasFocus() true and visibilityState "visible" but did not change that, and element
+ * focus() did not either. A trusted click did (hasFocus() true, then insertText landed), and
+ * document.execCommand('insertText') landed every time.
  *
- * No-op when document.hasFocus() is already true: the tab really has focus, or focus emulation is
- * already on (focus_emulation / click_focus_gated keepFocus), which must be left exactly as the
- * caller set it. A probe that fails also leaves the page alone, which is the pre-change behavior.
- * The restore runs on every exit so a failed input never strands the page fake-focused.
+ * So the trusted commit stays first, is VERIFIED, and an in-page commit runs only when it did not
+ * land. "Landed" means the element's text changed from a snapshot taken just before the commit,
+ * or a beforeinput/input event fired on it: never "equals the requested text", or an input mask
+ * or maxlength would read as a miss and insert twice.
  */
-export async function withInputFocus<T>(conn: Pick<PageConnection, "send">, run: () => Promise<T>): Promise<T> {
-  const probe = await conn
-    .send<{ result?: { value?: unknown } }>("Runtime.evaluate", { expression: "document.hasFocus()", returnByValue: true })
-    .catch(() => undefined);
-  if (probe?.result?.value !== false) return run();
-  await conn.send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  try {
-    return await run();
-  } finally {
-    await conn.send("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => undefined);
-  }
+const SNAPSHOT_TEXT_FN =
+  "function(){var e=this;e.__cdpSawInput=false;var f=function(){e.__cdpSawInput=true;};" +
+  "e.addEventListener('beforeinput',f,{capture:true,once:true});e.addEventListener('input',f,{capture:true,once:true});" +
+  "return e.isContentEditable?e.textContent:('value' in e?String(e.value):null);}";
+// Re-checked once after a short wait before calling it a miss: a false miss would double-insert.
+const LANDED_TEXT_FN =
+  "function(before){var e=this;var now=function(){return e.isContentEditable?e.textContent:('value' in e?String(e.value):null);};" +
+  "var hit=function(){return e.__cdpSawInput===true||now()!==before;};" +
+  "if(hit())return true;return new Promise(function(r){setTimeout(function(){r(hit());},50);});}";
+const FALLBACK_TEXT_FN =
+  "function(t){var e=this;if(e.disabled||e.readOnly)return 'skipped';var ce=e.isContentEditable===true;" +
+  "var ta=e instanceof HTMLTextAreaElement;var inp=e instanceof HTMLInputElement&&!/^(checkbox|radio|file|button|submit|reset|image|hidden|range|color)$/i.test(e.type);" +
+  "if(!ce&&!ta&&!inp)return 'skipped';e.focus();" +
+  "if(ce){var r=document.createRange();r.selectNodeContents(e);r.collapse(false);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}" +
+  "else{try{var n=e.value.length;e.setSelectionRange(n,n);}catch(x){}}" +
+  "var read=function(){return ce?e.textContent:e.value;};var before=read();" +
+  "if(document.execCommand('insertText',false,t)&&read()!==before){e.dispatchEvent(new Event('change',{bubbles:true}));return 'execCommand';}" +
+  "if(ce)return 'failed';var proto=ta?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;" +
+  "Object.getOwnPropertyDescriptor(proto,'value').set.call(e,before+t);" +
+  "e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:t}));" +
+  "e.dispatchEvent(new Event('change',{bubbles:true}));return 'setter';}";
+
+/** Commit `text` at the element's caret: trusted Input.insertText, verified, else in-page. */
+export async function insertTextVerified(
+  conn: Pick<PageConnection, "send">,
+  objectId: string,
+  text: string,
+  sendInput: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+): Promise<TextInputPath> {
+  const call = async (fn: string, args: unknown[] = [], awaitPromise = false): Promise<unknown> => {
+    const { result, exceptionDetails } = await conn.send<{ result?: { value?: unknown }; exceptionDetails?: { text?: string } }>("Runtime.callFunctionOn", {
+      objectId, functionDeclaration: fn, arguments: args.map((value) => ({ value })), returnByValue: true, awaitPromise,
+    });
+    if (exceptionDetails) throw driverError("page-error", `text input check failed: ${exceptionDetails.text ?? "error"}`);
+    return result?.value;
+  };
+  const before = await call(SNAPSHOT_TEXT_FN);
+  await sendInput("Input.insertText", { text });
+  if ((await call(LANDED_TEXT_FN, [before], true)) === true) return "trusted";
+  const via = await call(FALLBACK_TEXT_FN, [text]);
+  if (via === "execCommand" || via === "setter" || via === "skipped") return via;
+  throw driverError(
+    "page-error",
+    "text did not land: trusted Input.insertText was not delivered (a background tab gets no trusted keyboard input) and document.execCommand('insertText') changed nothing on this element",
+  );
+}
+/**
+ * Run a trusted key press and report whether the page saw it. A background tab that never had a
+ * trusted click gets no keydown at all (measured, see insertTextVerified), and an untrusted
+ * synthetic key could not submit a form or move focus, so nothing is faked: the caller is told
+ * { delivered:false } instead. A one-shot capture keydown listener on window is the witness.
+ * Unknown is reported as nothing (void), never false: a probe that fails, or a key that
+ * navigated the page away, says nothing about delivery. A key handled inside a cross-origin
+ * iframe is invisible to the witness, so false is a strong hint, not proof.
+ */
+const ARM_KEY_WITNESS =
+  "(function(){window.__cdpKeySeen=false;window.addEventListener('keydown',function(){window.__cdpKeySeen=true;},{capture:true,once:true});return true;})()";
+const READ_KEY_WITNESS =
+  "(function(){if(window.__cdpKeySeen===true)return true;return new Promise(function(r){setTimeout(function(){r(window.__cdpKeySeen===true);},50);});})()";
+export async function pressKeyObserved(conn: Pick<PageConnection, "send">, dispatch: () => Promise<void>): Promise<{ delivered: boolean } | void> {
+  const eval_ = (expression: string, awaitPromise = false) =>
+    conn.send<{ result?: { value?: unknown } }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise }).then((r) => r.result?.value, () => undefined);
+  const armed = (await eval_(ARM_KEY_WITNESS)) === true;
+  await dispatch();
+  if (!armed) return;
+  const seen = await eval_(READ_KEY_WITNESS, true);
+  if (seen === false) return { delivered: false };
+  if (seen === true) return { delivered: true };
 }
 async function focusElement(conn: PageConnection, objectId: string): Promise<void> {
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){this.focus&&this.focus();}", returnByValue: true });
@@ -159,11 +218,13 @@ async function setValueOnObject(
   objectId: string,
   value: string,
   sendInput: (method: string, params: Record<string, unknown>) => Promise<unknown>,
-): Promise<void> {
+): Promise<TextInputPath> {
   await focusElement(conn, objectId);
   const fn = "function(){if('value'in this){this.value='';this.dispatchEvent(new Event('input',{bubbles:true}));}else if(this.isContentEditable){this.textContent='';}}";
   await conn.send("Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true });
-  if (value.length) await sendInput("Input.insertText", { text: value });
+  // The one behavioral departure from input.ts: the commit is verified, with an in-page fallback
+  // for a background tab (see insertTextVerified).
+  return value.length ? insertTextVerified(conn, objectId, value, sendInput) : "trusted";
 }
 interface KeySpec { key: string; code: string; keyCode: number; text?: string }
 // Copied verbatim from src/tools/input.ts `NAMED_KEYS`.
@@ -1084,19 +1145,17 @@ class CdpPageDriver implements PageDriver {
       await this.dispatchInput("Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
     }
   }
-  async setValue(loc: ElementLocator, value: string): Promise<void> {
+  async setValue(loc: ElementLocator, value: string): Promise<TextInputPath> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
-    await withInputFocus(this.conn, () => setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params)));
+    return setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params));
   }
-  async typeText(loc: ElementLocator, text: string): Promise<void> {
+  async typeText(loc: ElementLocator, text: string): Promise<TextInputPath> {
     const { objectId } = await resolveElementLocator(this.conn, loc);
-    await withInputFocus(this.conn, async () => {
-      await focusElement(this.conn, objectId);
-      if (text.length) await this.dispatchInput("Input.insertText", { text });
-    });
+    await focusElement(this.conn, objectId);
+    return text.length ? insertTextVerified(this.conn, objectId, text, (method, params) => this.dispatchInput(method, params)) : "trusted";
   }
   // Copied dispatch logic verbatim from src/tools/input.ts `pressKey`.
-  async pressKey(press: KeyPress): Promise<void> {
+  async pressKey(press: KeyPress): Promise<{ delivered: boolean } | void> {
     const spec = resolveKey(press.key);
     let modBits = 0;
     for (const m of press.modifiers ?? []) {
@@ -1107,7 +1166,7 @@ class CdpPageDriver implements PageDriver {
     const suppressText = (modBits & ~(MODIFIER_BITS.shift as number)) !== 0;
     const down: Record<string, unknown> = { type: "keyDown", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits };
     if (spec.text && !suppressText) down.text = spec.text;
-    await withInputFocus(this.conn, async () => {
+    return pressKeyObserved(this.conn, async () => {
       await this.dispatchInput("Input.dispatchKeyEvent", down);
       await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.keyCode, nativeVirtualKeyCode: spec.keyCode, modifiers: modBits });
     });

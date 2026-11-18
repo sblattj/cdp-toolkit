@@ -750,6 +750,16 @@ export interface InterceptRule {
 export type LifetimeModel = "per-call" | "session";
 
 /** Browser-scoped operations. One per browser process. */
+/**
+ * How a setValue/typeText commit actually reached the page (Chrome driver). "trusted": the
+ * Input.insertText commit landed. A background tab never receives trusted keyboard input, so the
+ * driver falls back in-page: "execCommand" (document.execCommand('insertText'), which fires real
+ * beforeinput/input events) or "setter" (native value setter plus input/change events, for a
+ * field execCommand cannot edit). "skipped": a disabled, read-only or non-text element, which
+ * trusted typing would not have changed either.
+ */
+export type TextInputPath = "trusted" | "execCommand" | "setter" | "skipped";
+
 export interface BrowserDriver {
   /** Uid scheme tag owned by this driver, e.g. "cdp" or "bidi". */
   readonly scheme: string;
@@ -897,10 +907,11 @@ export interface PageDriver {
   /** Overwrite an element's value. One atomic commit under
    *  "input.insertTextAtomic", else synthesized keystrokes, so per-key handlers
    *  on the page WILL fire. Callers must not depend on either behavior. */
-  setValue(loc: ElementLocator, value: string): Promise<void>;
+  setValue(loc: ElementLocator, value: string): Promise<void | TextInputPath>;
   /** Append text at the focus point without clearing first. */
-  typeText(loc: ElementLocator, text: string): Promise<void>;
-  pressKey(press: KeyPress): Promise<void>;
+  typeText(loc: ElementLocator, text: string): Promise<void | TextInputPath>;
+  /** A driver that can tell returns { delivered:false } when the page saw no keydown. */
+  pressKey(press: KeyPress): Promise<void | { delivered: boolean }>;
   /** Attach absolute file paths to a file input. */
   setFiles(loc: ElementLocator, files: readonly string[]): Promise<void>;
 

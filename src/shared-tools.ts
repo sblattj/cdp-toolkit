@@ -36,7 +36,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
-  BandedCapture, BrowserCookie, BrowserDriver, Capability, DragDestination, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode,
+  BandedCapture, BrowserCookie, BrowserDriver, Capability, DragDestination, DriverUid, ElementLocator, NavigateResult, PageDriver, PageInfo, SnapshotNode, TextInputPath,
 } from "./driver.ts";
 import { isTiledCapture } from "./driver.ts";
 import { stitchPngBandsToFile } from "./png.ts";
@@ -1138,50 +1138,65 @@ export async function drag(
   });
 }
 
-export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string }): Promise<{ filled: true; element?: string; value: string }> {
+/** `inputPath` rides a result only when the commit did NOT go the trusted way (a background tab's
+ *  in-page fallback, or a skipped non-text element), so the common foreground shape is unchanged. */
+function inputPathField(path: void | TextInputPath): { inputPath?: TextInputPath } {
+  return path && path !== "trusted" ? { inputPath: path } : {};
+}
+
+export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string }): Promise<{ filled: true; element?: string; value: string; inputPath?: TextInputPath }> {
   if (typeof args.value !== "string") throw new SharedToolError("fill requires a string { value }");
   const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
     const element = await describeElement(page, loc);
-    await page.setValue(loc, args.value);
-    return { filled: true, ...elementField(element), value: args.value };
+    const path = await page.setValue(loc, args.value);
+    return { filled: true, ...elementField(element), value: args.value, ...inputPathField(path) };
   });
 }
 
 export async function fillForm(
   driver: BrowserDriver,
   args: { target?: TargetSelector; fields: Array<{ uid?: DriverUid; selector?: string; value: string }> },
-): Promise<{ filled: number; fields: number; elements: Array<string | null> }> {
+): Promise<{ filled: number; fields: number; elements: Array<string | null>; inputPaths?: TextInputPath[] }> {
   if (!Array.isArray(args.fields) || args.fields.length === 0) throw new SharedToolError("fill_form requires a non-empty { fields } array");
   return withPage(driver, args.target, async (page) => {
     let filled = 0;
     const elements: Array<string | null> = [];
+    const paths: TextInputPath[] = [];
     for (const f of args.fields) {
       if (typeof f.value !== "string") throw new SharedToolError("each fill_form field requires a string value");
       const loc = locatorOf(f);
       elements.push((await describeElement(page, loc)) ?? null);
-      await page.setValue(loc, f.value);
+      paths.push((await page.setValue(loc, f.value)) || "trusted");
       filled++;
     }
-    return { filled, fields: args.fields.length, elements };
+    // Per field, in order, and only when some field went a non-trusted way.
+    return { filled, fields: args.fields.length, elements, ...(paths.some((p) => p !== "trusted") ? { inputPaths: paths } : {}) };
   });
 }
 
-export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string }): Promise<{ typed: true; element?: string; text: string }> {
+export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string }): Promise<{ typed: true; element?: string; text: string; inputPath?: TextInputPath }> {
   if (typeof args.text !== "string") throw new SharedToolError("type_text requires a string { text }");
   const loc = locatorOf(args);
   return withPage(driver, args.target, async (page) => {
     const element = await describeElement(page, loc);
-    await page.typeText(loc, args.text);
-    return { typed: true, ...elementField(element), text: args.text };
+    const path = await page.typeText(loc, args.text);
+    return { typed: true, ...elementField(element), text: args.text, ...inputPathField(path) };
   });
 }
 
-export async function pressKey(driver: BrowserDriver, args: { target?: TargetSelector; key: string; modifiers?: string[] }): Promise<{ pressed: string; modifiers: string[] }> {
+export async function pressKey(driver: BrowserDriver, args: { target?: TargetSelector; key: string; modifiers?: string[] }): Promise<{ pressed: string; modifiers: string[]; delivered?: false; note?: string }> {
   if (typeof args.key !== "string" || !args.key.length) throw new SharedToolError("press_key requires a non-empty { key }");
   const modifiers = args.modifiers ?? [];
   return withPage(driver, args.target, async (page) => {
-    await page.pressKey({ key: args.key, modifiers });
+    const res = await page.pressKey({ key: args.key, modifiers });
+    // Only a definite miss is reported; delivered/unknown keeps the old shape.
+    if (res && res.delivered === false) {
+      return {
+        pressed: args.key, modifiers, delivered: false,
+        note: "the page saw no keydown: a background tab gets no trusted keyboard input. A click on the tab's page (click tool) usually gives it focus so keys land; or open the tab with new_page focus:true. A key handled inside a cross-origin iframe also reads as not delivered.",
+      };
+    }
     return { pressed: args.key, modifiers };
   });
 }
