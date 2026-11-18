@@ -6,6 +6,7 @@
  * binary can be launched the live block is skipped (not failed), the same way a CI box without one
  * has to behave; the stub block below needs no browser.
  */
+import { HAVE_FIREFOX_160 } from "./helpers/firefox160.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
@@ -18,7 +19,7 @@ import { imagePixelSize, takeScreenshot } from "../src/shared-tools.ts";
 
 // Same gate as bidi-input-ff160: an explicit FIREFOX_BIN or the macOS app. A bare `firefox` on PATH (a CI
 // runner's stub) can take longer than the launch timeout to open its debug port on a cold start.
-const HAVE_FIREFOX = Boolean(process.env.FIREFOX_BIN) || existsSync("/Applications/Firefox.app/Contents/MacOS/firefox");
+const HAVE_FIREFOX = HAVE_FIREFOX_160;
 const live = HAVE_FIREFOX ? describe : describe.skip;
 
 const BINARY = new Uint8Array([0, 1, 2, 255, 254, 128, 0, 200]);

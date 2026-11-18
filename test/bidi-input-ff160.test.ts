@@ -7,6 +7,7 @@
  * (the tick-aligned key + pointer sources measured on 160). The live layer launches a THROWAWAY
  * headless Firefox (never a fixed debug port) and checks what the PAGE observed.
  */
+import { HAVE_FIREFOX_160 } from "./helpers/firefox160.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
@@ -102,7 +103,7 @@ describe("registry and capabilities", () => {
 
 /* ------------------------------------ live layer ------------------------------------ */
 
-const HAVE_FIREFOX = Boolean(process.env.FIREFOX_BIN) || existsSync("/Applications/Firefox.app/Contents/MacOS/firefox");
+const HAVE_FIREFOX = HAVE_FIREFOX_160;
 const live = HAVE_FIREFOX ? describe : describe.skip;
 
 const PAGE = `<!doctype html><body style="margin:0">

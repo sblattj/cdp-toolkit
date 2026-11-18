@@ -5,6 +5,7 @@
  * LIVE against a throwaway headless Firefox (launchFirefox: free port, temp profile, killed in
  * afterAll). It never touches 9222/9223/9333. Skipped when no Firefox binary is installed.
  */
+import { HAVE_FIREFOX_160 } from "./helpers/firefox160.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
@@ -14,7 +15,7 @@ import { isDriverError } from "../src/driver.ts";
 
 // Same gate as bidi-input-ff160: an explicit FIREFOX_BIN or the macOS app. A bare `firefox` on PATH (a CI
 // runner's stub) can take longer than the launch timeout to open its debug port on a cold start.
-const HAVE_FIREFOX = Boolean(process.env.FIREFOX_BIN) || existsSync("/Applications/Firefox.app/Contents/MacOS/firefox");
+const HAVE_FIREFOX = HAVE_FIREFOX_160;
 const live = HAVE_FIREFOX ? describe : describe.skip;
 
 const server = Bun.serve({

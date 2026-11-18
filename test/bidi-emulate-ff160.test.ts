@@ -4,6 +4,7 @@
  * in afterAll. The machine's default color scheme may itself be dark, so every assertion is
  * relative to a measured baseline: emulate the OPPOSITE scheme, then clear and expect the baseline.
  */
+import { HAVE_FIREFOX_160 } from "./helpers/firefox160.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { launchFirefox, type LaunchedFirefox } from "../src/bidi/launch.ts";
@@ -23,7 +24,7 @@ test("capability rows are declared at 160", () => {
 });
 
 // Live layer: needs a Firefox binary, like bidi-input-ff160.
-const HAVE_FIREFOX = Boolean(process.env.FIREFOX_BIN) || existsSync("/Applications/Firefox.app/Contents/MacOS/firefox");
+const HAVE_FIREFOX = HAVE_FIREFOX_160;
 const live = HAVE_FIREFOX ? describe : describe.skip;
 
 live("live Firefox 160 emulation", () => {
