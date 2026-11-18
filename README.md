@@ -243,7 +243,7 @@ await TOOLS.navigate_page({ target: "index:0", url: "https://example.com" });
 | `CDP_USER_DATA_DIR` | unset | Profile directory to read `DevToolsActivePort` from, to find that browser socket without naming its uuid. Opt-in on purpose: nothing is scanned unless you name it. |
 | `CDP_ARTIFACT_DIR` | `/tmp/cdp-toolkit` | Screenshots, traces, heap snapshots, lighthouse reports, recorder buffers. |
 | `CDP_STATE_DIR` | `/tmp/cdp-toolkit` | `select_page` selected-target file, in-flight trace state. |
-| `CDP_RESTORE_FRONT_APP` | on (macOS only) | `0` stops `new_page` / `claim_page` from putting the user's frontmost app back after a background tab brings the browser forward. |
+| `CDP_RESTORE_FRONT_APP` | on (macOS only) | `0` stops `new_page` / `claim_page` / `close_page` from putting the user's frontmost app back after a background tab brings the browser forward. |
 | `CDP_EXTRACT_BASE_URL` | `http://127.0.0.1:8090/v1` | `extract_page` only. Base URL of the OpenAI-compatible extraction endpoint (the server appends `/chat/completions`). The default is loopback llm-ferry, so page content never leaves the machine; overriding it sends page content wherever the operator points. |
 | `CDP_EXTRACT_MODEL` | `schematron` | `extract_page` only. Model name for the extraction endpoint call. |
 | `CDP_EXTRACT_API_KEY` | unset | `extract_page` only. Bearer token for the endpoint. Never logged and redacted from every error; the response never contains it. |

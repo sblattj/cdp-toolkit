@@ -1887,7 +1887,8 @@ class CdpBrowserDriver implements BrowserDriver {
    *  builds), never hardcoded. */
   async closePage(id: string): Promise<{ success: boolean }> {
     return withBrowserConn(async (conn) => {
-      const res = await conn.send<{ success?: boolean }>("Target.closeTarget", { targetId: id });
+      // Closing a tab also brings the browser app forward on macOS (measured): put the user's app back.
+      const res = await keepFrontApp(() => conn.send<{ success?: boolean }>("Target.closeTarget", { targetId: id }));
       // Opportunistic, not load-bearing: the beacon socket dies with the tab
       // anyway, and readBeaconOver's dead-connection branch would drop it on the
       // next read. Dropping it here just avoids holding a corpse until then.

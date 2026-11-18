@@ -1908,7 +1908,7 @@ class BidiBrowserDriver implements BrowserDriver {
   async closePage(id: string): Promise<{ success: boolean }> {
     const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
-      await conn.send("browsingContext.close", { context: id }).catch((e) => { throw mapBidiError(e); });
+      await keepFrontApp(() => conn.send("browsingContext.close", { context: id }).catch((e) => { throw mapBidiError(e); }));
       return { success: true };
     } finally {
       conn.release();
