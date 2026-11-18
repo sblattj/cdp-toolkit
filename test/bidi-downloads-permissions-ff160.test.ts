@@ -11,6 +11,7 @@
  * functions — not raw BiDi. The profile's own download dir is pointed at a temp folder so the
  * "back to normal behavior" download is observable and never lands in the real ~/Downloads.
  */
+import { HAVE_FIREFOX_160 } from "./helpers/firefox160.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -100,7 +101,7 @@ describe("Firefox version gate (BIDI_CAPABILITY_MIN_FIREFOX = 160)", () => {
 
 /* ------------------------------------ live ------------------------------------ */
 
-describe.skipIf(!FIREFOX_BIN)("live headless Firefox 160: tool functions", () => {
+describe.skipIf(!FIREFOX_BIN || !HAVE_FIREFOX_160)("live headless Firefox 160: tool functions", () => {
   let ff: LaunchedFirefox | undefined;
   let driver: BrowserDriver | undefined;
   let srv: ReturnType<typeof Bun.serve> | undefined;
