@@ -261,9 +261,10 @@ export async function originIndex(
 export async function newTrackedPage(
   driver: BrowserDriver,
   backend: LeaseBackend,
-  opts: { url?: string; label?: string } = {},
+  opts: { url?: string; label?: string; focus?: boolean } = {},
 ): Promise<PageInfo> {
-  const page = await driver.newPage(opts.url);
+  // Background by default: only an explicit focus:true may switch the user's visible tab.
+  const page = await driver.newPage(opts.url, { focus: opts.focus === true });
   await recordOrigin(backend, page.id, { label: opts.label });
   return page;
 }

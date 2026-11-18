@@ -119,7 +119,7 @@ export interface ClaimPageResult {
  */
 export async function claimPage(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; targetId?: string; url?: string; label?: string; ttlMs?: number } = {},
+  args: { target?: TargetSelector; targetId?: string; url?: string; label?: string; ttlMs?: number; focus?: boolean } = {},
 ): Promise<ClaimPageResult> {
   const hasTarget = typeof args.target === "string" && args.target.length > 0;
   const hasTargetId = typeof args.targetId === "string" && args.targetId.length > 0;
@@ -156,7 +156,8 @@ export async function claimPage(
     // expiry, so the tab stays attributable to `label` after the lease is gone.
     // Claiming an EXISTING tab (the branches above) records nothing, because
     // this toolkit did not create it and provenance is not ownership.
-    const page = await newTrackedPage(driver, backend, { url: args.url, label });
+    // Background unless focus:true, same as new_page. focus is ignored on takeover.
+    const page = await newTrackedPage(driver, backend, { url: args.url, label, focus: args.focus === true });
     targetId = page.id;
     url = page.url;
     opened = true;

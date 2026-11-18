@@ -59,7 +59,7 @@ import { takeStampedSnapshot } from "./snapshot.ts";
 import { selectRule, buildFulfillParams, effectiveAction } from "../tools/network_mock.ts";
 import type {
   BrowsingContextId, BrowsingContextInfo, BrowsingContextLocator, BrowsingContextReadinessState,
-  BrowsingContextCaptureScreenshotParameters, ScriptSharedReference, ScriptRemoteValue, ScriptLocalValue,
+  BrowsingContextCaptureScreenshotParameters, BrowsingContextCreateParameters, ScriptSharedReference, ScriptRemoteValue, ScriptLocalValue,
   ScriptNodeRemoteValue, ScriptExceptionDetails, InputSourceActions, InputPointerSourceAction, InputKeySourceAction,
   InputWheelSourceAction, NetworkCookie,
 } from "./protocol.ts";
@@ -1858,6 +1858,15 @@ class BidiPageDriver implements PageDriver {
   }
 }
 
+/**
+ * browsingContext.create params for new_page / claim_page. background:true unless focus is
+ * explicitly true: per the BiDi spec a context created without it becomes the active tab, which
+ * switches the user's visible tab. Exported for the unit test (no fake BiDi transport exists).
+ */
+export function bidiCreateTabParams(opts?: { focus?: boolean }): BrowsingContextCreateParameters {
+  return { type: "tab", background: opts?.focus !== true };
+}
+
 /* --------------------------------- BrowserDriver --------------------------------- */
 class BidiBrowserDriver implements BrowserDriver {
   readonly scheme = "bidi";
@@ -1878,10 +1887,10 @@ class BidiBrowserDriver implements BrowserDriver {
       conn.release();
     }
   }
-  async newPage(url?: string): Promise<PageInfo> {
+  async newPage(url?: string, opts?: { focus?: boolean }): Promise<PageInfo> {
     const conn = await getConnection(this.endpoint, this.timeoutMs, this.attached);
     try {
-      const { context } = await conn.send("browsingContext.create", { type: "tab" }).catch((e) => { throw mapBidiError(e); });
+      const { context } = await conn.send("browsingContext.create", bidiCreateTabParams(opts)).catch((e) => { throw mapBidiError(e); });
       // Established fact: navigating the default about:home context to a data: URL is rejected,
       // so a fresh context is created here FIRST and only then navigated, never reused as-is.
       if (url) await conn.send("browsingContext.navigate", { context, url, wait: "complete" }).catch((e) => { throw mapBidiError(e); });

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **Nothing the toolkit does implicitly takes focus or switches the user's visible tab any more.** This is a behavior change:
+  - `new_page`, and `claim_page` when it opens a fresh tab, now open the tab in the background (CDP `Target.createTarget` `background:true`; Firefox `browsingContext.create` `background:true`). Before, Chromium browsers foregrounded every new tab. New optional `focus` boolean (default false) opens it in the foreground as before. `claim_page` ignores `focus` on takeover.
+  - `select_page` now only writes the selected-state file by default and no longer sends `Target.activateTarget` / `browsingContext.activate`. New optional `focus` boolean (default false) raises the tab as before. The result gains `focused`.
+
 ## [3.3.0] - 2026-11-16
 
 ### Added

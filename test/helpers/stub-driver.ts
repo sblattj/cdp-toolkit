@@ -58,6 +58,8 @@ export function stubDriver(
   const hidden: PageInfo[] = [...(opts.hidden ?? [])];
   const closed: string[] = [];
   const activated: string[] = [];
+  /** Every newPage call's opts, in order, so a test can see focus reach the driver. */
+  const newPageOpts: Array<{ focus?: boolean } | undefined> = [];
   /** Every target installActivityBeacon was called for, in call order. */
   const beaconInstalls: string[] = [];
   /** Every target readActivityBeacon was called for, in call order. */
@@ -95,7 +97,8 @@ export function stubDriver(
     async listPages(o?: { all?: boolean }): Promise<PageInfo[]> {
       return o?.all ? [...pages, ...hidden] : [...pages];
     },
-    async newPage(url?: string): Promise<PageInfo> {
+    async newPage(url?: string, o?: { focus?: boolean }): Promise<PageInfo> {
+      newPageOpts.push(o);
       const p: PageInfo = { id: `NEW-${++created}`, url: url ?? "about:blank", title: "", type: "page" };
       pages.push(p);
       return p;
@@ -115,7 +118,7 @@ export function stubDriver(
       return [...pages, ...hidden].find((p) => p.id === id) ?? { id, url: "", title: "" };
     },
   };
-  return { driver: driver as unknown as BrowserDriver, closed, activated, pages, beaconInstalls, beaconReads, probeCalls };
+  return { driver: driver as unknown as BrowserDriver, closed, activated, newPageOpts, pages, beaconInstalls, beaconReads, probeCalls };
 }
 
 export const page = (id: string, url = `https://example.test/${id}`): PageInfo => ({ id, url, title: id, type: "page" });

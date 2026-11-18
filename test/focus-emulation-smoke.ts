@@ -118,7 +118,8 @@ async function main() {
     const target = (page.targetId ?? page.target ?? page.id) as string;
     const sel = String(target);
     // Open the foreground dummy after, and let Chrome settle focus onto it.
-    await newPage({ url: "about:blank" });
+    // focus:true: new_page opens background tabs by default; this dummy must take the front.
+    await newPage({ url: "about:blank", focus: true });
     await new Promise((r) => setTimeout(r, 500));
 
     await navigatePage({ target: sel, url: `${ORIGIN}/gate`, waitUntil: "load" });

@@ -166,7 +166,7 @@ A `Uid` **is** a CDP `backendDOMNodeId` (a number). This makes refs stateless:
 
 | Module file | Tools (MCP name → fn) | Notes |
 |---|---|---|
-| `src/tools/pages.ts` | `list_pages`→`listPages`, `new_page`→`newPage`, `close_page`→`closePage`, `select_page`→`selectPage` | **Browser endpoint** (`openBrowser`, `Target.*`). `new_page`=`Target.createTarget`. `close_page`=`Target.closeTarget`. `select_page`=`Target.activateTarget` + write selected state file. `list_pages` may reuse `listTargets()`. |
+| `src/tools/pages.ts` | `list_pages`→`listPages`, `new_page`→`newPage`, `close_page`→`closePage`, `select_page`→`selectPage` | **Browser endpoint** (`openBrowser`, `Target.*`). `new_page`=`Target.createTarget` with `background:true` (foreground only on `focus:true`). `close_page`=`Target.closeTarget`. `select_page`=write selected state file, plus `Target.activateTarget` only on `focus:true`. `list_pages` may reuse `listTargets()`. |
 | `src/tools/navigation.ts` | `navigate_page`→`navigatePage`, `wait_for`→`waitForText` (export as `waitFor` too) | `Page.enable` then `Page.navigate` (or `Page.reload` + `Page.getFrameTree` when `reload:true`; `ignoreCache:true` = hard reload); await `Page.frameStoppedLoading`/`Page.loadEventFired`. `wait_for` polls `Runtime.evaluate` for `document.body.innerText.includes(text)` with timeout, OR waits for a given event. |
 | `src/tools/evaluate.ts` | `evaluate_script`→`evaluateScript` | `Runtime.enable` + `Runtime.evaluate` (`returnByValue`, `awaitPromise`). Support optional `args` via `Runtime.callFunctionOn` on a uid/selector. Surface `exceptionDetails` as thrown error. |
 | `src/tools/snapshot.ts` | `take_snapshot`→`takeSnapshot` **+ export `resolveUid`** | a11y tree + ref scheme above. |

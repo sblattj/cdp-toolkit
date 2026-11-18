@@ -25,6 +25,7 @@ search_tools {}                          # grouped catalog of everything availab
 ```
 
 - None of the five listed tools opens a tab. With no tab yet, the first call is `call_tool {name:"new_page", arguments:{url:"..."}}`.
+- Tabs open in the background, so the user's visible tab and keyboard focus stay put; pass `focus:true` (to `new_page`, `claim_page` or `select_page`) only when you really need to raise one.
 - `call_tool` behaves exactly like a direct call: same errors, and a `lease` token goes inside the inner `arguments`.
 - `call_tool` cannot wrap `search_tools` or `call_tool`; call those directly.
 - The `cdp` CLI is unaffected: every tool is a direct subcommand there.
@@ -270,7 +271,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | Need | Tool |
 |---|---|
 | list tabs (+ provenance) | `list_pages` |
-| open / close / focus a tab | `new_page` / `close_page` / `select_page` |
+| open / close / select a tab (`focus:true` to raise it) | `new_page` / `close_page` / `select_page` |
 | go to a URL / reload | `navigate_page` (`reload:true`, `ignoreCache:true`) |
 | wait for text | `wait_for` |
 | read the a11y tree | `take_snapshot` |

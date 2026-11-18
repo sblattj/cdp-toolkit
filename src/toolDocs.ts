@@ -13,14 +13,15 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "new_page": {
-    "description": "Open a new browser tab via Target.createTarget and return {targetId,url}. Defaults to about:blank; navigation is not awaited here (use navigate_page to load and wait).",
+    "description": "Open a new browser tab via Target.createTarget and return {targetId,url}. The tab opens in the BACKGROUND (createTarget background:true; browsingContext.create background:true on Firefox), so the user's visible tab and keyboard focus stay put; pass focus:true to open it in the foreground. Defaults to about:blank; navigation is not awaited here (use navigate_page to load and wait).",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "url": "URL to open in the new tab; defaults to about:blank.",
       "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS / CDP_ENDPOINTS_FILE to open the tab on (Chrome only); default endpoint when omitted. Address the new tab later as 'endpoint:<name>/<targetId>'.",
       "claim": "Claim the new tab atomically and return a lease token alongside {targetId,url}. Under CDP_REQUIRE_LEASE the tab is claimed and a lease returned even without claim:true; claim:true makes it an EXPLICIT lease that demands its token on every later call, even from this process. Default false.",
       "label": "Agent label recorded on the lease when the tab is claimed; surfaced in conflict errors and list_leases. Defaults to pid-<pid>.",
-      "ttlMs": "How long a claimed lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it. Ignored when not claiming."
+      "ttlMs": "How long a claimed lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it. Ignored when not claiming.",
+      "focus": "Open the tab in the foreground, switching the user's visible tab and taking focus. Default false: the tab opens in the background."
     }
   },
   "close_page": {
@@ -31,10 +32,11 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "select_page": {
-    "description": "Activate/focus a page target via Target.activateTarget and persist its bare targetId to the selected-state file (CDP_STATE_DIR/selected). Requires an explicit, resolvable target.",
+    "description": "Persist a page target's bare targetId to the selected-state file (CDP_STATE_DIR/selected) and return {selected,focused}. By default it does NOT raise the tab: the user's visible tab and window focus stay put. focus:true also activates it (Target.activateTarget; browsingContext.activate on Firefox), which was the old default. Requires an explicit, resolvable target.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
-      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions."
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
+      "focus": "Also raise the tab and take window focus (Target.activateTarget / browsingContext.activate). Default false: selection only."
     }
   },
   "navigate_page": {
@@ -403,7 +405,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "maxWidth": "Caps the streamed frame width in px; also pins frame size if the viewport may change mid-recording.",
       "maxHeight": "Caps the streamed frame height in px.",
       "everyNthFrame": "Capture only every Nth repaint (1=every frame), to shrink spool size on a busy page; per-frame durations keep playback at wallclock speed either way.",
-      "bringToFront": "Activate the tab (Page.bringToFront) before recording, default false. A backgrounded/occluded tab may never repaint, yielding a 0-frame recording."
+      "bringToFront": "Activate the tab (Page.bringToFront) before recording, default false. A backgrounded/occluded tab may never repaint, yielding a 0-frame recording. new_page opens tabs in the background, so a fresh tab needs this (or new_page focus:true) for a real frame rate."
     }
   },
   "stop_screen_recording": {
@@ -473,7 +475,8 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "targetId": "Exact target id (not a selector) of an already-open page to claim instead of opening one. Back-compat only; prefer target, which also accepts an exact id. Mutually exclusive with target.",
       "url": "When opening a fresh tab, navigate it here. Ignored when target or targetId is given.",
       "label": "Agent label recorded on the lease; surfaced in conflict errors and list_leases. Defaults to pid-<pid>.",
-      "ttlMs": "How long the lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it."
+      "ttlMs": "How long the lease survives without use before it is reclaimable. Defaults to CDP_LEASE_TTL_MS, else 900000 (15min); every checked call refreshes it.",
+      "focus": "Fresh-tab mode only: open the tab in the foreground and take focus. Default false: the tab opens in the background. Ignored on takeover (target/targetId), which never raises the tab."
     }
   },
   "release_page": {

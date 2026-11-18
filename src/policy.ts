@@ -60,7 +60,8 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   // pages
   "new_page", // Target.createTarget
   "close_page", // Target.closeTarget
-  // borderline: Target.activateTarget raises the tab and steals window focus. A state change.
+  // borderline: writes the selected-state file; with focus:true also Target.activateTarget,
+  // which raises the tab and takes window focus. A state change either way.
   "select_page",
   "navigate_page", // Page.navigate / reload / history
   "set_cookie",

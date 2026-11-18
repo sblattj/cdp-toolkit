@@ -9,18 +9,21 @@ type Handler = (params: Record<string, unknown>) => void;
 function fakeConn(opts: { id?: string; eventBeforeResponse?: boolean; eventAfterMs?: number; otherIdFirst?: boolean }) {
   const handlers = new Map<string, Set<Handler>>();
   const sent: string[] = [];
+  const params: Record<string, unknown>[] = [];
   const emit = (id: string) => handlers.get("Target.targetInfoChanged")?.forEach((h) => h({ targetInfo: { targetId: id } }));
   const id = opts.id ?? "T1";
   return {
     sent,
+    params,
     listenerCount: () => handlers.get("Target.targetInfoChanged")?.size ?? 0,
     on(method: string, h: Handler) {
       if (!handlers.has(method)) handlers.set(method, new Set());
       handlers.get(method)!.add(h);
       return () => handlers.get(method)!.delete(h);
     },
-    async send<T>(method: string): Promise<T> {
+    async send<T>(method: string, p?: Record<string, unknown>): Promise<T> {
       sent.push(method);
+      params.push(p ?? {});
       if (method !== "Target.createTarget") return {} as T;
       if (opts.otherIdFirst) emit("OTHER");
       if (opts.eventBeforeResponse) emit(id);
@@ -61,4 +64,18 @@ test("a createTarget with no targetId still throws and unsubscribes", async () =
   conn.send = (async (m: string) => { conn.sent.push(m); return {}; }) as never;
   await expect(createSettledTarget(conn as never, "about:blank", 100)).rejects.toThrow("no targetId");
   expect(conn.listenerCount()).toBe(0);
+});
+
+// A tab the toolkit opens must not switch the user's visible tab: background unless focus:true.
+test("createTarget is sent with background:true by default", async () => {
+  const conn = fakeConn({ eventBeforeResponse: true });
+  await createSettledTarget(conn as never, "https://example.com/", 100);
+  expect(conn.params[conn.sent.indexOf("Target.createTarget")]).toEqual({ url: "https://example.com/", background: true });
+});
+
+test("focus:true sends background:false (foreground, the old default)", async () => {
+  const conn = fakeConn({ eventBeforeResponse: true });
+  await createSettledTarget(conn as never, "about:blank", 100, { focus: true });
+  expect(conn.params[conn.sent.indexOf("Target.createTarget")]).toEqual({ url: "about:blank", background: false });
+  expect(conn.sent).not.toContain("Target.activateTarget");
 });

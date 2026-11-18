@@ -56,7 +56,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "new_page",
-    "description": "Open a browser tab, optionally claim it; navigation is not awaited.",
+    "description": "Open a browser tab in the background, optionally claim it; navigation is not awaited.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -83,6 +83,10 @@ export const MANIFEST: ToolSpec[] = [
         "ttlMs": {
           "type": "number",
           "description": "Lease TTL in milliseconds."
+        },
+        "focus": {
+          "type": "boolean",
+          "description": "Open in the foreground and take focus; default false (background tab)."
         }
       },
       "required": [],
@@ -112,7 +116,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "select_page",
-    "description": "Focus a selected page and persist it as active; target must resolve explicitly.",
+    "description": "Persist a page as selected; focus:true also raises it. Target must resolve explicitly.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -123,6 +127,10 @@ export const MANIFEST: ToolSpec[] = [
         "target": {
           "type": "string",
           "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
+        },
+        "focus": {
+          "type": "boolean",
+          "description": "Also raise the tab and take window focus; default false (selection only)."
         }
       },
       "required": [
@@ -1714,7 +1722,7 @@ export const MANIFEST: ToolSpec[] = [
   },
   {
     "name": "claim_page",
-    "description": "Claim an existing tab or open a fresh one; CLI use is refused.",
+    "description": "Claim an existing tab or open a fresh one in the background; CLI use is refused.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1737,6 +1745,10 @@ export const MANIFEST: ToolSpec[] = [
         "ttlMs": {
           "type": "number",
           "description": "Lease TTL in milliseconds."
+        },
+        "focus": {
+          "type": "boolean",
+          "description": "Fresh tab only: open it in the foreground; default false (background)."
         }
       },
       "required": [],

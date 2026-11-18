@@ -1732,11 +1732,16 @@ export const NEW_TARGET_SETTLE_MS = 2000;
  * this id, capped at NEW_TARGET_SETTLE_MS. The listener is registered BEFORE
  * createTarget because the event can beat the command's response. A browser
  * that never sends the event costs at most the cap, never a failure.
+ *
+ * The tab opens with background:true unless opts.focus is true: a tab the
+ * toolkit opens must not switch the user's visible tab or take keyboard focus.
+ * Without the flag Chromium (Vivaldi included) foregrounds every new tab.
  */
 export async function createSettledTarget(
   conn: Pick<CdpConnection, "send" | "on">,
   url: string,
   settleMs = NEW_TARGET_SETTLE_MS,
+  opts: { focus?: boolean } = {},
 ): Promise<string> {
   const changed = new Set<string>();
   let id = "";
@@ -1749,7 +1754,7 @@ export async function createSettledTarget(
   });
   try {
     await conn.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
-    const { targetId } = await conn.send<{ targetId: string }>("Target.createTarget", { url });
+    const { targetId } = await conn.send<{ targetId: string }>("Target.createTarget", { url, background: opts.focus !== true });
     if (!targetId) throw driverError("page-error", "Target.createTarget returned no targetId");
     id = targetId;
     if (!changed.has(targetId)) {
@@ -1776,9 +1781,9 @@ class CdpBrowserDriver implements BrowserDriver {
     const filtered = opts?.all ? targets : targets.filter((t) => t.type === "page");
     return filtered.map((t) => ({ id: t.id, url: t.url, title: t.title, type: t.type }));
   }
-  async newPage(url?: string): Promise<PageInfo> {
+  async newPage(url?: string, opts?: { focus?: boolean }): Promise<PageInfo> {
     return withBrowserConn(async (conn) => {
-      const targetId = await createSettledTarget(conn, url ?? "about:blank");
+      const targetId = await createSettledTarget(conn, url ?? "about:blank", NEW_TARGET_SETTLE_MS, { focus: opts?.focus === true });
       return { id: targetId, url: url ?? "about:blank", title: "" };
     });
   }

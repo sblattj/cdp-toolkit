@@ -98,7 +98,8 @@ const written: string[] = [];
 
 try {
   /* ------------------ phase 1: ONE tab, in the foreground ------------------ */
-  const a = (await TOOLS.new_page({ url: ANIMATED_PAGE })) as { targetId: string };
+  // focus:true: new_page opens tabs in the background by default, and this phase needs the tab in front.
+  const a = (await TOOLS.new_page({ url: ANIMATED_PAGE, focus: true })) as { targetId: string };
   openTabs.push(a.targetId);
   record("new_page (animated)", !!a.targetId, `targetId=${a.targetId.slice(0, 8)}`);
 
@@ -170,7 +171,8 @@ try {
   record("stop without a recording refused", doubleStop.includes("no screen recording is in progress"), doubleStop.slice(0, 80));
 
   /* ---------- phase 2: TWO tabs, for concurrency + the ambiguity gate ---------- */
-  const b = (await TOOLS.new_page({ url: ANIMATED_PAGE })) as { targetId: string };
+  // focus:true so b takes the front and backgrounds a, the case phase 2 exercises.
+  const b = (await TOOLS.new_page({ url: ANIMATED_PAGE, focus: true })) as { targetId: string };
   openTabs.push(b.targetId);
   const startedA2 = (await TOOLS.start_screen_recording({ target: a.targetId })) as { spoolDir: string };
   const startedB = (await TOOLS.start_screen_recording({ target: b.targetId })) as { spoolDir: string };

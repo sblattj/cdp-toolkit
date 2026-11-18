@@ -761,11 +761,14 @@ export interface BrowserDriver {
 
   /** opts.all: include non-page targets (workers, iframes, ...) when the driver has that concept. */
   listPages(opts?: { all?: boolean }): Promise<PageInfo[]>;
-  newPage(url?: string): Promise<PageInfo>;
+  /** Opens the tab in the BACKGROUND by default, so the user's active tab and keyboard focus
+   *  stay put. opts.focus:true opens it in the foreground (the old default). */
+  newPage(url?: string, opts?: { focus?: boolean }): Promise<PageInfo>;
   /** success mirrors the underlying protocol's own success signal when it has one (CDP's
    *  Target.closeTarget); a driver without such a signal reports true once close resolves. */
   closePage(id: string): Promise<{ success: boolean }>;
-  /** Bring a page to the front. Also writes the selected-page state file. */
+  /** Bring a page to the front: takes the user's active tab and window focus. Only an explicit
+   *  opt-in may call this (select_page with focus:true); nothing calls it implicitly. */
   activatePage(id: string): Promise<PageInfo>;
 
   /** Acquire a page handle. The caller MUST release() it. Prefer withDriver. */

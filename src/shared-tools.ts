@@ -54,7 +54,6 @@ import { ACCNAME_HELPERS_SOURCE, MAX_NAME_LENGTH } from "./bidi/snapshot.ts";
 import { allEndpoints, currentEndpoint, isDefaultEndpoint, withEndpointScope } from "./endpoints.ts";
 
 const ARTIFACT_DIR = process.env.CDP_ARTIFACT_DIR ?? "/tmp/cdp-toolkit";
-const STATE_DIR = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
 
 class SharedToolError extends Error {}
 
@@ -402,12 +401,12 @@ async function listPagesOne(
 
 export async function newPage(
   driver: BrowserDriver,
-  args: { url?: string; claim?: boolean; label?: string; ttlMs?: number } = {},
+  args: { url?: string; claim?: boolean; label?: string; ttlMs?: number; focus?: boolean } = {},
 ): Promise<{ targetId: string; url: string; lease?: LeaseToken; label?: string; expiresAt?: number }> {
   const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
   // Creates the tab AND writes its creation record. The record outlives any
   // lease taken below, which is the point: a released tab is still an agent's.
-  const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label });
+  const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label, focus: args.focus === true });
   // Under strict mode a tab nobody holds is a tab nobody may drive, so creating
   // one without claiming it would hand back a target the very next call has to
   // auto-acquire anyway. Doing it here means the tab is never briefly unowned
@@ -454,16 +453,24 @@ export async function closePage(
 }
 
 async function writeSelectedFile(id: string): Promise<void> {
-  await mkdir(STATE_DIR, { recursive: true });
-  await writeFile(join(STATE_DIR, "selected"), id, "utf8");
+  // Read per call, not at import, so a test can point CDP_STATE_DIR at a temp dir.
+  const stateDir = process.env.CDP_STATE_DIR ?? "/tmp/cdp-toolkit";
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(join(stateDir, "selected"), id, "utf8");
 }
 
-export async function selectPage(driver: BrowserDriver, args: { target?: TargetSelector }): Promise<{ selected: string }> {
+/**
+ * Persist the selection; raise the tab only on an explicit focus:true. Raising
+ * (Target.activateTarget / browsingContext.activate) switches the user's visible
+ * tab and takes window focus, so it is never a side effect of selecting.
+ * resolvePage already ran the lease gate, so skipping activatePage loses no check.
+ */
+export async function selectPage(driver: BrowserDriver, args: { target?: TargetSelector; focus?: boolean }): Promise<{ selected: string; focused: boolean }> {
   if (args.target === undefined || args.target === "") throw new SharedToolError("select_page requires an explicit target");
   const p = await resolvePage(driver, args.target);
-  const activated = await driver.activatePage(p.id);
-  await writeSelectedFile(activated.id);
-  return { selected: activated.id };
+  const id = args.focus === true ? (await driver.activatePage(p.id)).id : p.id;
+  await writeSelectedFile(id);
+  return { selected: id, focused: args.focus === true };
 }
 
 /* ------------------------------ navigation (2) ------------------------------ */
