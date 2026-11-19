@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-11-18
+
+### Added
+
+- **Hidden tabs: `new_page` without any flash of the browser (opt-in, `CDP_HIDDEN_TABS=1`).** 3.4.0's restore puts the user's app back, but on macOS the browser still comes forward for a moment: every visible `Target.createTarget` variant activated Vivaldi in a tight `lsappinfo front` sample (`background`, `focus:false`, `newWindow`, a minimized new window, `window.open` from a background tab). Only `hidden:true` targets stayed clean. With `CDP_HIDDEN_TABS=1` in the MCP server, `new_page` and `claim_page` open such a tab on one held owner connection per endpoint, which keeps it alive and sets a 1280x800 viewport at the screen's pixel ratio, so screenshots, clicks and typing work and logins are shared (same browser context). Measured through the MCP server with the restore off: 3/3 `new_page` + `close_page` runs never changed the front app, against a flash on the visible path.
+  - `list_pages` marks these tabs `hidden: true` (the user cannot see them) and lists them after visible tabs.
+  - `select_page` with `focus:true` on a hidden tab reopens its URL in a visible tab, closes the hidden one, and returns the new id with `revealedFrom`. Page state the URL does not carry (form input, scroll) is lost.
+  - At most `CDP_HIDDEN_TABS_MAX` (default 20) hidden tabs; past the cap `new_page` is refused with the open ids. Server shutdown closes them all. A hidden tab dies with the server or the browser and then reports `no-such-target`.
+  - Default off, and the one-shot CLI always uses visible tabs (a hidden tab would die when the CLI exits). `focus:true` keeps the visible path.
+
 ## [3.4.0] - 2026-11-18
 
 ### Changed
