@@ -27,6 +27,7 @@ import {
 
 import { detectEndpoint, resetEndpointCache, type CdpTransport } from "./cdp/endpoint.ts";
 import { openSession, withBrowserSocket, type PageConnection } from "./cdp/session.ts";
+import { markHiddenTargets } from "./cdp/hiddenTabs.ts";
 export { SessionConnection, withBrowserSocket, type PageConnection } from "./cdp/session.ts";
 /**
  * Base HTTP origin of the DEFAULT DevTools endpoint, fixed at import (CDP_BASE, else
@@ -197,6 +198,12 @@ export class CdpConnection {
     });
   }
 
+  /** False once the socket closed (either side) or before connect(). The hidden-tab owner reads
+   *  this to notice that the tabs it kept alive died with it. */
+  get isOpen(): boolean {
+    return !this.closed && this.ws !== undefined;
+  }
+
   close(): void {
     this.closed = true;
     this.rejectAll(new CdpError("closed by caller"));
@@ -280,11 +287,13 @@ async function getTargetsOverBrowserWs(): Promise<Target[]> {
  */
 export async function listTargets(): Promise<Target[]> {
   const base = currentEndpoint().base;
-  if (knownTransports.get(base) === "browser-ws") return getTargetsOverBrowserWs();
+  // markHiddenTargets returns the listing untouched unless this process holds hidden tabs on this
+  // endpoint (CDP_HIDDEN_TABS, see cdp/hiddenTabs.ts).
+  if (knownTransports.get(base) === "browser-ws") return markHiddenTargets(base, await getTargetsOverBrowserWs());
   try {
     const listing = await httpJson<Target[]>("/json/list");
     knownTransports.set(base, "http");
-    return listing;
+    return markHiddenTargets(base, listing);
   } catch (httpError) {
     // Switch only when detection says this endpoint really serves no `/json`.
     // A Chrome that does serve it can still fail one `/json/list` (restarting,
@@ -301,7 +310,7 @@ export async function listTargets(): Promise<Target[]> {
       throw httpError;
     });
     knownTransports.set(base, "browser-ws");
-    return targets;
+    return markHiddenTargets(base, targets);
   }
 }
 

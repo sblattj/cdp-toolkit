@@ -114,6 +114,12 @@ export function markLongLivedProcess(value = true): void {
   longLived = value;
 }
 
+/** Whether markLongLivedProcess ran: true in the MCP server, false under the CLI. Hidden tabs
+ *  (cdp/hiddenTabs.ts) gate on it for the same reason requireLease does. */
+export function isLongLivedProcess(): boolean {
+  return longLived;
+}
+
 /**
  * Strict mode: every tool call acquires a lease for the tab it resolves, and
  * stale agent tabs are reaped on read. Off by default, so 1.4.0 consumers are

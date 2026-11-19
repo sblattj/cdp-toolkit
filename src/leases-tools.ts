@@ -45,6 +45,9 @@ export interface ClaimPageResult {
    *  in the answer so a caller knows without a second lookup whether
    *  release_page will close the tab. */
   opened: boolean;
+  /** true when the tab this call created is a hidden tab (CDP_HIDDEN_TABS): live and drivable,
+   *  but in no window, so no human can see it. Absent otherwise. */
+  hidden?: true;
   /**
    * Milliseconds since the last input this server cannot account for — i.e.
    * since a HUMAN last touched this tab. See src/activity.ts for how that
@@ -134,6 +137,7 @@ export async function claimPage(
   let targetId: string;
   let url: string;
   let opened: boolean;
+  let hidden = false;
   if (hasTarget) {
     // Gate-free on purpose: see the header. No tab is created on this path,
     // including when nothing matches.
@@ -161,6 +165,7 @@ export async function claimPage(
     targetId = page.id;
     url = page.url;
     opened = true;
+    hidden = page.hidden === true;
   }
   // Gate-free, before the claim, and only for a takeover: a tab this call is
   // about to CREATE cannot have a human in it, so asking would be theatre.
@@ -185,6 +190,7 @@ export async function claimPage(
     ttlMs: record.ttlMs,
     expiresAt: record.lastUsedAt + record.ttlMs,
     opened,
+    ...(hidden ? { hidden: true as const } : {}),
     // Absent, not null, when the backend has no beacon at all: "cannot answer"
     // and "answered, no data" are different facts (ADR-001's absent-over-
     // throwing rule applied to a field rather than to a whole tool).

@@ -9,7 +9,8 @@ import { CdpConnection, CdpError, listTargets, openBrowser, openPage, resolveTar
 import { openSession } from "./session.ts";
 import { keepFrontApp } from "../frontApp.ts";
 import type { Target, TargetSelector } from "../types.ts";
-import { chromeLeaseBackend, LeaseConflictError } from "../leases.ts";
+import { chromeLeaseBackend, isLongLivedProcess, LeaseConflictError } from "../leases.ts";
+import { disposeHiddenTabs, existingHiddenTabOwner, hiddenTabOwner, hiddenTabsRequested, type HiddenTabOwner } from "./hiddenTabs.ts";
 import { currentEndpoint } from "../endpoints.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
@@ -1829,12 +1830,18 @@ export const NEW_TARGET_SETTLE_MS = 2000;
  * The tab opens with background:true unless opts.focus is true: a tab the
  * toolkit opens must not switch the user's visible tab or take keyboard focus.
  * Without the flag Chromium (Vivaldi included) foregrounds every new tab.
+ *
+ * opts.hidden (the CDP_HIDDEN_TABS path, see ./hiddenTabs.ts) sends {background:true,
+ * hidden:true} instead and skips keepFrontApp: a hidden target activates nothing, so there is no
+ * front app to put back. A hidden target emits its first targetInfoChanged like any other
+ * (measured ~46ms on Vivaldi 156), so the settle wait is unchanged. Without opts.hidden the
+ * params are exactly what they were before hidden tabs existed.
  */
 export async function createSettledTarget(
   conn: Pick<CdpConnection, "send" | "on">,
   url: string,
   settleMs = NEW_TARGET_SETTLE_MS,
-  opts: { focus?: boolean } = {},
+  opts: { focus?: boolean; hidden?: boolean } = {},
 ): Promise<string> {
   const changed = new Set<string>();
   let id = "";
@@ -1847,9 +1854,12 @@ export async function createSettledTarget(
   });
   try {
     await conn.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
-    const create = () => conn.send<{ targetId: string }>("Target.createTarget", { url, background: opts.focus !== true });
+    const hidden = opts.hidden === true;
+    const params = hidden ? { url, background: true, hidden: true } : { url, background: opts.focus !== true };
+    const create = () => conn.send<{ targetId: string }>("Target.createTarget", params);
     // A background createTarget still brings the browser app forward on macOS: put the user's app back.
-    const { targetId } = opts.focus === true ? await create() : await keepFrontApp(create);
+    // A hidden one does not, and a foreground one is meant to.
+    const { targetId } = opts.focus === true || hidden ? await create() : await keepFrontApp(create);
     if (!targetId) throw driverError("page-error", "Target.createTarget returned no targetId");
     id = targetId;
     if (!changed.has(targetId)) {
@@ -1863,6 +1873,29 @@ export async function createSettledTarget(
     off();
   }
 }
+/**
+ * Hidden tabs are on: CDP_HIDDEN_TABS is set AND this is the long-lived MCP server. Under the
+ * one-shot CLI a hidden tab would die with the process that created it at exit, so the CLI keeps
+ * the visible path whatever the env says, the same carve-out requireLease makes (../leases.ts).
+ */
+export function hiddenTabsEnabled(): boolean {
+  return hiddenTabsRequested() && isLongLivedProcess();
+}
+
+/** The current endpoint's hidden-tab owner, created on first use. */
+function currentHiddenOwner(): HiddenTabOwner {
+  return hiddenTabOwner(currentEndpoint().base, () => ({
+    connect: () => openBrowser(),
+    createSettled: (conn, url, opts) => createSettledTarget(conn, url, NEW_TARGET_SETTLE_MS, opts),
+  }));
+}
+
+/** The current endpoint's owner when `id` is one of its live hidden tabs. Never creates one. */
+function hiddenOwnerOf(id: string): HiddenTabOwner | undefined {
+  const owner = existingHiddenTabOwner(currentEndpoint().base);
+  return owner?.has(id) ? owner : undefined;
+}
+
 class CdpBrowserDriver implements BrowserDriver {
   readonly scheme = "cdp";
   readonly lifetime: LifetimeModel = "per-call";
@@ -1874,9 +1907,16 @@ class CdpBrowserDriver implements BrowserDriver {
   async listPages(opts?: { all?: boolean }): Promise<PageInfo[]> {
     const targets = await listTargets();
     const filtered = opts?.all ? targets : targets.filter((t) => t.type === "page");
-    return filtered.map((t) => ({ id: t.id, url: t.url, title: t.title, type: t.type }));
+    // `hidden` is set by listTargets on this process's hidden tabs only (./hiddenTabs.ts).
+    return filtered.map((t) => ({ id: t.id, url: t.url, title: t.title, type: t.type, ...(t.hidden ? { hidden: true } : {}) }));
   }
   async newPage(url?: string, opts?: { focus?: boolean }): Promise<PageInfo> {
+    // CDP_HIDDEN_TABS (MCP server only): a hidden target on the held owner connection, which
+    // never brings the browser app forward. focus:true keeps the visible path below.
+    if (opts?.focus !== true && hiddenTabsEnabled()) {
+      const id = await currentHiddenOwner().create(url ?? "about:blank");
+      return { id, url: url ?? "about:blank", title: "", hidden: true };
+    }
     return withBrowserConn(async (conn) => {
       const targetId = await createSettledTarget(conn, url ?? "about:blank", NEW_TARGET_SETTLE_MS, { focus: opts?.focus === true });
       return { id: targetId, url: url ?? "about:blank", title: "" };
@@ -1886,6 +1926,14 @@ class CdpBrowserDriver implements BrowserDriver {
    *  propagated (defaulting true only when the response omits it, matching newer Chromium
    *  builds), never hardcoded. */
   async closePage(id: string): Promise<{ success: boolean }> {
+    // A hidden tab is closed over its owner (closing it raises nothing, so no keepFrontApp).
+    // Checked regardless of the env, so a tab opened before the env changed still closes cleanly.
+    const owner = hiddenOwnerOf(id);
+    if (owner) {
+      const res = await owner.close(id);
+      if (res.success) beaconSessions.drop(beaconKey(id));
+      return res;
+    }
     return withBrowserConn(async (conn) => {
       // Closing a tab also brings the browser app forward on macOS (measured): put the user's app back.
       const res = await keepFrontApp(() => conn.send<{ success?: boolean }>("Target.closeTarget", { targetId: id }));
@@ -1896,8 +1944,24 @@ class CdpBrowserDriver implements BrowserDriver {
       return { success: res.success ?? true };
     });
   }
+  /**
+   * On a hidden tab this REVEALS rather than activates: Target.activateTarget and
+   * Page.bringToFront return ok on a hidden target and show nothing (measured), so it cannot be
+   * brought forward in place. Instead its current URL opens in a new VISIBLE, foreground tab (the
+   * flash is the point: the caller asked to show it), then the hidden tab is closed, and the new
+   * tab's id is returned with `revealedFrom` naming the old one. In-page state that a URL does
+   * not carry (form input, scroll, sessionStorage, a POST result) does not survive the move.
+   */
   async activatePage(id: string): Promise<PageInfo> {
     const target = await resolveTarget(id).catch(noSuchTarget);
+    const owner = hiddenOwnerOf(target.id);
+    if (owner) {
+      const url = target.url || "about:blank";
+      const newId = await withBrowserConn((conn) => createSettledTarget(conn, url, NEW_TARGET_SETTLE_MS, { focus: true }));
+      await owner.close(target.id).catch(() => undefined);
+      beaconSessions.drop(beaconKey(target.id));
+      return { id: newId, url, title: target.title, revealedFrom: target.id };
+    }
     await withBrowserConn((conn) => conn.send("Target.activateTarget", { targetId: target.id }));
     return { id: target.id, url: target.url, title: target.title };
   }
@@ -2027,13 +2091,17 @@ class CdpBrowserDriver implements BrowserDriver {
    *  path and the CLI's exit path; a tool must never call it (see ../driver.ts). */
   async dispose(): Promise<void> {
     beaconSessions.clear();
+    // Hidden tabs die with their owner anyway; closing them first is explicit and bounded.
+    await disposeHiddenTabs();
   }
 }
 /** Construct the CDP implementation of the frozen Driver contract. */
 export function createCdpDriver(): BrowserDriver { return new CdpBrowserDriver(); }
 export { CdpBrowserDriver, CdpPageDriver };
 /* ------------------------------------------------------------------------------
- * CDP methods/domains used: Target.createTarget/closeTarget/activateTarget; Page.enable/
+ * CDP methods/domains used: Target.createTarget/closeTarget/activateTarget, plus
+ * Target.attachToTarget, targetDestroyed and Emulation.setDeviceMetricsOverride on the hidden-tab
+ * owner (./hiddenTabs.ts); Page.enable/
  * navigate/reload/getFrameTree/loadEventFired/domContentEventFired/frameStoppedLoading/
  * captureScreenshot/getLayoutMetrics/javascriptDialogOpening/handleJavaScriptDialog/
  * addScriptToEvaluateOnNewDocument (the activity beacon, see ../activity.ts);

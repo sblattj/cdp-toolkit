@@ -49,6 +49,8 @@ export interface RecordedMessage {
   targetId: string;
   method: string;
   params: unknown;
+  /** The flattened session the message was sent on, when it carried one. */
+  sessionId?: string;
 }
 
 export type CdpHandler = (params: any, ctx: { targetId: string }) => unknown | Promise<unknown>;
@@ -84,6 +86,13 @@ export class FakeCdpServer {
    * Chrome that serves only the browser socket.
    */
   failHttp: Record<string, number> = {};
+  /**
+   * When true, every Target.createTarget reply is followed by a Target.targetInfoChanged event for
+   * the new id on the same socket, the way a real browser adopts a new tab. Off by default, so
+   * existing tests see exactly the traffic they always did; createSettledTarget otherwise waits
+   * out its full settle cap against this fake.
+   */
+  emitTargetInfoChanged = false;
 
   private server: BunServer | undefined;
   private readonly initial: { browser: string; targets: FakeTarget[]; handlers: Record<string, CdpHandler> };
@@ -135,6 +144,7 @@ export class FakeCdpServer {
     this.handlers = { ...this.initial.handlers };
     this.nextTarget = 2;
     this.failHttp = {};
+    this.emitTargetInfoChanged = false;
   }
 
   /** Messages recorded for one target ("browser" for the browser socket). */
@@ -262,12 +272,16 @@ export class FakeCdpServer {
       return;
     }
     if (typeof msg.method !== "string") return;
-    this.messages.push({ targetId, method: msg.method, params: msg.params });
+    this.messages.push({ targetId, method: msg.method, params: msg.params, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) });
     const reply = (body: Record<string, unknown>) => ws.send(JSON.stringify({ id: msg.id, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}), ...body }));
     try {
       const handler = this.handlers[msg.method];
       const result = handler ? await handler(msg.params, { targetId }) : this.builtin(msg.method, msg.params, targetId);
       reply({ result: result ?? {} });
+      const created = (result as { targetId?: unknown } | undefined)?.targetId;
+      if (this.emitTargetInfoChanged && msg.method === "Target.createTarget" && typeof created === "string") {
+        ws.send(JSON.stringify({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: created } } }));
+      }
     } catch (e) {
       reply({ error: { code: -32000, message: e instanceof Error ? e.message : String(e) } });
     }

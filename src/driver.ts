@@ -212,6 +212,12 @@ export interface PageInfo {
   title: string;
   /** CDP target type ("page", "iframe", "worker", ...), when the driver has one. Additive: BiDi leaves it unset. */
   type?: string;
+  /** True for a hidden tab (CDP_HIDDEN_TABS=1, MCP server only): it is live and drivable, but it
+   *  is in no browser window, so the user cannot see it. Absent otherwise. */
+  hidden?: boolean;
+  /** Set only by activatePage on a hidden tab: that tab cannot be shown in place, so the driver
+   *  opened its URL in a new visible tab (`id`) and closed the hidden one, whose id this is. */
+  revealedFrom?: string;
 }
 
 /** How a caller points at an element. Exactly one field is set. */

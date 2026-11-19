@@ -17,6 +17,9 @@ export interface Target {
   /** present on some Chromium builds */
   parentId?: string;
   faviconUrl?: string;
+  /** A hidden tab this process owns (CDP_HIDDEN_TABS, see cdp/hiddenTabs.ts). The browser lists
+   *  it as type "other"; listTargets relabels it "page" and sets this. Absent on every other target. */
+  hidden?: boolean;
 }
 
 /** Raw CDP response envelope. */

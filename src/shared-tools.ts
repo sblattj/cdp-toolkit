@@ -42,11 +42,11 @@ import { isTiledCapture } from "./driver.ts";
 import { stitchPngBandsToFile } from "./png.ts";
 import type { TargetSelector } from "./types.ts";
 import {
-  assertLeaseOk, chromeLeaseBackend, claimLease, defaultLabel, leaseTtlMs, listLeases, releaseLeaseFor, requireLease,
+  assertLeaseOk, chromeLeaseBackend, claimLease, defaultLabel, leaseTtlMs, listLeases, readLease, releaseLeaseFor, requireLease,
   type LeaseBackend, type LeaseStaleReason, type LeaseToken,
 } from "./leases.ts";
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
-import { newTrackedPage, originIndex, resolveLiveLabel, type PageOrigin } from "./origins.ts";
+import { newTrackedPage, originIndex, readOrigin, recordOrigin, resolveLiveLabel, type PageOrigin } from "./origins.ts";
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
@@ -402,18 +402,20 @@ async function listPagesOne(
 export async function newPage(
   driver: BrowserDriver,
   args: { url?: string; claim?: boolean; label?: string; ttlMs?: number; focus?: boolean } = {},
-): Promise<{ targetId: string; url: string; lease?: LeaseToken; label?: string; expiresAt?: number }> {
+): Promise<{ targetId: string; url: string; hidden?: true; lease?: LeaseToken; label?: string; expiresAt?: number }> {
   const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
   // Creates the tab AND writes its creation record. The record outlives any
   // lease taken below, which is the point: a released tab is still an agent's.
   const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label, focus: args.focus === true });
+  // Present only for a hidden tab (CDP_HIDDEN_TABS), so the default output is byte-identical.
+  const hidden = p.hidden === true ? { hidden: true as const } : {};
   // Under strict mode a tab nobody holds is a tab nobody may drive, so creating
   // one without claiming it would hand back a target the very next call has to
   // auto-acquire anyway. Doing it here means the tab is never briefly unowned
   // AND the caller is handed a token it can release with, which matters because
   // an auto-acquired lease never returns one.
   const explicit = args.claim === true;
-  if (!explicit && !requireLease()) return { targetId: p.id, url: p.url };
+  if (!explicit && !requireLease()) return { targetId: p.id, url: p.url, ...hidden };
   // Atomic in the sense that matters: the tab is claimed before this call
   // returns, so no other agent can see it unclaimed and take it first.
   const { record, token } = await claimLease(backendOf(driver), p.id, {
@@ -430,7 +432,7 @@ export async function newPage(
   // it and a person has picked it up, which is the case the beacon exists for.
   // Nothing here is read back: a tab created a moment ago has no human history.
   await installBeacon(driver, p.id);
-  return { targetId: p.id, url: p.url, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
+  return { targetId: p.id, url: p.url, ...hidden, lease: token, label: record.label, expiresAt: record.lastUsedAt + record.ttlMs };
 }
 
 export async function closePage(
@@ -464,13 +466,42 @@ async function writeSelectedFile(id: string): Promise<void> {
  * (Target.activateTarget / browsingContext.activate) switches the user's visible
  * tab and takes window focus, so it is never a side effect of selecting.
  * resolvePage already ran the lease gate, so skipping activatePage loses no check.
+ *
+ * focus:true on a HIDDEN tab (CDP_HIDDEN_TABS) cannot raise it in place: the driver reopens its
+ * URL in a new visible tab and closes the hidden one (see the CDP driver's activatePage). The new
+ * id is what gets selected and returned, with `revealedFrom` naming the closed hidden tab. The
+ * tab's provenance label moves with it, and a lease on the hidden tab is moved to the new tab and
+ * its NEW token returned as `lease`, since the old token names a tab that no longer exists.
  */
-export async function selectPage(driver: BrowserDriver, args: { target?: TargetSelector; focus?: boolean }): Promise<{ selected: string; focused: boolean }> {
+export async function selectPage(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; focus?: boolean },
+): Promise<{ selected: string; focused: boolean; revealedFrom?: string; lease?: LeaseToken }> {
   if (args.target === undefined || args.target === "") throw new SharedToolError("select_page requires an explicit target");
   const p = await resolvePage(driver, args.target);
-  const id = args.focus === true ? (await driver.activatePage(p.id)).id : p.id;
-  await writeSelectedFile(id);
-  return { selected: id, focused: args.focus === true };
+  if (args.focus !== true) {
+    await writeSelectedFile(p.id);
+    return { selected: p.id, focused: false };
+  }
+  const shown = await driver.activatePage(p.id);
+  if (shown.revealedFrom === undefined || shown.id === p.id) {
+    await writeSelectedFile(shown.id);
+    return { selected: shown.id, focused: true };
+  }
+  const moved = await moveRevealedTab(backendOf(driver), shown.revealedFrom, shown.id);
+  await writeSelectedFile(shown.id);
+  return { selected: shown.id, focused: true, revealedFrom: shown.revealedFrom, ...(moved.lease ? { lease: moved.lease } : {}) };
+}
+
+/** Carry a revealed hidden tab's origin label and lease over to the visible tab that replaced it. */
+async function moveRevealedTab(backend: LeaseBackend, fromId: string, toId: string): Promise<{ lease?: LeaseToken }> {
+  const origin = await readOrigin(backend, fromId).catch(() => undefined);
+  if (origin) await recordOrigin(backend, toId, { label: origin.label, now: origin.createdAt });
+  const lease = await readLease(backend, fromId).catch(() => undefined);
+  if (!lease) return {};
+  await releaseLeaseFor(backend, fromId);
+  const { token } = await claimLease(backend, toId, { label: lease.label, ttlMs: lease.ttlMs, auto: lease.auto === true });
+  return { lease: token };
 }
 
 /* ------------------------------ navigation (2) ------------------------------ */

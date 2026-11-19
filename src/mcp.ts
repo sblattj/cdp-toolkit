@@ -41,6 +41,7 @@ import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
 import { resolveBackend, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
 import { disposeBrowserSession } from "./tools/browser-session.ts";
+import { disposeHiddenTabs } from "./cdp/hiddenTabs.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
@@ -528,6 +529,9 @@ async function run(argv: string[]): Promise<void> {
     // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is
     // closed explicitly so shutdown does not depend on that, and is a no-op when neither tool ran.
     await disposeBrowserSession();
+    // Hidden tabs (CDP_HIDDEN_TABS): the user can neither see nor close them, so close every one
+    // and their owner connection. A no-op when none were opened.
+    await disposeHiddenTabs().catch(() => undefined);
     // Close the active transport last, so a tool call still in flight over it cannot outlive the
     // browser resources it was driving. For http this also stops accepting new connections.
     if (stdioHandle) await stdioHandle.close().catch(() => undefined);
