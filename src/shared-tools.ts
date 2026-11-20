@@ -33,6 +33,7 @@
  * format (new feature work, not a safety-preserving migration). Per the explicit instruction that
  * behavior outranks the abstraction, these 7 stay two implementations; see the migration report.
  */
+import { focusDenied } from "./focusPolicy.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -402,13 +403,17 @@ async function listPagesOne(
 export async function newPage(
   driver: BrowserDriver,
   args: { url?: string; claim?: boolean; label?: string; ttlMs?: number; focus?: boolean } = {},
-): Promise<{ targetId: string; url: string; hidden?: true; lease?: LeaseToken; label?: string; expiresAt?: number }> {
+): Promise<{ targetId: string; url: string; hidden?: true; focusDenied?: true; lease?: LeaseToken; label?: string; expiresAt?: number }> {
   const label = typeof args.label === "string" && args.label.length ? args.label : defaultLabel();
   // Creates the tab AND writes its creation record. The record outlives any
   // lease taken below, which is the point: a released tab is still an agent's.
   const p = await newTrackedPage(driver, backendOf(driver), { url: args.url, label, focus: args.focus === true });
   // Present only for a hidden tab (CDP_HIDDEN_TABS), so the default output is byte-identical.
-  const hidden = p.hidden === true ? { hidden: true as const } : {};
+  const hidden = {
+    ...(p.hidden === true ? { hidden: true as const } : {}),
+    // Present only when a focus:true was refused (CDP_DENY_FOCUS), so the default output is unchanged.
+    ...(args.focus === true && focusDenied() ? { focusDenied: true as const } : {}),
+  };
   // Under strict mode a tab nobody holds is a tab nobody may drive, so creating
   // one without claiming it would hand back a target the very next call has to
   // auto-acquire anyway. Doing it here means the tab is never briefly unowned
@@ -476,12 +481,12 @@ async function writeSelectedFile(id: string): Promise<void> {
 export async function selectPage(
   driver: BrowserDriver,
   args: { target?: TargetSelector; focus?: boolean },
-): Promise<{ selected: string; focused: boolean; revealedFrom?: string; lease?: LeaseToken }> {
+): Promise<{ selected: string; focused: boolean; focusDenied?: true; revealedFrom?: string; lease?: LeaseToken }> {
   if (args.target === undefined || args.target === "") throw new SharedToolError("select_page requires an explicit target");
   const p = await resolvePage(driver, args.target);
-  if (args.focus !== true) {
+  if (args.focus !== true || focusDenied()) {
     await writeSelectedFile(p.id);
-    return { selected: p.id, focused: false };
+    return { selected: p.id, focused: false, ...(args.focus === true ? { focusDenied: true as const } : {}) };
   }
   const shown = await driver.activatePage(p.id);
   if (shown.revealedFrom === undefined || shown.id === p.id) {
@@ -1225,7 +1230,7 @@ export async function pressKey(driver: BrowserDriver, args: { target?: TargetSel
     if (res && res.delivered === false) {
       return {
         pressed: args.key, modifiers, delivered: false,
-        note: "the page saw no keydown: a background tab gets no trusted keyboard input. A click on the tab's page (click tool) usually gives it focus so keys land; or open the tab with new_page focus:true. A key handled inside a cross-origin iframe also reads as not delivered.",
+        note: "the page saw no keydown: a background tab gets no trusted keyboard input. A click on the tab's page (click tool) usually gives it focus so keys land; or open the tab with new_page focus:true (which raises the browser over the user's work; refused under CDP_DENY_FOCUS). A key handled inside a cross-origin iframe also reads as not delivered.",
       };
     }
     return { pressed: args.key, modifiers };

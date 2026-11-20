@@ -105,3 +105,54 @@ describe("BiDi browsingContext.create params", () => {
     expect(bidiCreateTabParams({ focus: true })).toEqual({ type: "tab", background: false });
   });
 });
+
+describe("CDP_DENY_FOCUS refuses even an explicit raise", () => {
+  const prev = process.env.CDP_DENY_FOCUS;
+  beforeEach(() => { process.env.CDP_DENY_FOCUS = "1"; });
+  afterAll(() => {
+    if (prev === undefined) delete process.env.CDP_DENY_FOCUS;
+    else process.env.CDP_DENY_FOCUS = prev;
+  });
+
+  test("new_page focus:true opens in the background and says focusDenied", async () => {
+    const { driver, newPageOpts, activated } = stubDriver();
+    const res = await newPage(driver, { focus: true });
+    expect(newPageOpts).toEqual([{ focus: false }]);
+    expect(activated).toEqual([]);
+    expect(res.focusDenied).toBe(true);
+  });
+
+  test("new_page without focus keeps the default shape (no focusDenied)", async () => {
+    const { driver } = stubDriver();
+    const res = await newPage(driver, {});
+    expect("focusDenied" in res).toBe(false);
+  });
+
+  test("claim_page focus:true opens the fresh tab in the background", async () => {
+    const { driver, newPageOpts } = stubDriver();
+    await claimPage(driver, { label: "deny", focus: true });
+    expect(newPageOpts).toEqual([{ focus: false }]);
+  });
+
+  test("select_page focus:true only selects and says focusDenied", async () => {
+    const { driver, activated } = stubDriver({ pages: [page("A"), page("B")] });
+    const res = await selectPage(driver, { target: "B", focus: true });
+    expect(res).toEqual({ selected: "B", focused: false, focusDenied: true });
+    expect(activated).toEqual([]);
+    expect(await readFile(join(dir, "state", "selected"), "utf8")).toBe("B");
+  });
+
+  test("select_page without focus is unchanged under the switch", async () => {
+    const { driver } = stubDriver({ pages: [page("A")] });
+    expect(await selectPage(driver, { target: "A" })).toEqual({ selected: "A", focused: false });
+  });
+
+  test("falsy values leave explicit focus working", async () => {
+    for (const v of ["0", "", "false", "off"]) {
+      process.env.CDP_DENY_FOCUS = v;
+      const { driver, activated } = stubDriver({ pages: [page("A")] });
+      expect(await selectPage(driver, { target: "A", focus: true })).toEqual({ selected: "A", focused: true });
+      expect(activated).toEqual(["A"]);
+    }
+  });
+});

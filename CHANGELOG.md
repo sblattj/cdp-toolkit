@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **`CDP_DENY_FOCUS=1` refuses every tab raise, even an explicit one.** Since 3.4.0 nothing raises a tab implicitly, but `new_page` / `claim_page` `focus:true`, `select_page` `focus:true` and screencast `bringToFront:true` still pull the browser over the user's work when an agent follows a hint to use them. With the switch on they take the background path, and `new_page` / `select_page` return `focusDenied: true`. Default off; output is unchanged unless a raise was refused. The `press_key` not-delivered note now says that `new_page focus:true` raises the browser.
+
 ## [3.5.0] - 2026-11-18
 
 ### Added

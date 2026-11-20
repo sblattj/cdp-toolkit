@@ -29,6 +29,7 @@
  * same way. That is why the annotation on list_pages says "unknown" and never
  * "human". Never add a "human" value here.
  */
+import { focusDenied } from "./focusPolicy.ts";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserDriver, PageInfo } from "./driver.ts";
@@ -263,8 +264,9 @@ export async function newTrackedPage(
   backend: LeaseBackend,
   opts: { url?: string; label?: string; focus?: boolean } = {},
 ): Promise<PageInfo> {
-  // Background by default: only an explicit focus:true may switch the user's visible tab.
-  const page = await driver.newPage(opts.url, { focus: opts.focus === true });
+  // Background by default: only an explicit focus:true may switch the user's visible tab,
+  // and not even that under CDP_DENY_FOCUS.
+  const page = await driver.newPage(opts.url, { focus: opts.focus === true && !focusDenied() });
   await recordOrigin(backend, page.id, { label: opts.label });
   return page;
 }

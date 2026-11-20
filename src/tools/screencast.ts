@@ -50,6 +50,7 @@
  * shell-out shape lighthouse.ts uses. No Bun.* APIs anywhere (dist/ is bundled
  * to node ESM).
  */
+import { focusDenied } from "../focusPolicy.ts";
 import { spawn } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -597,7 +598,8 @@ export async function startScreenRecording(args: StartScreenRecordingArgs = {}):
 
   try {
     await conn.send("Page.enable");
-    if (args.bringToFront) await conn.send("Page.bringToFront").catch(() => {});
+    // CDP_DENY_FOCUS refuses the raise; the 0-frame error below still explains a silent tab.
+    if (args.bringToFront && !focusDenied()) await conn.send("Page.bringToFront").catch(() => {});
     const params: Record<string, unknown> = { format };
     if (format === "jpeg" && args.quality !== undefined) params.quality = args.quality;
     if (args.maxWidth !== undefined) params.maxWidth = args.maxWidth;
