@@ -36,7 +36,7 @@
  * retries a port that was down at startup).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
 export interface Endpoint {
   name: string;
@@ -236,11 +236,27 @@ export function loadEndpoints(env: NodeJS.ProcessEnv = process.env): EndpointCon
 
 let cache: { sig: string; config: EndpointConfig } | undefined;
 
+/**
+ * The cache key. The three env vars, plus the endpoints FILE's mtime and size (issue #12): a
+ * long-lived MCP server reads its env once, so before this an endpoint added to the file was
+ * invisible until a restart. With the file's stat in the key, one server picks up a new (or
+ * edited, or removed) endpoint on its next call; one stat per call, no watcher. A missing or
+ * unreadable file keys as null, so loadEndpoints raises its usual error, which is never cached.
+ */
 function signature(env: NodeJS.ProcessEnv): string {
-  return JSON.stringify([env.CDP_BASE ?? null, env.CDP_ENDPOINTS ?? null, env.CDP_ENDPOINTS_FILE ?? null]);
+  let file: [number, number] | null = null;
+  if (env.CDP_ENDPOINTS_FILE) {
+    try {
+      const st = statSync(env.CDP_ENDPOINTS_FILE);
+      file = [st.mtimeMs, st.size];
+    } catch {
+      file = null;
+    }
+  }
+  return JSON.stringify([env.CDP_BASE ?? null, env.CDP_ENDPOINTS ?? null, env.CDP_ENDPOINTS_FILE ?? null, file]);
 }
 
-/** The process config, re-parsed whenever the three env vars change. Errors are never cached. */
+/** The process config, re-parsed whenever the three env vars or the endpoints file change. Errors are never cached. */
 export function endpointConfig(): EndpointConfig {
   const sig = signature(process.env);
   if (cache?.sig === sig) return cache.config;

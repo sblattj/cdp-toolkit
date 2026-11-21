@@ -787,8 +787,9 @@ describe("registry and manifest wiring", () => {
     // 45 after 1.8.0 Track P3 added wait_for_download and grant_permissions,
     // 47 after focus_emulation and click_focus_gated,
     // 48 after extract_page,
-    // 51 after list_tab_groups, group_tabs and ungroup_tabs (#17).
-    expect(TOOL_NAMES.length).toBe(51);
+    // 51 after list_tab_groups, group_tabs and ungroup_tabs (#17),
+    // 52 after list_contexts (#12).
+    expect(TOOL_NAMES.length).toBe(52);
   });
 
   test("every tool has a manifest schema and vice versa", () => {

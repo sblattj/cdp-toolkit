@@ -1,7 +1,7 @@
 export const TOOL_GROUPS = [
   "core", "input", "cookies", "network", "console", "mocking",
   "emulation", "performance", "recording", "leases", "permissions",
-  "dialogs", "downloads", "extraction", "tabs",
+  "dialogs", "downloads", "extraction", "tabs", "contexts",
 ] as const;
 
 export type ToolGroup = (typeof TOOL_GROUPS)[number];
@@ -33,6 +33,7 @@ export const GROUP_TOOLS: Record<ToolGroup, readonly string[]> = {
   downloads: ["wait_for_download"],
   extraction: ["extract_page"],
   tabs: ["list_tab_groups", "group_tabs", "ungroup_tabs"],
+  contexts: ["list_contexts"],
 } as const;
 
 export const TOOL_GROUP: Record<string, ToolGroup> = {};

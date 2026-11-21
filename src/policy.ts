@@ -30,6 +30,8 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   "list_cookies",
   // borderline: Accessibility.enable + getFullAXTree; enabling a domain is not a page change.
   "take_snapshot",
+  // Runtime.enable + Page.getFrameTree: lists execution contexts, changes nothing (#12).
+  "list_contexts",
   // borderline: Page.getLayoutMetrics + Page.captureScreenshot. With `uid`/`selector` it calls
   // DOM.scrollIntoViewIfNeeded (a scroll); with renderWidth/renderHeight it applies and restores an
   // Emulation.setDeviceMetricsOverride. The latter is escalated in `escalatesToMutation`.

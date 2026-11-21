@@ -63,7 +63,7 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "evaluate_script": {
-    "description": "Run arbitrary JavaScript in the target's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args', 'expression' is a raw expression; with 'args' it must be a function literal (arrow or classic) invoked on globalThis with args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. savePath writes the value to a JSON file instead -- the response then carries only {path,bytes,type,target} and the value never appears in it, the way to read a credential (a JWT/session token from localStorage) without putting the secret in the transcript. This is the one tool that EVALUATES inside an MV3 extension's background SERVICE WORKER rather than OBSERVING it (Chrome, Capability 'worker.targets'): a worker: target reads chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started first (see 'wake').",
+    "description": "Run arbitrary JavaScript in the target's main-world context over raw CDP and return the evaluated value (returnByValue). With no 'args', 'expression' is a raw expression; with 'args' it must be a function literal (arrow or classic) invoked on globalThis with args passed positionally. A thrown exception surfaces as an error; non-serializable returns (DOM nodes, functions) come back as their CDP description string. savePath writes the value to a JSON file instead -- the response then carries only {path,bytes,type,target} and the value never appears in it, the way to read a credential (a JWT/session token from localStorage) without putting the secret in the transcript. This is the one tool that EVALUATES inside an MV3 extension's background SERVICE WORKER rather than OBSERVING it (Chrome, Capability 'worker.targets'): a worker: target reads chrome.storage.local, chrome.runtime and the worker's own globals directly, with an idle-evicted worker started first (see 'wake'). By default the expression runs in the target's top document only; 'context' runs it in one nested frame or late context instead (list_contexts shows them), and 'allContexts' runs it in every context and returns rows.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', '<targetId>'; plus 'worker:<substring>' to reach a service/shared worker (e.g. an MV3 extension background worker). The worker: arm is CHROME-ONLY (Capability 'worker.targets'). Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
@@ -71,7 +71,11 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "expression": "JavaScript to run. Evaluated as an expression when 'args' is omitted; must be a function literal (arrow or classic) whose parameters receive 'args' when provided. REQUIRED -- the code always goes in this key, never in 'function', 'code', 'js', 'script', 'fn' or 'body'; a call using one of those is rejected with an error naming the wrong key.",
       "awaitPromise": "Await the result if it is a Promise. Default true.",
       "args": "Positional JSON-serializable arguments passed to the expression (treated as a function). No live element/page handle is bound.",
-      "savePath": "Write the evaluated value to this file as JSON and KEEP IT OUT OF THE RESPONSE: the result is {path,bytes,type,target} only, with no copy, preview or truncation of the value -- read credentials without putting them in a transcript. An absolute path (starting with /) is used as-is; a relative path resolves under the artifact dir (/tmp/cdp-toolkit); missing parents are created. Omit to get the value back inline."
+      "savePath": "Write the evaluated value to this file as JSON and KEEP IT OUT OF THE RESPONSE: the result is {path,bytes,type,target} only, with no copy, preview or truncation of the value -- read credentials without putting them in a transcript. An absolute path (starting with /) is used as-is; a relative path resolves under the artifact dir (/tmp/cdp-toolkit); missing parents are created. Omit to get the value back inline.",
+      "context": "Run in ONE execution context inside the target instead of its top document (a nested same-process iframe, or a late context): a number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' or 'name:<substring>'. 'auto' is refused here (no selector to match). Chrome only (Capability 'runtime.contexts'). The value comes back raw, as without it.",
+      "allContexts": "Run the expression in EVERY execution context of the target (after the settle wait) and return [{contextId,frameId,origin,name,isDefault,type,frameUrl,frameName,value|error}]; a context that throws or vanishes gets an error field, never fails the call. Find which frame holds an element with expression '!!document.querySelector(\"#id\")'. With savePath the whole array goes to the file. Not with context. Chrome only.",
+      "settleMs": "Context settle: return once no execution context has appeared or gone for this many ms. Default 500, or CDP_CONTEXT_QUIET_MS. Used by allContexts only: a named context waits until it exists, up to settleCapMs.",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "list_cookies": {
@@ -112,11 +116,22 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     }
   },
   "take_snapshot": {
-    "description": "Captures the page's accessibility tree as an indented text tree, each line prefixed [uid] (a CDP backendDOMNodeId). Every interaction tool (click/hover/fill/etc.) resolves that uid via DOM.resolveNode — run this first to discover uids to act on. Cross-origin iframe subtrees are not walked (they live in a separate renderer process); the iframe node itself is emitted with a frame=\"<targetId>\" marker (also in interactiveOnly mode), so the frame is discoverable and driveable via that id or frame:<url-substring>.",
+    "description": "Captures the page's accessibility tree as an indented text tree, each line prefixed [uid] (a CDP backendDOMNodeId). Every interaction tool (click/hover/fill/etc.) resolves that uid via DOM.resolveNode — run this first to discover uids to act on. Cross-origin iframe subtrees are not walked (they live in a separate renderer process); the iframe node itself is emitted with a frame=\"<targetId>\" marker (also in interactiveOnly mode), so the frame is discoverable and driveable via that id or frame:<url-substring>. A nested same-process iframe's content is NOT included either (the Iframe node has no children): pass context (an id from list_contexts, or url:/name:) to snapshot that frame.",
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
-      "interactiveOnly": "When true, emit only interactive/meaningful nodes as a flat list; default false returns the full hierarchical tree."
+      "interactiveOnly": "When true, emit only interactive/meaningful nodes as a flat list; default false returns the full hierarchical tree.",
+      "context": "Run in ONE execution context inside the target instead of its top document (a nested same-process iframe, or a late context): a number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' or 'name:<substring>'. 'auto' is refused here (no selector to match). Chrome only (Capability 'runtime.contexts'). The snapshot is then that frame's own accessibility tree (a nested same-process frame's subtree is NOT in the top frame's tree), and its uids drive like any other.",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
+    }
+  },
+  "list_contexts": {
+    "description": "Lists the execution contexts (JavaScript realms) inside ONE target: its top frame, every same-process nested iframe, and extension isolated worlds. A nested same-process iframe is not a target (list_pages and frame: cannot see it) and evaluate/fill/click only reach the top document by default, so this is how you find the context to pass as 'context' to evaluate_script, take_snapshot, click, hover, fill, fill_form and type_text. Contexts can appear hundreds of ms after attach (Electron webviews, lazily inserted iframes), so it waits until none appeared or vanished for settleMs, capped at settleCapMs. Returns {contexts:[{id,uniqueId,frameId,origin,name,isDefault,type,isMainFrame,frameUrl,frameName}],count,target}. Ids stay valid until their frame navigates. A frame inside an out-of-process (cross-site) iframe is in THAT iframe target's contexts: target it first with frame:<url-substring>. Chrome only (Capability 'runtime.contexts').",
+    "params": {
+      "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
+      "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
+      "settleMs": "Context settle: return once no execution context has appeared or gone for this many ms. Default 500, or CDP_CONTEXT_QUIET_MS. Used by allContexts only: a named context waits until it exists, up to settleCapMs.",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "click": {
@@ -128,7 +143,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "selector": "CSS selector for the element to click (document.querySelector). Exactly one of uid or selector.",
       "button": "Mouse button: 'left' (default), 'right', or 'middle'.",
       "clickCount": "Number of clicks: 1 (default), 2 = double-click, 3 = triple-click.",
-      "modifiers": "Modifier keys held for the click's press and release, e.g. ['Shift']. Non-empty on the Firefox backend throws — not supported over BiDi."
+      "modifiers": "Modifier keys held for the click's press and release, e.g. ['Shift']. Non-empty on the Firefox backend throws — not supported over BiDi.",
+      "context": "Run in ONE execution context inside the target instead of its top document: a nested same-process iframe (which is not a target and so not reachable with frame:), or a context that appears late. A number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' (frame url, else origin), 'name:<substring>' (the iframe's name, else the context name), or 'auto': the first frame whose document matches the css 'selector', top frame first, waiting for late frames up to settleCapMs. Default worlds win over extension isolated worlds; a substring matching two frames is an error naming both. The result gains context:{id,frameId,frameUrl}. Chrome only (Capability 'runtime.contexts').",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "hover": {
@@ -137,7 +154,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to hover, from take_snapshot. Exactly one of uid or selector.",
-      "selector": "CSS selector for the element to hover (document.querySelector). Exactly one of uid or selector."
+      "selector": "CSS selector for the element to hover (document.querySelector). Exactly one of uid or selector.",
+      "context": "Run in ONE execution context inside the target instead of its top document: a nested same-process iframe (which is not a target and so not reachable with frame:), or a context that appears late. A number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' (frame url, else origin), 'name:<substring>' (the iframe's name, else the context name), or 'auto': the first frame whose document matches the css 'selector', top frame first, waiting for late frames up to settleCapMs. Default worlds win over extension isolated worlds; a substring matching two frames is an error naming both. The result gains context:{id,frameId,frameUrl}. Chrome only (Capability 'runtime.contexts').",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "drag": {
@@ -256,7 +275,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the field to fill, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the field to fill (document.querySelector). Exactly one of uid or selector.",
-      "value": "Text value to set; the field is cleared first, overwriting existing content."
+      "value": "Text value to set; the field is cleared first, overwriting existing content.",
+      "context": "Run in ONE execution context inside the target instead of its top document: a nested same-process iframe (which is not a target and so not reachable with frame:), or a context that appears late. A number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' (frame url, else origin), 'name:<substring>' (the iframe's name, else the context name), or 'auto': the first frame whose document matches the css 'selector', top frame first, waiting for late frames up to settleCapMs. Default worlds win over extension isolated worlds; a substring matching two frames is an error naming both. The result gains context:{id,frameId,frameUrl}. Chrome only (Capability 'runtime.contexts').",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "fill_form": {
@@ -264,7 +285,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
     "params": {
       "lease": "Lease token from claim_page. Omit for a tab this process holds; required for a tab held by another process or one claimed explicitly. Auto-acquired under CDP_REQUIRE_LEASE (then pass target, not lease). See server instructions.",
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
-      "fields": "Non-empty array of fields to fill, each with exactly one of uid or selector plus a string value."
+      "fields": "Non-empty array of fields to fill, each with exactly one of uid or selector plus a string value.",
+      "context": "Run in ONE execution context inside the target instead of its top document: a nested same-process iframe (which is not a target and so not reachable with frame:), or a context that appears late. A number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' (frame url, else origin), 'name:<substring>' (the iframe's name, else the context name), or 'auto': the first frame whose document matches the FIRST field's css selector, top frame first, waiting for late frames up to settleCapMs. Default worlds win over extension isolated worlds; a substring matching two frames is an error naming both. The result gains context:{id,frameId,frameUrl}. Chrome only (Capability 'runtime.contexts'). One context for the whole form.",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "type_text": {
@@ -274,7 +297,9 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "target": "Page selector: 'active' (default), 'index:N', 'url:<substr>', 'title:<substr>', 'label:<name>', or a 32-hex '<targetId>'. Prefix any of these with 'endpoint:<name>/' for a named CDP endpoint (Chrome only). Grammar: see server instructions.",
       "uid": "CDP backendDOMNodeId of the element to type into, from take_snapshot. Exactly one of uid or selector.",
       "selector": "CSS selector for the element to type into (document.querySelector). Exactly one of uid or selector.",
-      "text": "Text to insert; appended to existing content rather than overwriting it."
+      "text": "Text to insert; appended to existing content rather than overwriting it.",
+      "context": "Run in ONE execution context inside the target instead of its top document: a nested same-process iframe (which is not a target and so not reachable with frame:), or a context that appears late. A number (an id from list_contexts), 'id:<n>', 'frame:<frameId>', 'url:<substring>' (frame url, else origin), 'name:<substring>' (the iframe's name, else the context name), or 'auto': the first frame whose document matches the css 'selector', top frame first, waiting for late frames up to settleCapMs. Default worlds win over extension isolated worlds; a substring matching two frames is an error naming both. The result gains context:{id,frameId,frameUrl}. Chrome only (Capability 'runtime.contexts').",
+      "settleCapMs": "Context settle cap: never wait longer than this many ms for late contexts (and, for context 'auto', for the selector to match). Default 2000, or CDP_CONTEXT_CAP_MS."
     }
   },
   "press_key": {

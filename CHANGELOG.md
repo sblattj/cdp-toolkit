@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Nested frames and late execution contexts (#12).** A same-process nested iframe (an Electron or WebView2 webview's chat box, an embedded editor) is not a target, so css selectors and `evaluate_script` only saw the target's main frame. New `context` param on `click`, `hover`, `fill`, `type_text`, `fill_form`, `take_snapshot` and `evaluate_script`: an id from `list_contexts`, `id:`/`frame:`/`url:`/`name:`, or `'auto'` (element tools: the first frame whose document matches the css selector). `evaluate_script {allContexts:true}` returns one row per context, errors as data. New read-only `list_contexts` tool (group `contexts`). Contexts created after `Runtime.enable` are waited for: a quiet window plus a cap (`settleMs`/`settleCapMs`, `CDP_CONTEXT_QUIET_MS`/`CDP_CONTEXT_CAP_MS`, defaults 500/2000). Nested-frame clicks aim at `DOM.getContentQuads` (root coordinates). Chrome only (`runtime.contexts`); Firefox refuses the params instead of running in the top document. `bun run contexts:smoke` proves it live.
+- **`CDP_ENDPOINTS_FILE` reloads while the server runs (#12).** The file is re-read when its mtime or size changes, so a second endpoint (an Electron app on its own debug port) is one file edit away, no restart.
+
+### Changed
+
+- The default `tools/list` grows from 5,453 to 6,398 bytes, because four of the five gateway tools gained `context`/`settleCapMs`.
+
 ## [3.6.0] - 2026-11-20
 
 ### Added

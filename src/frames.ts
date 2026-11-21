@@ -162,8 +162,8 @@ export function frameMissMessage(needle: string, liveFrames: readonly FrameTarge
     `no out-of-process iframe whose url contains '${needle}'${live}. ` +
     "Only a CROSS-ORIGIN iframe gets its own process and therefore its own target; a same-origin iframe " +
     "runs inside its parent page and is NOT a target at all, so no substring can ever select it — reach a " +
-    "same-origin iframe through its parent page instead (evaluate_script on the page, then the iframe " +
-    "element's contentDocument). An out-of-process iframe whose document navigated away is likewise gone " +
+    "same-origin iframe through its parent page instead: target the page and pass context (list_contexts " +
+    "names each frame; context:'auto' finds the frame holding a selector, Chrome only). An out-of-process iframe whose document navigated away is likewise gone " +
     "from the listing: re-list with list_pages{all:true} and pass the new target id."
   );
 }

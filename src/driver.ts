@@ -64,6 +64,7 @@ import type { ToolName } from "./index.ts";
 // rather than minting a second state location.
 import { leaseDir } from "./leases.ts";
 import type { TargetSelector } from "./types.ts";
+import type { ContextEvalRow, ExecutionContextInfo, SettleOptions } from "./contexts.ts";
 
 /* ---------------------------------- uids ---------------------------------- */
 
@@ -156,7 +157,8 @@ export type Capability =
   | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome, Firefox 160+
   | "browser.tabGroups" // list/create/remove tab groups through a helper extension (list_tab_groups, group_tabs, ungroup_tabs); Chrome only, BiDi cannot reach an extension background context
   | "worker.targets" // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
-  | "frame.targets"; // address an out-of-process (cross-origin) iframe as a target ("frame:<substr>"); Chrome only — same-site iframes are not targets at all
+  | "frame.targets" // address an out-of-process (cross-origin) iframe as a target ("frame:<substr>"); Chrome only — same-site iframes are not targets at all
+  | "runtime.contexts"; // list and pick execution contexts INSIDE a target (nested same-process frames, late contexts: issue #12); Chrome only
 
 /**
  * Tools whose availability depends on a capability. A tool absent from this
@@ -183,6 +185,7 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   list_tab_groups: ["browser.tabGroups"],
   group_tabs: ["browser.tabGroups"],
   ungroup_tabs: ["browser.tabGroups"],
+  list_contexts: ["runtime.contexts"],
 } as const;
 
 /* --------------------------------- errors --------------------------------- */
@@ -886,6 +889,16 @@ export interface PageDriver {
   /* script */
   /** Evaluate an expression, or call it as a function when `args` is given. */
   evaluate(expression: string, opts?: { args?: readonly unknown[]; awaitPromise?: boolean }): Promise<unknown>;
+  /**
+   * Execution contexts (issue #12; Capability "runtime.contexts", so optional: a driver without
+   * it leaves all three undefined and the tools refuse the `context` / `allContexts` params).
+   * listContexts waits for late contexts (settle: quiet period, capped). useContext PINS this
+   * PageDriver to one context: every later evaluate, css locate and snapshot on it runs there.
+   * evaluateAllContexts runs one expression in every context; a per-context throw is a row, not a throw.
+   */
+  listContexts?(opts?: SettleOptions): Promise<ExecutionContextInfo[]>;
+  useContext?(context: unknown, opts?: { css?: string; settle?: SettleOptions }): Promise<ExecutionContextInfo>;
+  evaluateAllContexts?(expression: string, opts?: { args?: readonly unknown[]; awaitPromise?: boolean; settle?: SettleOptions }): Promise<ContextEvalRow[]>;
   /** Call a function literal with an element as `this`, returning by value. */
   callOnElement(loc: ElementLocator, functionDeclaration: string, args?: readonly unknown[]): Promise<unknown>;
 

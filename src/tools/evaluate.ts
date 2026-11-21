@@ -151,5 +151,7 @@ export async function evaluateScript(args: EvaluateScriptArgs): Promise<unknown>
  *     JSON-serializable values passed positionally; no live element/page handle is bound.
  *   - Non-serializable return values (DOM nodes, functions, circular objects) come back as their CDP
  *     `description` string rather than a structured handle, since returnByValue is used.
- *   - No isolated-world/contextId selection: evaluation runs in the page's default main-world context.
+ *   - This module has no contextId selection: it runs in the page's default main-world context. The
+ *     MCP/CLI evaluate_script (src/shared-tools.ts) adds it: `context` picks one execution context and
+ *     `allContexts` runs in each (issue #12, Chrome only).
  */

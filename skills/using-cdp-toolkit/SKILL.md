@@ -116,6 +116,12 @@ A `uid` **is** a CDP `backendDOMNodeId` (a raw number), so refs are stateless.
 1. `take_snapshot` (add `interactiveOnly:true` to shrink) → an indented a11y tree; each line carries `[uid] role "name"`.
 2. `click`/`hover`/`fill`/`type_text`/`press_key`/`upload_file` take `{uid}` **or** `{selector}` (CSS, plain — no `:has-text()` pseudo-selectors).
 
+**`matched no element` for something you can see?** It is probably in a nested same-process iframe (an Electron/WebView2 webview's chat box, an embedded editor): css selectors and `evaluate_script` only see the target's main frame, and `frame:` only reaches out-of-process iframes. Chrome only:
+- `fill`/`click`/`hover`/`type_text`/`fill_form` with `context:"auto"` search every frame for the selector, waiting for late frames (up to `settleCapMs`, default 2000).
+- `list_contexts` lists the frames' execution contexts; pass one as `context` (`3`, `url:/inner`, `name:active-frame`).
+- `evaluate_script {allContexts:true}` runs once per context, one row each; rows with `isDefault:false` are extension isolated worlds on the same DOM.
+- `take_snapshot {context}` returns that frame's own tree (the plain snapshot leaves nested-frame contents out).
+
 There is no implicit wait — re-`take_snapshot` between steps. `type_text`/`fill` commit via `Input.insertText` (an atomic paste, not per-key), which some framework-controlled inputs ignore; if a value shows but the form stays "empty," set it via the native value setter and dispatch `input`/`change`.
 
 ## evaluate_script: invoke, don't just define

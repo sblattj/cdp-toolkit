@@ -398,6 +398,46 @@ describe("CDP_ENDPOINTS_FILE config, end to end", () => {
   }, 30_000);
 });
 
+/* ------------------------- endpoints file edited while the server runs (#12) ------------------------- */
+
+describe("an endpoint added to CDP_ENDPOINTS_FILE while the server runs (#12)", () => {
+  test("is picked up on the next call: one server screenshots a target on the new endpoint, no restart", async () => {
+    const fakeA = new FakeCdpServer();
+    const fakeB = new FakeCdpServer({ targets: TEAMS_TARGETS });
+    await fakeA.start();
+    await fakeB.start();
+    const dir = mkdtempSync(join(scratch, "reload-"));
+    const file = join(dir, "endpoints.json");
+    writeFileSync(file, JSON.stringify({ default: "browser", endpoints: { browser: { base: fakeA.base } } }));
+    const mcp = await new McpChild({ CDP_ENDPOINTS_FILE: file, CDP_ARTIFACT_DIR: dir, CDP_STATE_DIR: dir }).start();
+    try {
+      // Red before the fix: the server only knows the endpoints it read at its first call.
+      const before = await mcp.call("take_screenshot", { target: "endpoint:second/title:Chat" });
+      expect(before.isError).toBe(true);
+      expect(before.text).toContain("second");
+      expect(traffic(fakeB)).toEqual({ messages: 0, requests: 0 });
+
+      // Same size would still differ in mtime; the new content is longer anyway.
+      writeFileSync(
+        file,
+        JSON.stringify({ default: "browser", endpoints: { browser: { base: fakeA.base }, second: { base: fakeB.base } } }),
+      );
+      const after = await mcp.call("take_screenshot", { target: "endpoint:second/title:Chat" });
+      expect(after.isError).toBe(false);
+      expect(methodsOf(fakeB, "CHAT1")).toContain("Page.captureScreenshot");
+
+      // Removing it again is picked up the same way.
+      writeFileSync(file, JSON.stringify({ default: "browser", endpoints: { browser: { base: fakeA.base } } }) + "\n\n");
+      const removed = await mcp.call("take_screenshot", { target: "endpoint:second/title:Chat" });
+      expect(removed.isError).toBe(true);
+    } finally {
+      mcp.close();
+      await fakeA.stop();
+      await fakeB.stop();
+    }
+  }, 30_000);
+});
+
 /* --------------------------------- late-starting endpoint --------------------------------- */
 
 describe("an endpoint that is down at server start", () => {

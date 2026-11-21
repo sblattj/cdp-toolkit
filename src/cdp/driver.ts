@@ -14,6 +14,11 @@ import { disposeHiddenTabs, existingHiddenTabOwner, hiddenTabOwner, hiddenTabsRe
 import { currentEndpoint } from "../endpoints.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
+import { ContextTracker } from "./contexts.ts";
+import {
+  CONTEXT_AUTO_NEEDS_SELECTOR, autoCandidates, describeContext, parseContextSelector, pickExecutionContext, resolveSettle,
+  type ContextEvalRow, type ExecutionContextInfo, type SettleOptions,
+} from "../contexts.ts";
 import { resolveWorkerSelector } from "./workers.ts";
 import { buildFulfillParams, effectiveAction, selectRule } from "../tools/network_mock.ts";
 import {
@@ -85,14 +90,32 @@ export function cdpSameSite(sameSite?: "strict" | "lax" | "none" | "default"): "
 
 /* ---------------------- copied helpers, see attributions below ---------------------- */
 // Copied verbatim from src/tools/input.ts `centerOf`: scroll into view, read viewport-space center.
+//
+// ONE ADDITION (issue #12): an element inside a NESTED same-process frame. getBoundingClientRect is
+// relative to that frame's own viewport, but Input.dispatchMouseEvent takes the target's root
+// viewport, so the old point missed by the frame's offset (measured: 79px/110px off for a frame
+// with margin and border). For such an element only (`nested`: its window has a frameElement,
+// which is null at the target's top, including an OOPIF's top, whose parent is cross-origin), the
+// point comes from DOM.getContentQuads, which is root-relative. Top-frame elements keep the exact
+// pre-#12 point, and a quads failure falls back to it.
 async function centerOf(conn: PageConnection, objectId: string): Promise<{ x: number; y: number }> {
-  const fn = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();if(r.width===0&&r.height===0)return null;return {x:r.left+r.width/2,y:r.top+r.height/2};}";
-  const { result, exceptionDetails } = await conn.send<{ result: { value?: { x: number; y: number } | null }; exceptionDetails?: { text?: string } }>(
+  const fn = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();if(r.width===0&&r.height===0)return null;var w=this.ownerDocument&&this.ownerDocument.defaultView;var nested=false;try{nested=!!(w&&w.frameElement);}catch(e){}return {x:r.left+r.width/2,y:r.top+r.height/2,nested:nested};}";
+  const { result, exceptionDetails } = await conn.send<{ result: { value?: { x: number; y: number; nested?: boolean } | null }; exceptionDetails?: { text?: string } }>(
     "Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true },
   );
   if (exceptionDetails) throw driverError("page-error", `could not measure element: ${exceptionDetails.text ?? "error"}`);
   if (!result.value) throw driverError("page-error", "element has zero size / is not visible; cannot compute a click point");
-  return result.value;
+  const { x, y, nested } = result.value;
+  if (nested) {
+    const quads = await conn.send<{ quads?: number[][] }>("DOM.getContentQuads", { objectId }).catch(() => undefined);
+    const q = quads?.quads?.[0];
+    if (q && q.length >= 8) {
+      const xs = [q[0]!, q[2]!, q[4]!, q[6]!];
+      const ys = [q[1]!, q[3]!, q[5]!, q[7]!];
+      return { x: xs.reduce((a, b) => a + b, 0) / 4, y: ys.reduce((a, b) => a + b, 0) / 4 };
+    }
+  }
+  return { x, y };
 }
 /**
  * Keyboard input on a BACKGROUND tab. Measured on Vivaldi (Chromium 156) with one page connection
@@ -339,7 +362,9 @@ function axExtras(node: AxNode): Record<string, string> {
 }
 /* ------------------------------- locator helpers ------------------------------- */
 // css branch copied from src/tools/input.ts `resolveElement`; uid/text/xpath branches are new.
-async function resolveElementLocator(conn: PageConnection, loc: ElementLocator): Promise<{ objectId: string }> {
+// `contextId` (issue #12) scopes the css branch to one execution context; uid/text/xpath are
+// frame-agnostic already (DOM.resolveNode / DOM.performSearch work across same-process frames).
+async function resolveElementLocator(conn: PageConnection, loc: ElementLocator, contextId?: number): Promise<{ objectId: string }> {
   if ("uid" in loc) {
     return resolveUid(conn, decodeUid(loc.uid)).catch(() => {
       throw driverError("stale-uid", `uid does not resolve: ${loc.uid}`);
@@ -347,7 +372,7 @@ async function resolveElementLocator(conn: PageConnection, loc: ElementLocator):
   }
   if ("css" in loc) {
     const { result, exceptionDetails } = await conn.send<{ result: { objectId?: string; subtype?: string }; exceptionDetails?: { text?: string } }>(
-      "Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(loc.css)})`, returnByValue: false },
+      "Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(loc.css)})`, returnByValue: false, ...(contextId !== undefined ? { contextId } : {}) },
     );
     if (exceptionDetails) throw driverError("page-error", `css '${loc.css}' evaluation failed: ${exceptionDetails.text ?? "error"}`);
     if (!result.objectId || result.subtype === "null") throw driverError("no-such-element", `css '${loc.css}' matched no element`);
@@ -379,10 +404,10 @@ async function searchLocate(conn: PageConnection, query: string): Promise<number
   }
 }
 
-async function backendNodeIdOf(conn: PageConnection, loc: ElementLocator): Promise<number> {
+async function backendNodeIdOf(conn: PageConnection, loc: ElementLocator, contextId?: number): Promise<number> {
   if ("uid" in loc) return decodeUid(loc.uid);
   if ("css" in loc) {
-    const { objectId } = await resolveElementLocator(conn, loc);
+    const { objectId } = await resolveElementLocator(conn, loc, contextId);
     const { node } = await conn.send<{ node: { backendNodeId: number } }>("DOM.describeNode", { objectId });
     return node.backendNodeId;
   }
@@ -747,6 +772,7 @@ const CDP_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   "snapshot.accessibilityTree", "input.insertTextAtomic", "locate.text", "locate.xpath",
   "capture.screencast", "input.raw", "input.modifierClick", "input.html5Drag", "emulate.focus",
   "browser.downloads", "browser.permissions", "browser.tabGroups", "worker.targets", "frame.targets",
+  "runtime.contexts",
 ]);
 /* ---------------------------------- PageDriver ---------------------------------- */
 class CdpPageDriver implements PageDriver {
@@ -757,6 +783,9 @@ class CdpPageDriver implements PageDriver {
   // side effect) it did not have before this migration. See the per-method comments below.
   private readonly enabledDomains = new Set<string>();
   private released = false;
+  /** Issue #12: the context tracker, created on first need, and the context this call is pinned to. */
+  private tracker?: ContextTracker;
+  private pinned?: ExecutionContextInfo;
   constructor(private readonly conn: PageConnection, target: Target, readonly browser: BrowserDriver) {
     this.info = { id: target.id, url: target.url, title: target.title, type: target.type };
   }
@@ -900,18 +929,114 @@ class CdpPageDriver implements PageDriver {
     // call sites converging on one hard enable here is not expected to be observable in practice.
     await this.ensureDomain("Runtime");
     const awaitPromise = opts?.awaitPromise ?? true;
-    if (opts?.args && opts.args.length > 0) {
-      const globalObj = await this.conn.send<{ result: { objectId?: string } }>("Runtime.evaluate", { expression: "globalThis", returnByValue: false });
+    return this.evaluateIn(this.pinned?.id, expression, opts?.args, awaitPromise);
+  }
+  /** evaluate()'s body, in one execution context (undefined = the target's default one). */
+  private async evaluateIn(contextId: number | undefined, expression: string, args: readonly unknown[] | undefined, awaitPromise: boolean): Promise<unknown> {
+    const ctx = contextId !== undefined ? { contextId } : {};
+    if (args && args.length > 0) {
+      const globalObj = await this.conn.send<{ result: { objectId?: string } }>("Runtime.evaluate", { expression: "globalThis", returnByValue: false, ...ctx });
       const objectId = globalObj.result.objectId;
       if (!objectId) throw driverError("page-error", "could not resolve global object for function call");
-      return this.callFn(objectId, expression, opts.args, awaitPromise);
+      return this.callFn(objectId, expression, args, awaitPromise);
     }
-    const res = await this.conn.send<{ result: RemoteObject; exceptionDetails?: ExceptionDetails }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise });
+    const res = await this.conn.send<{ result: RemoteObject; exceptionDetails?: ExceptionDetails }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise, ...ctx });
     if (res.exceptionDetails) throw driverError("page-error", exceptionMessage(res.exceptionDetails));
     return unwrap(res.result);
   }
+  /* ----------------------------- execution contexts (issue #12) ----------------------------- */
+  private async contextTracker(): Promise<ContextTracker> {
+    if (!this.tracker) {
+      const tracker = new ContextTracker(this.conn);
+      this.tracker = tracker;
+      await tracker.start(this.enabledDomains.has("Runtime"));
+      this.enabledDomains.add("Runtime");
+    }
+    return this.tracker;
+  }
+  async listContexts(opts?: SettleOptions): Promise<ExecutionContextInfo[]> {
+    const settle = resolveSettle(opts);
+    const tracker = await this.contextTracker();
+    await tracker.settle(settle);
+    return tracker.contexts();
+  }
+  async useContext(context: unknown, opts?: { css?: string; settle?: SettleOptions }): Promise<ExecutionContextInfo> {
+    const sel = parseContextSelector(context);
+    const settle = resolveSettle(opts?.settle);
+    const tracker = await this.contextTracker();
+    if (sel.kind === "auto") {
+      const css = opts?.css;
+      if (!css) throw driverError("page-error", CONTEXT_AUTO_NEEDS_SELECTOR);
+      let found: ExecutionContextInfo | undefined;
+      const probe = `document.querySelector(${JSON.stringify(css)}) !== null`;
+      // Wait for the selector itself, not for quiet: a late frame's context can appear, and its
+      // document fill in, well after the existing ones went quiet. Every round re-tests every
+      // candidate, because a context is created before its document has parsed.
+      await tracker.settle(settle, async () => {
+        for (const c of autoCandidates(await tracker.contexts())) {
+          const r = await this.conn
+            .send<{ result?: { value?: unknown } }>("Runtime.evaluate", { expression: probe, returnByValue: true, contextId: c.id })
+            .catch(() => undefined);
+          if (r?.result?.value === true) {
+            found = c;
+            return true;
+          }
+        }
+        return false;
+      }, true);
+      if (!found) {
+        const live = await tracker.contexts();
+        throw driverError(
+          "no-such-element",
+          `css '${css}' matched no element in any frame of this target within ${settle.capMs}ms ` +
+            `(searched ${autoCandidates(live).length} frame context(s): ${autoCandidates(live).map(describeContext).join("; ") || "none"}). ` +
+            "Raise settleCapMs if the frame loads late; a frame inside an out-of-process iframe is a separate target (frame:<url-substring>).",
+        );
+      }
+      this.pinned = found;
+      return found;
+    }
+    // A named context: return as soon as it is there, else settle and decide.
+    let pick = pickExecutionContext(await tracker.contexts(), sel);
+    if (!pick.hit) {
+      // Quiet is ignored here: the caller NAMED a context, so "nothing new for quietMs" is no
+      // reason to give up on it. It waits for that context up to the cap, then reports the miss.
+      await tracker.settle(settle, async () => !!pickExecutionContext(await tracker.contexts(), sel).hit, true);
+      pick = pickExecutionContext(await tracker.contexts(), sel);
+    }
+    if (!pick.hit) throw driverError("page-error", pick.error ?? "no such execution context");
+    this.pinned = pick.hit;
+    return pick.hit;
+  }
+  async evaluateAllContexts(
+    expression: string,
+    opts?: { args?: readonly unknown[]; awaitPromise?: boolean; settle?: SettleOptions },
+  ): Promise<ContextEvalRow[]> {
+    const list = await this.listContexts(opts?.settle);
+    const rows: ContextEvalRow[] = [];
+    for (const c of list) {
+      const row: ContextEvalRow = {
+        contextId: c.id,
+        ...(c.frameId ? { frameId: c.frameId } : {}),
+        origin: c.origin,
+        name: c.name,
+        isDefault: c.isDefault,
+        type: c.type,
+        ...(c.frameUrl ? { frameUrl: c.frameUrl } : {}),
+        ...(c.frameName ? { frameName: c.frameName } : {}),
+      };
+      try {
+        row.value = await this.evaluateIn(c.id, expression, opts?.args, opts?.awaitPromise ?? true);
+      } catch (e) {
+        // Per-context failures are data: one frame throwing (or vanishing mid-call) never sinks the rest.
+        row.error = e instanceof Error ? e.message : String(e);
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
   async callOnElement(loc: ElementLocator, functionDeclaration: string, args: readonly unknown[] = []): Promise<unknown> {
-    const { objectId } = await resolveElementLocator(this.conn, loc);
+    const { objectId } = await resolveElementLocator(this.conn, loc, this.pinned?.id);
     return this.callFn(objectId, functionDeclaration, args, true);
   }
   /**
@@ -942,7 +1067,11 @@ class CdpPageDriver implements PageDriver {
   async snapshot(opts?: { interactiveOnly?: boolean }): Promise<SnapshotNode[]> {
     const interactiveOnly = opts?.interactiveOnly ?? false;
     await this.ensureDomain("Accessibility");
-    const { nodes } = await this.conn.send<{ nodes: AxNode[] }>("Accessibility.getFullAXTree");
+    // Issue #12: a nested same-process frame's subtree is NOT in the top frame's AX tree (measured,
+    // Chromium 158: the Iframe node comes back with no children), so a pinned context asks for its
+    // own frame's tree. Unpinned, the request is byte-identical to before.
+    const frameId = this.pinned?.frameId;
+    const { nodes } = await this.conn.send<{ nodes: AxNode[] }>("Accessibility.getFullAXTree", frameId ? { frameId } : undefined);
     const oopifFrames = await this.detectOopifFrames();
     const byId = new Map<string, AxNode>();
     for (const n of nodes) byId.set(n.nodeId, n);
@@ -1012,7 +1141,7 @@ class CdpPageDriver implements PageDriver {
     return markers;
   }
   async locate(loc: ElementLocator): Promise<DriverUid> {
-    return encodeUid(await backendNodeIdOf(this.conn, loc));
+    return encodeUid(await backendNodeIdOf(this.conn, loc, this.pinned?.id));
   }
   async resolve(uid: DriverUid): Promise<void> {
     await resolveUid(this.conn, decodeUid(uid)).catch(() => {
@@ -1021,7 +1150,7 @@ class CdpPageDriver implements PageDriver {
   }
   // Copied verbatim from src/tools/input.ts `hover`.
   async hover(loc: ElementLocator): Promise<{ x: number; y: number }> {
-    const { objectId } = await resolveElementLocator(this.conn, loc);
+    const { objectId } = await resolveElementLocator(this.conn, loc, this.pinned?.id);
     const { x, y } = await centerOf(this.conn, objectId);
     await this.dispatchInput("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     return { x, y };
@@ -1153,11 +1282,11 @@ class CdpPageDriver implements PageDriver {
     }
   }
   async setValue(loc: ElementLocator, value: string): Promise<TextInputPath> {
-    const { objectId } = await resolveElementLocator(this.conn, loc);
+    const { objectId } = await resolveElementLocator(this.conn, loc, this.pinned?.id);
     return setValueOnObject(this.conn, objectId, value, (method, params) => this.dispatchInput(method, params));
   }
   async typeText(loc: ElementLocator, text: string): Promise<TextInputPath> {
-    const { objectId } = await resolveElementLocator(this.conn, loc);
+    const { objectId } = await resolveElementLocator(this.conn, loc, this.pinned?.id);
     await focusElement(this.conn, objectId);
     return text.length ? insertTextVerified(this.conn, objectId, text, (method, params) => this.dispatchInput(method, params)) : "trusted";
   }
@@ -1179,7 +1308,7 @@ class CdpPageDriver implements PageDriver {
     });
   }
   async setFiles(loc: ElementLocator, files: readonly string[]): Promise<void> {
-    const { objectId } = await resolveElementLocator(this.conn, loc);
+    const { objectId } = await resolveElementLocator(this.conn, loc, this.pinned?.id);
     await this.conn.send("DOM.setFileInputFiles", { files: [...files], objectId });
   }
   /**
@@ -1676,6 +1805,7 @@ class CdpPageDriver implements PageDriver {
   async release(): Promise<void> {
     if (this.released) return;
     this.released = true;
+    this.tracker?.dispose();
     this.conn.close();
   }
 }

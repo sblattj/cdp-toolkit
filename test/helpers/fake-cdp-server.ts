@@ -53,7 +53,13 @@ export interface RecordedMessage {
   sessionId?: string;
 }
 
-export type CdpHandler = (params: any, ctx: { targetId: string }) => unknown | Promise<unknown>;
+/**
+ * `emit` pushes a CDP event on the connection the request came in on (with its sessionId, if
+ * any). Called BEFORE the handler returns, the event goes out ahead of the reply, the order
+ * real Chrome uses for Runtime.enable's context replay; from a timer, it arrives later, the way
+ * a late execution context does.
+ */
+export type CdpHandler = (params: any, ctx: { targetId: string; emit: (method: string, params?: unknown) => void }) => unknown | Promise<unknown>;
 
 export interface FakeCdpOptions {
   /** `Browser` string in /json/version. Default "Chrome/150.0.0.0 (fake)". */
@@ -276,7 +282,14 @@ export class FakeCdpServer {
     const reply = (body: Record<string, unknown>) => ws.send(JSON.stringify({ id: msg.id, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}), ...body }));
     try {
       const handler = this.handlers[msg.method];
-      const result = handler ? await handler(msg.params, { targetId }) : this.builtin(msg.method, msg.params, targetId);
+      const emit = (method: string, params: unknown = {}) => {
+        try {
+          ws.send(JSON.stringify({ method, params, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) }));
+        } catch {
+          // the socket closed before a delayed event fired: nothing to deliver to
+        }
+      };
+      const result = handler ? await handler(msg.params, { targetId, emit }) : this.builtin(msg.method, msg.params, targetId);
       reply({ result: result ?? {} });
       const created = (result as { targetId?: unknown } | undefined)?.targetId;
       if (this.emitTargetInfoChanged && msg.method === "Target.createTarget" && typeof created === "string") {

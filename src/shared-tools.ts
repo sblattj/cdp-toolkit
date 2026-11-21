@@ -51,6 +51,10 @@ import { newTrackedPage, originIndex, readOrigin, recordOrigin, resolveLiveLabel
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
+import {
+  CONTEXT_AUTO_EVALUATE, CONTEXT_AUTO_NEEDS_SELECTOR, CONTEXT_UNSUPPORTED_MESSAGE, ContextSelectorError, parseContextSelector,
+  type ExecutionContextInfo, type SettleOptions,
+} from "./contexts.ts";
 import { ACCNAME_HELPERS_SOURCE, MAX_NAME_LENGTH } from "./bidi/snapshot.ts";
 import { allEndpoints, currentEndpoint, isDefaultEndpoint, withEndpointScope } from "./endpoints.ts";
 
@@ -203,7 +207,71 @@ async function pickByLabel(driver: BrowserDriver, pages: PageInfo[], label: stri
   );
 }
 
+/* ------------------------------ execution contexts (issue #12) ------------------------------ */
+
+/** The `context` / settle params every context-aware tool shares. */
+interface ContextArgs {
+  context?: number | string;
+  settleMs?: number;
+  settleCapMs?: number;
+}
+
+function settleOf(args: ContextArgs): SettleOptions {
+  return { ...(args.settleMs !== undefined ? { quietMs: args.settleMs } : {}), ...(args.settleCapMs !== undefined ? { capMs: args.settleCapMs } : {}) };
+}
+
+function wantsContext(args: ContextArgs): boolean {
+  return args.context !== undefined && args.context !== null;
+}
+
+/** Refuse a context param on a backend without "runtime.contexts", before any page is acquired. */
+function assertContextSupport(driver: BrowserDriver, tool: string, used: boolean): void {
+  if (used && !driver.capabilities.has("runtime.contexts")) throw new SharedToolError(`${tool}: ${CONTEXT_UNSUPPORTED_MESSAGE}`);
+}
+
+/**
+ * Pin `page` to the requested context, if any. Returns the result field describing the pick
+ * (`{context:{id,frameId,frameUrl}}`), or `{}` when no context was asked for, so an unchanged
+ * call returns a byte-identical result. A bad selector string is a SharedToolError up front.
+ */
+async function applyContext(page: PageDriver, tool: string, args: ContextArgs, css?: string): Promise<{ context?: { id: number; frameId?: string; frameUrl?: string } }> {
+  if (!wantsContext(args)) return {};
+  if (!page.useContext) throw new SharedToolError(`${tool}: ${CONTEXT_UNSUPPORTED_MESSAGE}`);
+  let c: ExecutionContextInfo;
+  try {
+    parseContextSelector(args.context);
+    c = await page.useContext(args.context, { css, settle: settleOf(args) });
+  } catch (e) {
+    if (e instanceof ContextSelectorError) throw new SharedToolError(`${tool}: ${e.message}`);
+    throw e;
+  }
+  return { context: { id: c.id, ...(c.frameId ? { frameId: c.frameId } : {}), ...(c.frameUrl ? { frameUrl: c.frameUrl } : {}) } };
+}
+
+export async function listContexts(
+  driver: BrowserDriver,
+  args: { target?: TargetSelector; settleMs?: number; settleCapMs?: number } = {},
+): Promise<{ contexts: ExecutionContextInfo[]; count: number; target: { id: string; url: string; title: string } }> {
+  assertContextSupport(driver, "list_contexts", true);
+  return withPage(driver, args.target, async (page) => {
+    if (!page.listContexts) throw new SharedToolError(`list_contexts: ${CONTEXT_UNSUPPORTED_MESSAGE}`);
+    let contexts: ExecutionContextInfo[];
+    try {
+      contexts = await page.listContexts(settleOf(args));
+    } catch (e) {
+      if (e instanceof ContextSelectorError) throw new SharedToolError(`list_contexts: ${e.message}`);
+      throw e;
+    }
+    return { contexts, count: contexts.length, target: target3(page.info) };
+  });
+}
+
 /* -------------------------------- element locators -------------------------------- */
+
+/** The css string of a css locator, for context 'auto' (which needs one to match frames with). */
+function cssOf(loc: ElementLocator): string | undefined {
+  return "css" in loc ? loc.css : undefined;
+}
 
 function locatorOf(args: { uid?: DriverUid; selector?: string }): ElementLocator {
   const hasUid = args.uid !== undefined && args.uid !== null && args.uid !== ("" as unknown);
@@ -684,10 +752,10 @@ export async function resolveWorkerSelectorFor(
 
 export async function evaluateScript(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string; wake?: boolean },
+  args: { target?: TargetSelector; expression: string; awaitPromise?: boolean; args?: unknown[]; savePath?: string; wake?: boolean; allContexts?: boolean } & ContextArgs,
 ): Promise<unknown> {
   if (typeof args.expression !== "string" || args.expression.length === 0) {
-    const wrongKey = EXPRESSION_ALIAS_KEYS.find((k) => (args as Record<string, unknown>)[k] !== undefined);
+    const wrongKey = EXPRESSION_ALIAS_KEYS.find((k) => (args as unknown as Record<string, unknown>)[k] !== undefined);
     if (wrongKey !== undefined) {
       throw new SharedToolError(
         `evaluateScript: you passed '${wrongKey}'; the key is 'expression' — function literals go in 'expression', invoked with 'args'.`,
@@ -706,13 +774,42 @@ export async function evaluateScript(
       "evaluateScript: 'wake' only applies to a target of the form 'worker:<substring>'; a page target is never asleep.",
     );
   }
+  if (args.allContexts !== undefined && typeof args.allContexts !== "boolean") {
+    throw new SharedToolError("evaluateScript: 'allContexts' must be a boolean");
+  }
+  const allContexts = args.allContexts === true;
+  if (allContexts && wantsContext(args)) {
+    throw new SharedToolError("evaluateScript: pass either 'context' (one context) or 'allContexts' (every context), not both");
+  }
+  if (args.context === "auto") throw new SharedToolError(`evaluateScript: ${CONTEXT_AUTO_EVALUATE}`);
+  if ((allContexts || wantsContext(args)) && isWorkerSelector(args.target)) {
+    throw new SharedToolError("evaluateScript: a worker has exactly one context; 'context' / 'allContexts' apply to page and iframe targets");
+  }
+  assertContextSupport(driver, "evaluateScript", allContexts || wantsContext(args));
   // Resolved to a bare target id BEFORE acquisition, so the page() call below is
   // the same one every other selector makes.
   const target = isWorkerSelector(args.target)
     ? (await resolveWorkerSelectorFor(driver, args.target, args.wake ?? true)).id
     : args.target;
   return withPage(driver, target, async (page) => {
-    const value = await page.evaluate(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true });
+    let value: unknown;
+    if (allContexts) {
+      if (!page.evaluateAllContexts) throw new SharedToolError(`evaluateScript: ${CONTEXT_UNSUPPORTED_MESSAGE}`);
+      // Rows of {contextId, frameId, origin, name, isDefault, type, frameUrl, value | error}. Under
+      // savePath the WHOLE array goes to the file and only its shape comes back, the same
+      // no-value-in-the-response rule as a single evaluation.
+      try {
+        value = await page.evaluateAllContexts(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true, settle: settleOf(args) });
+      } catch (e) {
+        if (e instanceof ContextSelectorError) throw new SharedToolError(`evaluateScript: ${e.message}`);
+        throw e;
+      }
+    } else {
+      // With `context`, the value is returned raw, exactly as without it: the caller named the
+      // context, so it already knows which one answered.
+      await applyContext(page, "evaluateScript", args);
+      value = await page.evaluate(args.expression, { args: args.args, awaitPromise: args.awaitPromise ?? true });
+    }
     // No savePath: byte-identical to the pre-sink behavior, the value itself.
     // A thrown page-side exception never reaches here, so it still surfaces as
     // an error rather than being written into the file.
@@ -941,12 +1038,15 @@ function renderSnapshotLine(n: SnapshotNode, scheme: string): string {
 
 export async function takeSnapshot(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; interactiveOnly?: boolean } = {},
-): Promise<{ snapshot: string; target: { id: string; url: string; title: string }; nodeCount: number }> {
+  args: { target?: TargetSelector; interactiveOnly?: boolean } & ContextArgs = {},
+): Promise<{ snapshot: string; target: { id: string; url: string; title: string }; nodeCount: number; context?: { id: number; frameId?: string; frameUrl?: string } }> {
+  if (args.context === "auto") throw new SharedToolError(`take_snapshot: ${CONTEXT_AUTO_NEEDS_SELECTOR}`);
+  assertContextSupport(driver, "take_snapshot", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    const ctx = await applyContext(page, "take_snapshot", args);
     const nodes = await page.snapshot({ interactiveOnly: args.interactiveOnly ?? false });
     const scheme = page.browser.scheme;
-    return { snapshot: nodes.map((n) => renderSnapshotLine(n, scheme)).join("\n"), target: target3(page.info), nodeCount: nodes.length };
+    return { snapshot: nodes.map((n) => renderSnapshotLine(n, scheme)).join("\n"), target: target3(page.info), nodeCount: nodes.length, ...ctx };
   });
 }
 
@@ -1005,13 +1105,15 @@ function elementField(element: string | undefined): { element?: string } {
 
 export async function click(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; modifiers?: string[] },
-): Promise<{ clicked: true; element?: string; x: number; y: number }> {
+  args: { target?: TargetSelector; uid?: DriverUid; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; modifiers?: string[] } & ContextArgs,
+): Promise<{ clicked: true; element?: string; x: number; y: number; context?: { id: number; frameId?: string; frameUrl?: string } }> {
   const loc = locatorOf(args);
+  assertContextSupport(driver, "click", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    const ctx = await applyContext(page, "click", args, cssOf(loc));
     const element = await describeElement(page, loc);
     const { x, y } = await page.click(loc, { button: args.button ?? "left", clickCount: args.clickCount ?? 1, modifiers: args.modifiers });
-    return { clicked: true, ...elementField(element), x, y };
+    return { clicked: true, ...elementField(element), x, y, ...ctx };
   });
 }
 
@@ -1056,12 +1158,14 @@ export async function scroll(
   });
 }
 
-export async function hover(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string }): Promise<{ hovered: true; element?: string; x: number; y: number }> {
+export async function hover(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string } & ContextArgs): Promise<{ hovered: true; element?: string; x: number; y: number; context?: { id: number; frameId?: string; frameUrl?: string } }> {
   const loc = locatorOf(args);
+  assertContextSupport(driver, "hover", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    const ctx = await applyContext(page, "hover", args, cssOf(loc));
     const element = await describeElement(page, loc);
     const { x, y } = await page.hover(loc);
-    return { hovered: true, ...elementField(element), x, y };
+    return { hovered: true, ...elementField(element), x, y, ...ctx };
   });
 }
 
@@ -1180,22 +1284,28 @@ function inputPathField(path: void | TextInputPath): { inputPath?: TextInputPath
   return path && path !== "trusted" ? { inputPath: path } : {};
 }
 
-export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string }): Promise<{ filled: true; element?: string; value: string; inputPath?: TextInputPath }> {
+export async function fill(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; value: string } & ContextArgs): Promise<{ filled: true; element?: string; value: string; inputPath?: TextInputPath; context?: { id: number; frameId?: string; frameUrl?: string } }> {
   if (typeof args.value !== "string") throw new SharedToolError("fill requires a string { value }");
   const loc = locatorOf(args);
+  assertContextSupport(driver, "fill", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    const ctx = await applyContext(page, "fill", args, cssOf(loc));
     const element = await describeElement(page, loc);
     const path = await page.setValue(loc, args.value);
-    return { filled: true, ...elementField(element), value: args.value, ...inputPathField(path) };
+    return { filled: true, ...elementField(element), value: args.value, ...inputPathField(path), ...ctx };
   });
 }
 
 export async function fillForm(
   driver: BrowserDriver,
-  args: { target?: TargetSelector; fields: Array<{ uid?: DriverUid; selector?: string; value: string }> },
-): Promise<{ filled: number; fields: number; elements: Array<string | null>; inputPaths?: TextInputPath[] }> {
+  args: { target?: TargetSelector; fields: Array<{ uid?: DriverUid; selector?: string; value: string }> } & ContextArgs,
+): Promise<{ filled: number; fields: number; elements: Array<string | null>; inputPaths?: TextInputPath[]; context?: { id: number; frameId?: string; frameUrl?: string } }> {
   if (!Array.isArray(args.fields) || args.fields.length === 0) throw new SharedToolError("fill_form requires a non-empty { fields } array");
+  assertContextSupport(driver, "fill_form", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    // One context for the whole form ('auto' matches on the first field's selector).
+    const first = args.fields[0]!;
+    const ctx = await applyContext(page, "fill_form", args, typeof first.selector === "string" && first.selector ? first.selector : undefined);
     let filled = 0;
     const elements: Array<string | null> = [];
     const paths: TextInputPath[] = [];
@@ -1207,17 +1317,19 @@ export async function fillForm(
       filled++;
     }
     // Per field, in order, and only when some field went a non-trusted way.
-    return { filled, fields: args.fields.length, elements, ...(paths.some((p) => p !== "trusted") ? { inputPaths: paths } : {}) };
+    return { filled, fields: args.fields.length, elements, ...(paths.some((p) => p !== "trusted") ? { inputPaths: paths } : {}), ...ctx };
   });
 }
 
-export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string }): Promise<{ typed: true; element?: string; text: string; inputPath?: TextInputPath }> {
+export async function typeText(driver: BrowserDriver, args: { target?: TargetSelector; uid?: DriverUid; selector?: string; text: string } & ContextArgs): Promise<{ typed: true; element?: string; text: string; inputPath?: TextInputPath; context?: { id: number; frameId?: string; frameUrl?: string } }> {
   if (typeof args.text !== "string") throw new SharedToolError("type_text requires a string { text }");
   const loc = locatorOf(args);
+  assertContextSupport(driver, "type_text", wantsContext(args));
   return withPage(driver, args.target, async (page) => {
+    const ctx = await applyContext(page, "type_text", args, cssOf(loc));
     const element = await describeElement(page, loc);
     const path = await page.typeText(loc, args.text);
-    return { typed: true, ...elementField(element), text: args.text, ...inputPathField(path) };
+    return { typed: true, ...elementField(element), text: args.text, ...inputPathField(path), ...ctx };
   });
 }
 
@@ -1643,6 +1755,7 @@ export const SHARED_TOOLS = {
   set_cookie: setCookie,
   delete_cookies: deleteCookies,
   take_snapshot: takeSnapshot,
+  list_contexts: listContexts,
   click,
   hover,
   drag,

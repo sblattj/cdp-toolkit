@@ -256,6 +256,25 @@ export const MANIFEST: ToolSpec[] = [
         "savePath": {
           "type": "string",
           "description": "Output file path."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>."
+        },
+        "allContexts": {
+          "type": "boolean",
+          "description": "Run in every context; rows of value/error."
+        },
+        "settleMs": {
+          "type": "number",
+          "description": "Context quiet period, ms."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [
@@ -413,6 +432,44 @@ export const MANIFEST: ToolSpec[] = [
         "interactiveOnly": {
           "type": "boolean",
           "description": "Only interactive nodes."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_contexts",
+    "description": "List execution contexts (frames, isolated worlds) inside one target, waiting for late ones.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "type": "string",
+          "description": "Lease token; omit for a tab this process already holds. See server instructions."
+        },
+        "target": {
+          "type": "string",
+          "description": "Page selector (index:/url:/title:/label:/targetId, endpoint:<name>/ prefix, default active); grammar in server instructions."
+        },
+        "settleMs": {
+          "type": "number",
+          "description": "Context quiet period, ms."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [],
@@ -466,6 +523,17 @@ export const MANIFEST: ToolSpec[] = [
             ]
           },
           "description": "Modifier keys: Control|Ctrl|Shift|Alt|Meta|Cmd."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>, or auto."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [],
@@ -493,6 +561,17 @@ export const MANIFEST: ToolSpec[] = [
         "selector": {
           "type": "string",
           "description": "CSS selector."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>, or auto."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [],
@@ -968,6 +1047,17 @@ export const MANIFEST: ToolSpec[] = [
         "value": {
           "type": "string",
           "description": "Text value to set; the field is cleared first, overwriting existing content."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>, or auto."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [
@@ -1014,6 +1104,17 @@ export const MANIFEST: ToolSpec[] = [
             ],
             "additionalProperties": false
           }
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>, or auto."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [
@@ -1047,6 +1148,17 @@ export const MANIFEST: ToolSpec[] = [
         "text": {
           "type": "string",
           "description": "Text substring."
+        },
+        "context": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "Frame context: list_contexts id, url:/name:/frame:<id>, or auto."
+        },
+        "settleCapMs": {
+          "type": "number",
+          "description": "Max wait for late contexts, ms."
         }
       },
       "required": [

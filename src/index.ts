@@ -87,7 +87,7 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * named path, and `grant_permissions`, which answers permission prompts for an origin; both
  * chrome-only and both driven from a standing browser-endpoint connection, see
  * tools/browser-session.ts).
- * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 + 1 (extract_page) + 2 (focus pair) + 3 (tab groups, tools/tab-groups.ts) = 51 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 + 1 (extract_page) + 2 (focus pair) + 3 (tab groups, tools/tab-groups.ts) + 1 (list_contexts, #12) = 52 entries total. Listed explicitly so the mapping is auditable at a glance and
  *  the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -112,6 +112,9 @@ export const TOOLS = {
   delete_cookies: onCdp(SHARED_TOOLS.delete_cookies),
   // snapshot (1)
   take_snapshot: onCdp(SHARED_TOOLS.take_snapshot),
+  // execution contexts (1) : #12, the realms inside one target (nested same-process frames,
+  // late contexts). chrome-only (capability "runtime.contexts")
+  list_contexts: onCdp(SHARED_TOOLS.list_contexts),
   // interaction (9) : scroll is 1.8.0 Track P1, a toolkit addition beyond the 29 parity tools
   click: onCdp(SHARED_TOOLS.click),
   hover: onCdp(SHARED_TOOLS.hover),
