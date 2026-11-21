@@ -217,6 +217,38 @@ export const TOOL_DOCS: Record<string, ToolDoc> = {
       "reset": "Clear this server's previous permission grants (Browser.resetPermissions). With 'permissions' it resets FIRST and then grants, so the result is exactly the listed permissions; on its own it is a reset-only call answering {reset:true}. Not scoped to 'origin': CDP resets every origin at once."
     }
   },
+  "list_tab_groups": {
+    "description": "Lists the browser's tab groups, per window: {windows:[{windowId,tabCount,ungrouped,groups:[{groupId,title,color,collapsed,tabs:[{tabId,targetId,index,url,title}]}]}],groupCount,tabCount}; includeUngrouped:true adds each window's ungroupedTabs rows. targetId is the tab's CDP target id (the id list_pages shows), so a row can be driven by the other tools directly. CDP has no tab-group domain, so the three tab-group tools run chrome.tabGroups inside a tiny helper extension: the first call writes it under the artifact dir (tab-groups-helper/) and installs it with Extensions.loadUnpacked, and it stays installed in the profile afterwards (no UI, no state). That needs the helper directory on the browser's own machine and a Chromium that allows loadUnpacked over CDP (measured: Chromium 156-158, Helium, Vivaldi). Classified as changing state for read-only endpoints because of that install. Chrome only (capability 'browser.tabGroups'): absent under Firefox, whose BiDi cannot reach an extension background context.",
+    "params": {
+      "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS (Chrome only); acts on that browser instead of the default. These tools take no target.",
+      "windowId": "Only this chrome window id (from an earlier listing).",
+      "includeUngrouped": "Also return each window's ungrouped tabs as ungroupedTabs rows (same shape as group members), not just the ungrouped count. Default false."
+    }
+  },
+  "group_tabs": {
+    "description": "Puts tabs in a tab group and names it. Select tabs with EXACTLY ONE of tabIds (chrome tab ids from list_tab_groups), targetIds (CDP target ids, as list_pages shows them) or urlMatch (URL substring, matched in every window); a selection that matches nothing, or an unknown id, is an error and nothing is grouped. Without groupId a NEW group is created; with groupId the tabs join that existing group (its title/color are kept unless given). WINDOWS: a group lives in one window. If the selected tabs span several windows the call is REFUSED unless windowId names the destination, because Chrome would otherwise move them all into the last-focused window; with windowId, tabs from other windows are moved there and listed in 'moved'. groupId and windowId are mutually exclusive. title, color (grey|blue|red|yellow|green|pink|purple|cyan|orange) and collapsed are applied after grouping. Returns {groupId,windowId,title,color,collapsed,tabs,moved}. Never raises or focuses a window. Does not consult tab leases: grouping moves a tab in the tab strip, not the page. Helper-extension install and limits: see list_tab_groups. Chrome only (capability 'browser.tabGroups').",
+    "params": {
+      "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS (Chrome only). These tools take no target.",
+      "tabIds": "Chrome tab ids to group, from list_tab_groups. Non-empty.",
+      "targetIds": "CDP target ids to group (the ids list_pages shows). Non-empty.",
+      "urlMatch": "Substring of the tab URL; every matching tab in every window is selected.",
+      "title": "Group title shown on the tab strip.",
+      "color": "One of grey, blue, red, yellow, green, pink, purple, cyan, orange.",
+      "collapsed": "Collapse (true) or expand (false) the group.",
+      "groupId": "Add the tabs to this existing group instead of creating one. Not with windowId.",
+      "windowId": "Window the new group goes in; selected tabs in other windows are moved there. Required when the selection spans windows. Not with groupId."
+    }
+  },
+  "ungroup_tabs": {
+    "description": "Removes tabs from their tab groups; a group left with no tabs disappears. Select with EXACTLY ONE of tabIds, targetIds, urlMatch (as group_tabs) or groupId (every tab of that group). Tabs stay where they are in the window. Returns {ungrouped:[{tabId,targetId,index,url,title,fromGroupId}],alreadyUngrouped:[tabId]}; selected tabs that were in no group are listed in alreadyUngrouped rather than treated as an error. Helper-extension install and limits: see list_tab_groups. Chrome only (capability 'browser.tabGroups').",
+    "params": {
+      "endpoint": "Name of a CDP endpoint configured with CDP_ENDPOINTS (Chrome only). These tools take no target.",
+      "tabIds": "Chrome tab ids to ungroup.",
+      "targetIds": "CDP target ids to ungroup.",
+      "urlMatch": "Substring of the tab URL; matching tabs in every window are ungrouped.",
+      "groupId": "Ungroup every tab of this group."
+    }
+  },
   "fill": {
     "description": "Fills an element by focusing it, clearing existing content, then inserting value via Input.insertText (atomic paste-like commit, not per-character keystrokes, so it won't fire per-keypress handlers). Give exactly one of uid or selector. Returns {filled,element,value}; element names the field (textbox \"Email\"). On a background tab (Chrome), which gets no trusted keyboard input, the commit is verified and falls back in-page (execCommand insertText, else the native value setter plus input/change events); the result then carries inputPath. The tab is never raised.",
     "params": {

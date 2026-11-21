@@ -820,6 +820,130 @@ export const MANIFEST: ToolSpec[] = [
     }
   },
   {
+    "name": "list_tab_groups",
+    "description": "List tab groups per window with member tabs (Chrome only, via a helper extension).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Named CDP endpoint (CDP_ENDPOINTS); default endpoint when omitted."
+        },
+        "windowId": {
+          "type": "integer",
+          "description": "Only this window."
+        },
+        "includeUngrouped": {
+          "type": "boolean",
+          "description": "Also list ungrouped tabs per window."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "group_tabs",
+    "description": "Group tabs (new or existing group) and set title/color/collapsed (Chrome only).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Named CDP endpoint (CDP_ENDPOINTS); default endpoint when omitted."
+        },
+        "tabIds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Chrome tab ids (from list_tab_groups)."
+        },
+        "targetIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CDP target ids (list_pages ids)."
+        },
+        "urlMatch": {
+          "type": "string",
+          "description": "URL substring; matches tabs in every window."
+        },
+        "title": {
+          "type": "string",
+          "description": "Group title."
+        },
+        "color": {
+          "type": "string",
+          "enum": [
+            "grey",
+            "blue",
+            "red",
+            "yellow",
+            "green",
+            "pink",
+            "purple",
+            "cyan",
+            "orange"
+          ],
+          "description": "Group color."
+        },
+        "collapsed": {
+          "type": "boolean",
+          "description": "Collapse the group."
+        },
+        "groupId": {
+          "type": "integer",
+          "description": "Add to this existing group."
+        },
+        "windowId": {
+          "type": "integer",
+          "description": "Window for the new group; tabs elsewhere move there."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ungroup_tabs",
+    "description": "Remove tabs from their tab groups (Chrome only).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Named CDP endpoint (CDP_ENDPOINTS); default endpoint when omitted."
+        },
+        "tabIds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Chrome tab ids (from list_tab_groups)."
+        },
+        "targetIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CDP target ids (list_pages ids)."
+        },
+        "urlMatch": {
+          "type": "string",
+          "description": "URL substring; matches tabs in every window."
+        },
+        "groupId": {
+          "type": "integer",
+          "description": "Ungroup every tab of this group."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "fill",
     "description": "Replace an element contents; provide exactly one of UID or selector.",
     "inputSchema": {

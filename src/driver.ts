@@ -1,5 +1,5 @@
 /**
- * ADR-001: one browser-neutral Driver interface behind the 45 tools.
+ * ADR-001: one browser-neutral Driver interface behind the tools.
  *
  * Context. Every tool in src/tools/ is a stateless one-shot on withPage():
  * open a socket, act, always close. That is only correct because a CDP `Uid`
@@ -154,6 +154,7 @@ export type Capability =
   | "emulate.focus" // fake page focus without moving the OS window (focus_emulation / click_focus_gated); Chrome only — BiDi's emulation module has no focus primitive
   | "browser.downloads" // capture a file download to a known path (wait_for_download); Chrome, Firefox 160+
   | "browser.permissions" // grant/reset browser permissions for an origin (grant_permissions); Chrome, Firefox 160+
+  | "browser.tabGroups" // list/create/remove tab groups through a helper extension (list_tab_groups, group_tabs, ungroup_tabs); Chrome only, BiDi cannot reach an extension background context
   | "worker.targets" // address a service/shared worker as a target ("worker:<substr>"), incl. waking an evicted MV3 worker; Chrome only
   | "frame.targets"; // address an out-of-process (cross-origin) iframe as a target ("frame:<substr>"); Chrome only — same-site iframes are not targets at all
 
@@ -179,6 +180,9 @@ export const REQUIRED_CAPABILITIES: Partial<Record<ToolName, readonly Capability
   click_focus_gated: ["emulate.focus"],
   wait_for_download: ["browser.downloads"],
   grant_permissions: ["browser.permissions"],
+  list_tab_groups: ["browser.tabGroups"],
+  group_tabs: ["browser.tabGroups"],
+  ungroup_tabs: ["browser.tabGroups"],
 } as const;
 
 /* --------------------------------- errors --------------------------------- */

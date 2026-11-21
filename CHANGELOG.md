@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Tab groups: `list_tab_groups`, `group_tabs`, `ungroup_tabs` (#17).** Read and build the browser's native tab groups (named, colored chips in the tab strip). CDP has no tab-group domain, so the toolkit installs a small MV3 helper extension with `Extensions.loadUnpacked` and calls `chrome.tabGroups` from its service worker; a pinned manifest key keeps its id stable, and every call wakes the worker and replaces a stale copy. Rows carry each tab's CDP `targetId`, so a group's tabs feed straight into the other tools.
+  - `group_tabs` selects with exactly one of `tabIds`, `targetIds` or `urlMatch`, creates a group (`title`, `color`, `collapsed`) or adds to one (`groupId`). Chrome moves a multi-window selection into whatever window was focused last, so such a selection is refused unless `windowId` names the target window; moved tabs are reported in `moved`.
+  - No focus change: measured on Helium, the frontmost app never changed while grouping and moving tabs across windows.
+  - Chrome-family only (new `browser.tabGroups` capability; absent under Firefox). Vivaldi answers the API but keeps its own tab stacks, so `group_tabs` there fails with an error instead of reporting a group that does not exist.
+  - The helper stays installed in the browser profile; it needs the browser on the same machine. New `tabs` profile group; the three tools count as mutating for read-only endpoints. `bun run tab-groups:smoke` is the live check.
+
 - **`CDP_DENY_FOCUS=1` refuses every tab raise, even an explicit one.** Since 3.4.0 nothing raises a tab implicitly, but `new_page` / `claim_page` `focus:true`, `select_page` `focus:true` and screencast `bringToFront:true` still pull the browser over the user's work when an agent follows a hint to use them. With the switch on they take the background path, and `new_page` / `select_page` return `focusDenied: true`. Default off; output is unchanged unless a raise was refused. The `press_key` not-delivered note now says that `new_page focus:true` raises the browser.
 
 ## [3.5.0] - 2026-11-18

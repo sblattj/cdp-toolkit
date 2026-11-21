@@ -48,6 +48,8 @@ import { focusEmulation, clickFocusGated } from "./tools/focus-emulation.ts";
 // --- downloads + permissions (browser-endpoint state on a standing connection) : chrome-only, 1.8.0 Track P3 ---
 import { waitForDownload } from "./tools/downloads.ts";
 import { grantPermissions } from "./tools/permissions.ts";
+// --- tab groups (chrome.tabGroups through a helper extension) : chrome-only, capability "browser.tabGroups" ---
+import { listTabGroups, groupTabs, ungroupTabs } from "./tools/tab-groups.ts";
 // --- structured extraction (cleaned page HTML -> OpenAI-compatible endpoint, both backends) ---
 import { extractPage } from "./tools/extract.ts";
 
@@ -85,7 +87,7 @@ function onCdp<A>(fn: (driver: ReturnType<typeof createCdpDriver>, args: A) => P
  * named path, and `grant_permissions`, which answers permission prompts for an origin; both
  * chrome-only and both driven from a standing browser-endpoint connection, see
  * tools/browser-session.ts).
- * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 + 1 (extract_page) + 2 (focus pair) = 48 entries total. Listed explicitly so the mapping is auditable at a glance and
+ * 29 + 1 + 3 + 3 + 3 + 2 + 2 + 2 + 1 (extract_page) + 2 (focus pair) + 3 (tab groups, tools/tab-groups.ts) = 51 entries total. Listed explicitly so the mapping is auditable at a glance and
  *  the CLI can `--list` it.
  *
  * 20 of the 29 MCP-parity tools (pages/navigation/evaluate/snapshot/interaction/
@@ -159,6 +161,11 @@ export const TOOLS = {
   // connection rather than a per-call socket : see that module's header for the measurements.
   wait_for_download: waitForDownload,
   grant_permissions: grantPermissions,
+  // tab groups (3) : #17. CDP has no tab-group domain, so these evaluate chrome.tabGroups in a helper
+  // extension's service worker (installed via Extensions.loadUnpacked). chrome-only (capability "browser.tabGroups")
+  list_tab_groups: listTabGroups,
+  group_tabs: groupTabs,
+  ungroup_tabs: ungroupTabs,
   // structured extraction (1) : toolkit addition, both backends — a page's cleaned HTML
   // POSTed to an OpenAI-compatible /chat/completions endpoint (default: loopback
   // llm-ferry) with the caller's JSON Schema as a strict response_format, returning

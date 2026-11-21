@@ -266,6 +266,15 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 
 `mock_request` arms a persistent per-target interception session (fulfill / fail / continue, optional `delayMs`/`failRate`); mocks survive reloads and navigations until `clear_mocks`. Cached requests aren't intercepted — pass `reload:true` to apply-and-observe.
 
+## Tab groups (Chrome-family only)
+
+`list_tab_groups`, `group_tabs`, `ungroup_tabs` read and build the browser's real tab groups (the colored chips in the tab strip). They install a small helper extension on first use (it stays in the profile) and need the browser on this machine. Absent under Firefox; on Vivaldi `group_tabs` fails with an error (it uses its own tab stacks).
+
+- **Find tabs first:** `list_tab_groups {includeUngrouped:true}` gives every window's groups and loose tabs with `tabId` and CDP `targetId`.
+- **Select with exactly one of** `tabIds`, `targetIds`, `urlMatch` (plus `groupId` on `ungroup_tabs`). `urlMatch` is a substring, so check its match set before grouping.
+- **Tabs in several windows?** The call is refused unless you pass `windowId`: Chrome would otherwise drop them all into whichever window was focused last, closing windows it empties. Moved tabs come back in `moved`.
+- Add to an existing group with `groupId` (mutually exclusive with `windowId`); `title`/`color`/`collapsed` apply to the group. Nothing here focuses a window.
+
 ## Quick reference
 
 | Need | Tool |
@@ -288,6 +297,7 @@ A broad `take_snapshot`/`innerText` dump on a credentials page serializes reveal
 | console / network | `list_console_messages` / `list_network_requests` (`reload:true` to record fresh; also `target:"worker:<substring>"`, chrome-only) |
 | claim / release / inspect a tab (+ is a human there?) | `claim_page` / `release_page` / `list_leases` (`humanActiveMs`/`contention`) |
 | mock a backend | `mock_request` / `list_mocks` / `clear_mocks` |
+| list / create / remove tab groups | `list_tab_groups` / `group_tabs` (`windowId` for multi-window tabs) / `ungroup_tabs` (chrome-family only) |
 
 ## Common mistakes
 

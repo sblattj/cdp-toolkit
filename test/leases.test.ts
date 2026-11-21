@@ -786,8 +786,9 @@ describe("registry and manifest wiring", () => {
     // 43 after 1.8.0 Track P1 added scroll and dispatch_mouse,
     // 45 after 1.8.0 Track P3 added wait_for_download and grant_permissions,
     // 47 after focus_emulation and click_focus_gated,
-    // 48 after extract_page.
-    expect(TOOL_NAMES.length).toBe(48);
+    // 48 after extract_page,
+    // 51 after list_tab_groups, group_tabs and ungroup_tabs (#17).
+    expect(TOOL_NAMES.length).toBe(51);
   });
 
   test("every tool has a manifest schema and vice versa", () => {
@@ -797,6 +798,9 @@ describe("registry and manifest wiring", () => {
   test("every tool that resolves a target accepts an optional lease", () => {
     for (const spec of MANIFEST) {
       if (spec.name === "claim_page" || spec.name === "list_leases") continue;
+      // The tab-group tools resolve no target: they act through the helper extension's worker,
+      // and grouping is deliberately lease-free (src/tools/tab-groups.ts header).
+      if (["list_tab_groups", "group_tabs", "ungroup_tabs"].includes(spec.name)) continue;
       expect(spec.inputSchema.properties?.lease, `${spec.name} is missing the lease property`).toBeDefined();
     }
   });

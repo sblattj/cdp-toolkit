@@ -98,6 +98,10 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "click_focus_gated",
   "wait_for_download", // borderline: Browser.setDownloadBehavior / BiDi browser.setDownloadBehavior changes browser state
   "grant_permissions", // Browser.grantPermissions / BiDi permissions.setPermission
+  // tab groups: all three install the helper extension (Extensions.loadUnpacked), even the listing
+  "list_tab_groups",
+  "group_tabs",
+  "ungroup_tabs",
   // leases: claim installs an activity beacon in the page and writes a lease; release can close a tab
   "claim_page",
   "release_page",
