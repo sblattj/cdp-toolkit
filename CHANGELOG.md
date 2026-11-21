@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-11-20
+
 ### Added
 
 - **Tab groups: `list_tab_groups`, `group_tabs`, `ungroup_tabs` (#17).** Read and build the browser's native tab groups (named, colored chips in the tab strip). CDP has no tab-group domain, so the toolkit installs a small MV3 helper extension with `Extensions.loadUnpacked` and calls `chrome.tabGroups` from its service worker; a pinned manifest key keeps its id stable, and every call wakes the worker and replaces a stale copy. Rows carry each tab's CDP `targetId`, so a group's tabs feed straight into the other tools.
