@@ -52,7 +52,7 @@ export interface StubProbe {
  * the page list.
  */
 export function stubDriver(
-  opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean; beacon?: StubBeacon; probe?: StubProbe } = {},
+  opts: { scheme?: string; pages?: PageInfo[]; hidden?: PageInfo[]; failClose?: boolean; beacon?: StubBeacon; probe?: StubProbe; popups?: boolean } = {},
 ) {
   const pages: PageInfo[] = [...(opts.pages ?? [])];
   const hidden: PageInfo[] = [...(opts.hidden ?? [])];
@@ -90,9 +90,26 @@ export function stubDriver(
         },
       }
     : {};
+  /** opts.popups: a watchPopups member that records its handler, and firePopup to play Chrome's
+   *  Target.targetCreated for a page opened by `openerId` (window.open, a target=_blank link). */
+  let popupHandler: ((childId: string, openerId: string) => void) | undefined;
+  let watchCalls = 0;
+  const popupMembers = opts.popups
+    ? {
+        async watchPopups(onPopup: (childId: string, openerId: string) => void): Promise<void> {
+          watchCalls++;
+          popupHandler ??= onPopup;
+        },
+      }
+    : {};
+  const firePopup = (childId: string, openerId: string) => {
+    if (!pages.some((p) => p.id === childId)) pages.push({ id: childId, url: "about:blank#popup", title: "", type: "page" });
+    popupHandler?.(childId, openerId);
+  };
   const driver = {
     ...beaconMembers,
     ...probeMembers,
+    ...popupMembers,
     scheme: opts.scheme ?? "cdp",
     async listPages(o?: { all?: boolean }): Promise<PageInfo[]> {
       return o?.all ? [...pages, ...hidden] : [...pages];
@@ -118,7 +135,10 @@ export function stubDriver(
       return [...pages, ...hidden].find((p) => p.id === id) ?? { id, url: "", title: "" };
     },
   };
-  return { driver: driver as unknown as BrowserDriver, closed, activated, newPageOpts, pages, beaconInstalls, beaconReads, probeCalls };
+  return {
+    driver: driver as unknown as BrowserDriver, closed, activated, newPageOpts, pages, beaconInstalls, beaconReads, probeCalls,
+    firePopup, watchCalls: () => watchCalls,
+  };
 }
 
 export const page = (id: string, url = `https://example.test/${id}`): PageInfo => ({ id, url, title: id, type: "page" });

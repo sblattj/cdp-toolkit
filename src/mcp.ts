@@ -44,6 +44,7 @@ import { createCdpDriver } from "./cdp/driver.ts";
 import { closeOwnedTabs, watchParent } from "./ownedTabs.ts";
 import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { disposeHiddenTabs } from "./cdp/hiddenTabs.ts";
+import { disposePopupWatchers } from "./cdp/popupWatch.ts";
 import { toolAvailability } from "./capabilities.ts";
 import { FIREFOX_TOOLS } from "./firefox-tools.ts";
 import { leaseFromArgs, markLongLivedProcess, withLeaseScope } from "./leases.ts";
@@ -533,6 +534,8 @@ async function run(argv: string[]): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     await closeAgentTabsOnExit(reason).catch(() => undefined);
+    // The popup watch sockets (./cdp/popupWatch.ts): nothing left to adopt once the tabs are closed.
+    disposePopupWatchers();
     await disposeFirefoxSession();
     // The standing browser-endpoint connection behind wait_for_download / grant_permissions (1.8.0
     // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is

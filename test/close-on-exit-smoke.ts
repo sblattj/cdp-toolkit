@@ -15,6 +15,12 @@
  * and, outside that server:
  *   U  a tab opened with PUT /json/new (origin 'unknown')              -> must SURVIVE
  *   P  a tab opened by a second, still-running server (another process) -> must SURVIVE
+ * and popups (window.open from a page, ./src/cdp/popupWatch.ts):
+ *   W  opened by A                               -> must be CLOSED on exit (inherits A's ownership)
+ *   HW opened by H                               -> must SURVIVE (a copy of a tab for the human)
+ *   XW (SIGTERM only) opened by agent tab X, then X closed with close_page before exit (the hop a
+ *      web app makes when it moves to a copy of itself) -> must be CLOSED on exit
+ *   UW opened by U (not this server's)           -> must SURVIVE
  * then checks /json/list after the server is gone. Finally it checks the cap: with
  * CDP_MAX_AGENT_TABS=2 the third background new_page is an error naming the cap, and a focus:true
  * one still opens.
@@ -43,12 +49,61 @@ const baseEnv: Record<string, string> = {
   ...Object.fromEntries(extraEnv),
 };
 
+/** CDP_HIDDEN_TABS=1: background agent tabs are Chrome hidden targets, which open NO popup at all
+ *  (measured on Chrome 158: window.open returns a window but no target is created, and a clicked
+ *  target=_blank link creates nothing). So W and XW are checked as "never appeared" there. */
+const HIDDEN = ["1", "true", "yes", "on"].includes((Object.fromEntries(extraEnv).CDP_HIDDEN_TABS ?? "").toLowerCase());
+
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
   console.log(`${ok ? "PASS" : "FAIL"} ${msg}`);
   if (!ok) failures++;
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function listing(): Promise<Array<{ id: string; url: string }>> {
+  return (await (await fetch(`${BASE}/json/list`)).json()) as Array<{ id: string; url: string }>;
+}
+/** Open a popup from tab `from` the way a person does: a target=_blank link, clicked with real
+ *  input (via `rpc`'s click tool, or raw CDP Input events for U, which no server holds). A bare
+ *  window.open without a user gesture is eaten by the popup blocker. Returns the popup's id. */
+async function popup(rpc: Rpc | undefined, from: string, tag: string, opts: { mayNotAppear?: boolean } = {}): Promise<string | undefined> {
+  const plant = `(() => { const a = document.createElement('a'); a.id = 'pop'; a.href = 'about:blank#${tag}'; a.target = '_blank'; a.textContent = 'open'; a.style.cssText = 'position:fixed;left:10px;top:10px;font-size:40px'; document.body.append(a); return 1; })()`;
+  if (rpc) {
+    const r = await rpc.tool("evaluate_script", { target: from, expression: plant });
+    if (r.isError) throw new Error(`plant link in ${from} failed: ${r.text}`);
+    const c = await rpc.tool("click", { target: from, selector: "#pop" });
+    if (c.isError) throw new Error(`click in ${from} failed: ${c.text}`);
+  } else {
+    await rawCdp(from, [
+      ["Runtime.evaluate", { expression: plant }],
+      ["Input.dispatchMouseEvent", { type: "mousePressed", x: 30, y: 30, button: "left", clickCount: 1 }],
+      ["Input.dispatchMouseEvent", { type: "mouseReleased", x: 30, y: 30, button: "left", clickCount: 1 }],
+    ]);
+  }
+  const t0 = Date.now();
+  while (Date.now() - t0 < (opts.mayNotAppear ? 2_000 : 5_000)) {
+    const hit = (await listing()).find((t) => t.url.endsWith(`#${tag}`));
+    if (hit) return hit.id;
+    await sleep(100);
+  }
+  if (opts.mayNotAppear) return undefined;
+  throw new Error(`popup #${tag} from ${from} never appeared`);
+}
+/** CDP commands on a page over its own socket, outside any MCP server (for U, the "human" tab). */
+async function rawCdp(id: string, cmds: Array<[string, Record<string, unknown>]>): Promise<void> {
+  const ws = new WebSocket(`${BASE.replace("http", "ws")}/devtools/page/${id}`);
+  await new Promise((r, j) => ((ws.onopen = r), (ws.onerror = j)));
+  let n = 0;
+  for (const [method, params] of cmds) {
+    const id = ++n;
+    await new Promise<void>((r) => {
+      ws.onmessage = (m) => { if (JSON.parse(String(m.data)).id === id) r(); };
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+  ws.close();
+}
 
 async function liveIds(): Promise<Set<string>> {
   const list = (await (await fetch(`${BASE}/json/list`)).json()) as Array<{ id: string }>;
@@ -138,6 +193,7 @@ async function main() {
   const P = await peer.newPage({});
   // U: a tab the toolkit did not create.
   const U = ((await (await fetch(`${BASE}/json/new?about:blank`, { method: "PUT" })).json()) as { id: string }).id;
+  const toClean: string[] = [];
 
   const modes = ["SIGTERM", "SIGINT", "SIGHUP", "stdin-eof", "parent-killed"] as const;
   for (const mode of modes) {
@@ -149,24 +205,46 @@ async function main() {
     const A = await rpc.newPage({});
     const B = await rpc.newPage({ claim: true });
     const H = await rpc.newPage({ focus: true });
+    const W = await popup(rpc, A, `w-${mode}`, { mayNotAppear: HIDDEN });
+    if (HIDDEN) check(W === undefined, `${mode}: hidden agent tab A opened no popup (Chrome hidden targets cannot)`);
+    const HW = (await popup(rpc, H, `hw-${mode}`))!;
+    const UW = (await popup(undefined, U, `uw-${mode}`))!;
+    toClean.push(UW);
+    let XW: string | undefined;
+    if (mode === "SIGTERM" && !HIDDEN) {
+      const X = await rpc.newPage({});
+      XW = await popup(rpc, X, `xw-${mode}`);
+      await rpc.tool("close_page", { target: X });
+    }
+    const listed = JSON.parse((await rpc.tool("list_pages", {})).text) as { pages: Array<{ id: string; origin: string }> };
+    const originOf = (id: string) => listed.pages.find((p) => p.id === id)?.origin;
+    if (W) check(originOf(W) === "agent", `${mode}: popup W listed with origin agent (got ${originOf(W)})`);
+    check(originOf(HW) === "agent", `${mode}: popup HW of H listed with origin agent (got ${originOf(HW)})`);
+    check(originOf(UW) === "unknown", `${mode}: popup UW of U listed with origin unknown (got ${originOf(UW)})`);
     const before = await liveIds();
-    check([A, B, H, U, P].every((id) => before.has(id)), `${mode}: all five tabs open before exit`);
+    check([A, B, H, U, P, HW, UW, ...(W ? [W] : [])].every((id) => before.has(id)), `${mode}: all tabs and popups open before exit`);
+    const expectClosed = 2 + (W ? 1 : 0) + (XW ? 1 : 0);
 
     if (mode === "stdin-eof") rpc.child.stdin!.end();
     else if (mode === "parent-killed") parent!.kill("SIGKILL");
     else rpc.child.kill(mode);
 
     if (mode !== "parent-killed") check(await waitExit(rpc.child, 10_000), `${mode}: server exited`);
-    const after = await waitGone([A, B], 10_000);
+    const after = await waitGone([A, B, ...(W ? [W] : []), ...(XW ? [XW] : [])], 10_000);
     check(!after.has(A) && !after.has(B), `${mode}: agent tabs A,B closed`);
+    if (W) check(!after.has(W), `${mode}: popup W of agent tab A closed`);
+    if (XW) check(!after.has(XW), `${mode}: popup XW closed although its opener X was closed first (the hop)`);
+    check(after.has(HW), `${mode}: popup HW of the human's tab H kept`);
+    check(after.has(UW), `${mode}: popup UW of the unknown-origin tab U kept`);
     check(after.has(H), `${mode}: for-the-human tab H kept`);
     check(after.has(U), `${mode}: unknown-origin tab U kept`);
     check(after.has(P), `${mode}: other process's agent tab P kept`);
     const line = rpc.stderr.split("\n").find((l) => l.includes("shutdown ("));
-    if (mode !== "parent-killed") check(line !== undefined && line.includes("closed 2"), `${mode}: stderr reports it: ${line?.trim() ?? "(none)"}`);
+    if (mode !== "parent-killed") check(line !== undefined && line.includes(`closed ${expectClosed} `), `${mode}: stderr reports it: ${line?.trim() ?? "(none)"}`);
     else console.log(`     parent-killed: grandchild stderr not captured past the parent (bash), tab check above is the evidence`);
     rpc.child.stdin!.destroy();
     await closeRaw(H);
+    await closeRaw(HW);
   }
 
   // The cap.
@@ -191,6 +269,7 @@ async function main() {
   const end = await waitGone([P], 10_000);
   check(!end.has(P), "peer: its own agent tab P closed when the PEER exited");
   await closeRaw(U);
+  for (const id of toClean) await closeRaw(id);
   rmSync(artifactDir, { recursive: true, force: true });
   console.log(failures === 0 ? "ALL PASS" : `${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);

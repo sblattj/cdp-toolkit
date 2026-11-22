@@ -871,6 +871,15 @@ export interface BrowserDriver {
    */
   resolveWorkerTarget?(selector: string, opts: { wake: boolean }): Promise<PageInfo>;
 
+  /**
+   * Report every page opened BY another page (window.open, a target=_blank link) as
+   * (childId, openerId), on the current endpoint, until dispose. Idempotent; the first handler
+   * per endpoint wins. Best effort: MUST NOT throw. The MCP server's ownership registry
+   * (ownedTabs.ts) uses it so a popup of an agent tab is the agent's too. Optional: CDP only
+   * (BiDi leaves it unset, so popups there are not inherited).
+   */
+  watchPopups?(onPopup: (childId: string, openerId: string) => void): Promise<void>;
+
   /** Tear down the transport: process exit (CLI) or shutdown (MCP server).
    *  Idempotent. MUST NOT be called by a tool. */
   dispose(): Promise<void>;

@@ -37,13 +37,22 @@
  * Under CDP_HIDDEN_TABS both caps apply: CDP_HIDDEN_TABS_MAX bounds hidden tabs per endpoint, this
  * one bounds every background tab of this process; the smaller one wins.
  *
+ * TABS OPENED BY AN OWNED TAB (window.open, a target=_blank link, a web app that hops to a copy of
+ * itself and closes the original) are this process's too: the CDP driver's watchPopups reports
+ * each new page with its opener (./cdp/popupWatch.ts), and adoptPopup records the popup with the
+ * opener's keepOnExit and label and writes its origin record, so list_pages shows it as 'agent'.
+ * So a popup of an agent tab closes on exit and counts toward the cap; a popup of a tab opened for
+ * the human is kept, like its opener. A popup of any tab this process does not hold (the human's,
+ * another process's) is not touched. The cap cannot refuse a popup (the page already made it), so
+ * popups can take a process past the cap; the next new_page is then refused.
+ *
  * CLI. Nothing is recorded under the one-shot CLI (isLongLivedProcess false): its whole point is
  * a tab that outlives the command that opened it. So the CLI has neither close-on-exit nor a cap.
  */
 import type { BrowserDriver } from "./driver.ts";
 import { currentEndpoint, withEndpointScope, type Endpoint } from "./endpoints.ts";
 import { isLongLivedProcess, listLeases, releaseLeaseFor, type LeaseBackend, type LeaseSummary } from "./leases.ts";
-import { originIndex, type OriginSummary } from "./origins.ts";
+import { originIndex, recordOrigin, type OriginSummary } from "./origins.ts";
 
 export const DEFAULT_MAX_AGENT_TABS = 20;
 /** Whole-shutdown budget for closing tabs, so a wedged browser cannot hold the process open. */
@@ -73,6 +82,10 @@ export interface OwnedTab {
   /** Opened or shown for the human: survives exit and is not counted against the cap. */
   keepOnExit: boolean;
   createdAt: number;
+  /** The label its origin record carries, passed on to the tabs it opens. */
+  label?: string;
+  /** Set on a popup: the owned tab that opened it. */
+  openedBy?: string;
 }
 
 /** Thrown at the cap. `code` makes it surface as a typed page error, like HiddenTabCapError. */
@@ -97,10 +110,78 @@ const reserved = new Map<LeaseBackend, number>();
 
 const key = (backend: LeaseBackend, id: string) => `${backend}\u0000${id}`;
 
+/** Popups whose opener is still being created (its commit has not landed), keyed by the opener. */
+const earlyPopups = new Map<string, Array<{ childId: string; at: number }>>();
+const EARLY_POPUP_TTL_MS = 60_000;
+const EARLY_POPUP_MAX = 100;
+/** Creates in flight (both kinds, for the human or not): early popups are buffered only then. */
+let creating = 0;
+/** Origin writes for adopted popups still in flight; see popupsSettled. */
+const popupWrites = new Set<Promise<void>>();
+
 /** Test hook: forget everything. */
 export function resetOwnedTabs(): void {
   owned.clear();
   reserved.clear();
+  earlyPopups.clear();
+  creating = 0;
+}
+
+/** Resolves once every adopted popup's origin record is written. closeOwnedTabs waits on it. */
+export async function popupsSettled(): Promise<void> {
+  while (popupWrites.size) await Promise.all([...popupWrites]);
+}
+
+/**
+ * A page `childId` was opened by `openerId` (from the CDP driver's watchPopups). When this process
+ * holds the opener, the popup becomes this process's too: same keepOnExit, same label, agent
+ * origin. When the opener is not held, nothing happens, unless a create is in flight, in which case
+ * the popup waits (bounded) for that create to commit, since a page can open a popup before
+ * new_page returns.
+ */
+export function adoptPopup(backend: LeaseBackend, childId: string, openerId: string): void {
+  if (!isLongLivedProcess() || owned.has(key(backend, childId))) return;
+  const opener = owned.get(key(backend, openerId));
+  if (!opener) {
+    if (creating === 0) return;
+    const now = Date.now();
+    for (const [k, list] of earlyPopups) {
+      const fresh = list.filter((e) => now - e.at < EARLY_POPUP_TTL_MS);
+      if (fresh.length) earlyPopups.set(k, fresh);
+      else earlyPopups.delete(k);
+    }
+    let total = 0;
+    for (const list of earlyPopups.values()) total += list.length;
+    if (total >= EARLY_POPUP_MAX) return;
+    const k = key(backend, openerId);
+    earlyPopups.set(k, [...(earlyPopups.get(k) ?? []), { childId, at: now }]);
+    return;
+  }
+  owned.set(key(backend, childId), {
+    targetId: childId,
+    backend,
+    ...(opener.endpoint ? { endpoint: opener.endpoint } : {}),
+    keepOnExit: opener.keepOnExit,
+    createdAt: Date.now(),
+    ...(opener.label !== undefined ? { label: opener.label } : {}),
+    openedBy: openerId,
+  });
+  const write = (async () => {
+    const run = () => recordOrigin(backend, childId, { label: opener.label });
+    await (opener.endpoint ? withEndpointScope(opener.endpoint, run) : run());
+  })()
+    .catch(() => undefined)
+    .finally(() => popupWrites.delete(write));
+  popupWrites.add(write);
+  adoptEarlyPopups(backend, childId);
+}
+
+function adoptEarlyPopups(backend: LeaseBackend, openerId: string): void {
+  const k = key(backend, openerId);
+  const list = earlyPopups.get(k);
+  if (!list) return;
+  earlyPopups.delete(k);
+  for (const e of list) adoptPopup(backend, e.childId, openerId);
 }
 
 /** This process's recorded tab ids on `backend`, oldest first; closableOnly drops the human's. */
@@ -150,13 +231,23 @@ const NOOP_SLOT: AgentTabSlot = { commit() {}, cancel() {} };
  * Called by newTrackedPage BEFORE it opens a tab. Throws AgentTabCapError at the cap (after
  * dropping ids the browser no longer lists); otherwise holds a slot until commit or cancel.
  */
-export async function reserveAgentTab(driver: BrowserDriver, backend: LeaseBackend, opts: { forHuman: boolean }): Promise<AgentTabSlot> {
+export async function reserveAgentTab(
+  driver: BrowserDriver,
+  backend: LeaseBackend,
+  opts: { forHuman: boolean; label?: string },
+): Promise<AgentTabSlot> {
   if (!isLongLivedProcess()) return NOOP_SLOT;
   const endpoint = endpointOf(driver);
+  // Up before the tab exists, so a popup the page opens while it loads is seen. Best effort.
+  await driver.watchPopups?.((childId, openerId) => adoptPopup(backend, childId, openerId))?.catch(() => undefined);
+  const label = opts.label;
   const record = (keepOnExit: boolean) => (targetId: string) => {
-    owned.set(key(backend, targetId), { targetId, backend, ...(endpoint ? { endpoint } : {}), keepOnExit, createdAt: Date.now() });
+    owned.set(key(backend, targetId), {
+      targetId, backend, ...(endpoint ? { endpoint } : {}), keepOnExit, createdAt: Date.now(), ...(label !== undefined ? { label } : {}),
+    });
+    adoptEarlyPopups(backend, targetId);
   };
-  if (opts.forHuman) return { commit: record(true), cancel() {} };
+  if (opts.forHuman) return inFlight({ commit: record(true), cancel() {} });
 
   const max = maxAgentTabs();
   const used = () => ownedTabIds(backend, { closableOnly: true }).length + (reserved.get(backend) ?? 0);
@@ -180,12 +271,33 @@ export async function reserveAgentTab(driver: BrowserDriver, backend: LeaseBacke
     settled = true;
     reserved.set(backend, Math.max(0, (reserved.get(backend) ?? 0) - 1));
   };
-  return {
+  return inFlight({
     commit(targetId) {
       release();
       record(false)(targetId);
     },
     cancel: release,
+  });
+}
+
+/** Count `slot` as a create in flight until it commits or cancels (see adoptPopup's early buffer). */
+function inFlight(slot: AgentTabSlot): AgentTabSlot {
+  creating++;
+  let done = false;
+  const end = () => {
+    if (done) return;
+    done = true;
+    creating = Math.max(0, creating - 1);
+  };
+  return {
+    commit(id) {
+      slot.commit(id);
+      end();
+    },
+    cancel() {
+      slot.cancel();
+      end();
+    },
   };
 }
 
@@ -239,6 +351,8 @@ export interface CloseOwnedResult {
  */
 export async function closeOwnedTabs(driver: BrowserDriver, opts: { timeoutMs?: number } = {}): Promise<CloseOwnedResult> {
   const result: CloseOwnedResult = { closed: [], kept: [], skipped: [] };
+  // A popup adopted just now must have its origin record on disk before exitVerdict reads it.
+  await popupsSettled();
   const tabs = [...owned.values()];
   resetOwnedTabs();
   if (!closeOnExitEnabled() || tabs.length === 0) return result;

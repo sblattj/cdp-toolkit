@@ -11,6 +11,7 @@ import { keepFrontApp } from "../frontApp.ts";
 import type { Target, TargetSelector } from "../types.ts";
 import { chromeLeaseBackend, isLongLivedProcess, LeaseConflictError } from "../leases.ts";
 import { disposeHiddenTabs, existingHiddenTabOwner, hiddenTabOwner, hiddenTabsRequested, type HiddenTabOwner } from "./hiddenTabs.ts";
+import { disposePopupWatchers, popupWatcher } from "./popupWatch.ts";
 import { currentEndpoint } from "../endpoints.ts";
 import { BEACON_READ_EXPRESSION, BEACON_SOURCE, BeaconSessions, RENDERER_PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT_MS, sendInput } from "../activity.ts";
 import { resolveUid } from "../tools/snapshot.ts";
@@ -2217,10 +2218,15 @@ class CdpBrowserDriver implements BrowserDriver {
     }
   }
 
+  /** One held browser socket per endpoint reporting popups (./popupWatch.ts), closed by dispose(). */
+  async watchPopups(onPopup: (childId: string, openerId: string) => void): Promise<void> {
+    await popupWatcher(currentEndpoint().base, () => ({ connect: () => openBrowser() })).start(onPopup);
+  }
   /** Closes every held beacon connection. dispose() is the MCP server's shutdown
    *  path and the CLI's exit path; a tool must never call it (see ../driver.ts). */
   async dispose(): Promise<void> {
     beaconSessions.clear();
+    disposePopupWatchers();
     // Hidden tabs die with their owner anyway; closing them first is explicit and bounded.
     await disposeHiddenTabs();
   }

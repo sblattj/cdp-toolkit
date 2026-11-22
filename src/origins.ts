@@ -268,7 +268,7 @@ export async function newTrackedPage(
   // This process's ownership (./ownedTabs.ts): checked against CDP_MAX_AGENT_TABS BEFORE the tab
   // exists, recorded after, so the MCP server can close it on exit. A focus:true tab is for the
   // human: not counted, and kept on exit. A no-op under the CLI.
-  const slot = await reserveAgentTab(driver, backend, { forHuman: opts.focus === true });
+  const slot = await reserveAgentTab(driver, backend, { forHuman: opts.focus === true, label: opts.label });
   let page: PageInfo;
   try {
     // Background by default: only an explicit focus:true may switch the user's visible tab,
