@@ -48,6 +48,7 @@ import {
 } from "./leases.ts";
 import { installBeacon, probeRendererActivity, rendererProbeSupported } from "./activity.ts";
 import { newTrackedPage, originIndex, readOrigin, recordOrigin, resolveLiveLabel, type PageOrigin } from "./origins.ts";
+import { forgetOwnedTab, markShownToHuman, moveOwnedTab } from "./ownedTabs.ts";
 import { isWorkerSelector, WORKER_SELECTOR_PAGE_ONLY_MESSAGE, WORKER_SELECTOR_UNSUPPORTED_MESSAGE } from "./workers.ts";
 import { FRAME_SELECTOR_PAGE_ONLY_MESSAGE, FRAME_SELECTOR_UNSUPPORTED_MESSAGE, isFrameSelector } from "./frames.ts";
 import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
@@ -520,6 +521,8 @@ export async function closePage(
   // and releasing it here would let another agent claim a tab this one still
   // thinks it holds.
   if (!res.success) return { closed: p.id, success: false, leaseReleased: false };
+  // Closed: nothing left for this process to close on exit, and its cap slot is free.
+  forgetOwnedTab(backendOf(driver), p.id);
   // Closing a leased tab must not leave its lease file behind waiting on the
   // TTL. resolvePage above already refused this call unless the caller holds
   // the lease, so no token is needed here.
@@ -558,10 +561,14 @@ export async function selectPage(
   }
   const shown = await driver.activatePage(p.id);
   if (shown.revealedFrom === undefined || shown.id === p.id) {
+    // Raised in front of the human: it now survives this server's exit (src/ownedTabs.ts).
+    markShownToHuman(backendOf(driver), shown.id);
     await writeSelectedFile(shown.id);
     return { selected: shown.id, focused: true };
   }
   const moved = await moveRevealedTab(backendOf(driver), shown.revealedFrom, shown.id);
+  // The visible replacement is in front of the human, so it is kept on exit like a focus:true tab.
+  moveOwnedTab(backendOf(driver), shown.revealedFrom, shown.id);
   await writeSelectedFile(shown.id);
   return { selected: shown.id, focused: true, revealedFrom: shown.revealedFrom, ...(moved.lease ? { lease: moved.lease } : {}) };
 }

@@ -6,6 +6,7 @@
 import { beaconSupported, contentionWarning, installBeacon, readHumanActiveMs } from "./activity.ts";
 import type { BrowserDriver } from "./driver.ts";
 import { newTrackedPage, readOrigin } from "./origins.ts";
+import { forgetOwnedTab } from "./ownedTabs.ts";
 import { reapAllowed, reapStaleAgentTabs, type ReapedTab } from "./reap.ts";
 import { pickPage, resolvePage } from "./shared-tools.ts";
 import type { TargetSelector } from "./types.ts";
@@ -251,6 +252,9 @@ export async function releasePage(
   }
 
   if (!released) return { released: false, closed: false, ...(hasTarget ? { targetId } : {}) };
+  // Given back: this process no longer holds the tab, so it will not close it on exit
+  // (src/ownedTabs.ts), even when close:false leaves it open on purpose.
+  forgetOwnedTab(backend, targetId);
 
   const shouldClose =
     args.close === false ? false

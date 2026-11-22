@@ -34,6 +34,7 @@ import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserDriver, PageInfo } from "./driver.ts";
 import { BACKEND_KEY_SOURCE, defaultLabel, leaseDir, listLeases, type LeaseBackend } from "./leases.ts";
+import { reserveAgentTab } from "./ownedTabs.ts";
 
 /** What list_pages can say about where a tab came from. There is deliberately
  *  no "human": see the file header. */
@@ -264,9 +265,20 @@ export async function newTrackedPage(
   backend: LeaseBackend,
   opts: { url?: string; label?: string; focus?: boolean } = {},
 ): Promise<PageInfo> {
-  // Background by default: only an explicit focus:true may switch the user's visible tab,
-  // and not even that under CDP_DENY_FOCUS.
-  const page = await driver.newPage(opts.url, { focus: opts.focus === true && !focusDenied() });
+  // This process's ownership (./ownedTabs.ts): checked against CDP_MAX_AGENT_TABS BEFORE the tab
+  // exists, recorded after, so the MCP server can close it on exit. A focus:true tab is for the
+  // human: not counted, and kept on exit. A no-op under the CLI.
+  const slot = await reserveAgentTab(driver, backend, { forHuman: opts.focus === true });
+  let page: PageInfo;
+  try {
+    // Background by default: only an explicit focus:true may switch the user's visible tab,
+    // and not even that under CDP_DENY_FOCUS.
+    page = await driver.newPage(opts.url, { focus: opts.focus === true && !focusDenied() });
+  } catch (e) {
+    slot.cancel();
+    throw e;
+  }
+  slot.commit(page.id);
   await recordOrigin(backend, page.id, { label: opts.label });
   return page;
 }

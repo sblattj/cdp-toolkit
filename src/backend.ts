@@ -211,6 +211,11 @@ export function getOrCreateFirefoxSession(opts?: { endpoint?: string }): Promise
   return sessionPromise;
 }
 
+/** The memoized Firefox session if one was started, without starting one (the shutdown path). */
+export function existingFirefoxSession(): Promise<FirefoxSession> | undefined {
+  return sessionPromise;
+}
+
 /** Idempotent shutdown hook: no-op if no Firefox session was ever started this process. Covers both
  *  modes — in attach mode it ends the BiDi session without touching the user's browser process. */
 export async function disposeFirefoxSession(): Promise<void> {

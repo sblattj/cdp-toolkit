@@ -93,7 +93,8 @@
     "browser-ws:smoke": "bun run ./test/browser-ws-smoke.ts",
     "browser-ws:wedge": "bun run ./test/browser-ws-wedge.ts",
     "gateway:smoke": "bun run ./test/gateway-smoke.ts",
-    "tab-groups:smoke": "bun run ./test/tab-groups-smoke.ts"
+    "tab-groups:smoke": "bun run ./test/tab-groups-smoke.ts",
+    "close-on-exit:smoke": "bun run ./test/close-on-exit-smoke.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

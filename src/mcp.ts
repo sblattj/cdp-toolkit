@@ -39,7 +39,9 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { TOOLS, TOOL_NAMES, BASE } from "./index.ts";
 import { MANIFEST } from "./manifest.ts";
-import { resolveBackend, getOrCreateFirefoxSession, disposeFirefoxSession } from "./backend.ts";
+import { resolveBackend, getOrCreateFirefoxSession, disposeFirefoxSession, existingFirefoxSession } from "./backend.ts";
+import { createCdpDriver } from "./cdp/driver.ts";
+import { closeOwnedTabs, watchParent } from "./ownedTabs.ts";
 import { disposeBrowserSession } from "./tools/browser-session.ts";
 import { disposeHiddenTabs } from "./cdp/hiddenTabs.ts";
 import { toolAvailability } from "./capabilities.ts";
@@ -520,10 +522,17 @@ async function run(argv: string[]): Promise<void> {
   // stdin 'close' event covers the normal MCP shutdown (the client closes the pipe). All are
   // idempotent through disposeFirefoxSession(), and a no-op entirely when Firefox was never
   // launched/attached.
+  //
+  // Close on exit (src/ownedTabs.ts): before any of that, the agent tabs THIS server opened are
+  // closed (tabs opened for the human with focus:true are kept), on every path that reaches
+  // shutdown: SIGINT, SIGTERM, SIGHUP (the terminal went away), stdin EOF, and (stdio only) the
+  // parent process going away without closing the pipe (watchParent). CDP_CLOSE_ON_EXIT=0 turns
+  // it off.
   let shuttingDown = false;
-  async function shutdown(): Promise<void> {
+  async function shutdown(reason: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+    await closeAgentTabsOnExit(reason).catch(() => undefined);
     await disposeFirefoxSession();
     // The standing browser-endpoint connection behind wait_for_download / grant_permissions (1.8.0
     // Track P3). Unlike Firefox it owns no OS process, so process.exit would collect it anyway; it is
@@ -539,8 +548,9 @@ async function run(argv: string[]): Promise<void> {
     if (listener) listener.stop();
     process.exit(0);
   }
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGHUP", () => void shutdown("SIGHUP"));
 
   if (serve.transport === "stdio") {
     // serveStdio owns the era decision for the connection: a modern opening (server/discover
@@ -554,7 +564,10 @@ async function run(argv: string[]): Promise<void> {
       },
       { onerror: (err) => console.error(`[cdp-toolkit] stdio: ${err.message}`) },
     );
-    process.stdin.on("close", () => void shutdown());
+    process.stdin.on("close", () => void shutdown("stdin-eof"));
+    // stdio only: a stdio server's parent IS its client, so being reparented means the client is
+    // gone. A streamable-http server is often started detached (nohup) and must outlive its shell.
+    watchParent(() => void shutdown("parent-gone"));
     console.error(
       `[cdp-toolkit] MCP server v${VERSION} ready, browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}${endpointsLogSuffix()}`,
     );
@@ -593,6 +606,22 @@ async function run(argv: string[]): Promise<void> {
   console.error(
     `[cdp-toolkit] MCP server v${VERSION} listening on streamable-http port ${listener.port} (http://${serve.host}:${listener.port}/), browser=${BROWSER}${FIREFOX_ENDPOINT ? ` (attach ${FIREFOX_ENDPOINT})` : ""}, ${AVAILABILITY.available.length} tools available, ${LISTING.length} listed (CDP_TOOL_PROFILE=${PROFILE.label}), CDP_BASE=${BASE}${endpointsLogSuffix()}`,
   );
+}
+
+/**
+ * Shutdown step one: close the agent tabs this server opened (src/ownedTabs.ts). Chrome uses a
+ * fresh stateless CDP driver (the same kind index.ts keeps); Firefox uses the running BiDi
+ * session if there is one, and does nothing when none was ever started. Bounded and never throws.
+ * One stderr line, only when there was something to report.
+ */
+async function closeAgentTabsOnExit(reason: string): Promise<void> {
+  const driver =
+    BROWSER === "chrome" ? createCdpDriver() : (await existingFirefoxSession()?.catch(() => undefined))?.driver;
+  if (!driver) return;
+  const res = await closeOwnedTabs(driver);
+  if (!res.closed.length && !res.kept.length && !res.skipped.length) return;
+  const skipped = res.skipped.length ? `, left ${res.skipped.length} open (${res.skipped.map((s) => `${s.targetId}:${s.reason}`).join(", ")})` : "";
+  console.error(`[cdp-toolkit] shutdown (${reason}): closed ${res.closed.length} agent tab(s), kept ${res.kept.length} for the human${skipped}`);
 }
 
 if (isDirectRun()) {

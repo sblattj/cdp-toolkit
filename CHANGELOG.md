@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Close on exit.** The MCP server now closes the agent tabs it opened when it exits: on SIGTERM, SIGINT, SIGHUP (new handler), stdin EOF, and, in stdio mode, when its parent process goes away without closing the pipe (it notices being reparented). Only tabs this process created and still holds, with an `agent` origin record and no other process's lease, are closed; a tab of `unknown` origin or another server's tab never is. Tabs opened for the human (`new_page` / `claim_page` `focus:true`, or later raised with `select_page focus:true`) are kept. Bounded to 5 seconds; one stderr line reports it. `CDP_CLOSE_ON_EXIT=0` turns it off. Before this only hidden tabs (`CDP_HIDDEN_TABS`) died with the server.
+- **`CDP_MAX_AGENT_TABS` (default 20, `0` = none).** A per-server cap on background agent tabs, visible or hidden. At the cap `new_page` and `claim_page` refuse with an error naming the open tabs, oldest first, rather than closing one an agent may still be driving. `focus:true` tabs are not counted. Tabs closed behind the server's back free their slot.
+- `bun run close-on-exit:smoke`: a live check of every exit path and the cap against a throwaway Chrome (it refuses `CDP_BASE` on port 9222).
+
+### Changed
+
+- `close_page` and `release_page` forget the tab from the server's own list, so it is neither closed on exit nor counted; `release_page {close:false}` therefore leaves the tab open past exit, as it says.
+- The CLI is unchanged: it records nothing, has no cap, and its tabs outlive it as before.
+
 ## [3.7.0] - 2026-11-20
 
 ### Added
