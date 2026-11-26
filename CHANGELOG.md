@@ -19,6 +19,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `close_page` and `release_page` forget the tab from the server's own list, so it is neither closed on exit nor counted; `release_page {close:false}` therefore leaves the tab open past exit, as it says.
 - The CLI is unchanged: it records nothing, has no cap, and its tabs outlive it as before.
 
+### Removed
+
+- **`src/` is no longer in the npm tarball** (#19). Every bin, export and the Firefox mux daemon already ran from `dist/`; the TypeScript sources were about 1.1 MB of unused install. Read the sources on GitHub, or run a checkout with `bun run ./src/cli.ts`.
+- **No runtime dependencies** (#19). `@modelcontextprotocol/server` (and the zod it pulls in) is now bundled into `dist/mcp.js` instead of installed next to it. An install is one package of about 2.7 MB instead of four packages of about 18 MB; the MCP wire behavior is unchanged.
+
 ## [3.7.0] - 2026-11-20
 
 ### Added

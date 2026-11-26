@@ -9,8 +9,9 @@
  * runnable via BOTH `bunx -y cdp-toolkit` and `npx -y cdp-toolkit`, and npx is the
  * dominant MCP-install idiom, so this widens the audience without giving up Bun.
  *
- * `@modelcontextprotocol/server` stays EXTERNAL (a real runtime dependency, resolved
- * from node_modules by the consumer); we bundle only our own code.
+ * `@modelcontextprotocol/server` (and its zod) is BUNDLED into dist/mcp.js, so the
+ * published package has no runtime dependencies (#19): an install is the package
+ * alone, not the SDK's own dist, maps, typings and zod copy next to it.
  *
  * dist/ is gitignored and rebuilt at publish time via the `prepublishOnly` hook.
  */
@@ -29,7 +30,6 @@ const result = await Bun.build({
   format: "esm",
   splitting: false, // self-contained file per entry (no shared chunks to resolve)
   minify: false,
-  external: ["@modelcontextprotocol/server", "@modelcontextprotocol/server/*"],
 });
 
 if (!result.success) {
@@ -46,4 +46,4 @@ for (const bin of ["dist/cli.js", "dist/mcp.js"]) {
   chmodSync(bin, 0o755);
 }
 
-console.log(`built ${result.outputs.length} files → dist/{index,cli,mcp}.js + dist/bidi/mux-daemon.js (node target, MCP SDK external)`);
+console.log(`built ${result.outputs.length} files → dist/{index,cli,mcp}.js + dist/bidi/mux-daemon.js (node target, MCP SDK bundled)`);
