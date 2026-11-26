@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-11-26
+
 ### Added
 
 - **Close on exit.** The MCP server now closes the agent tabs it opened when it exits: on SIGTERM, SIGINT, SIGHUP (new handler), stdin EOF, and, in stdio mode, when its parent process goes away without closing the pipe (it notices being reparented). Only tabs this process created and still holds, with an `agent` origin record and no other process's lease, are closed; a tab of `unknown` origin or another server's tab never is. Tabs opened for the human (`new_page` / `claim_page` `focus:true`, or later raised with `select_page focus:true`) are kept. Bounded to 5 seconds; one stderr line reports it. `CDP_CLOSE_ON_EXIT=0` turns it off. Before this only hidden tabs (`CDP_HIDDEN_TABS`) died with the server.
