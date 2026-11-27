@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- **Piped CLI output is no longer cut off (#23).** `cdp` exited right after writing its result, so when stdout was a pipe (`cdp list_pages | jq`) anything the pipe had not taken yet was dropped: output stopped at 64 KiB under node and 128 KiB under bun, and a redirect to a file was the only way to get it all. The CLI now waits for every stdout and stderr write to flush before it exits. A reader that closes early (`| head -c 10`) still ends the CLI at once, with no stack trace. `test/cli-piped-stdout.test.ts` pipes a ~400 KB result under bun (src and dist) and node (dist) and compares it byte for byte with a file redirect.
+
 ## [3.9.0] - 2026-11-26
 
 ### Changed

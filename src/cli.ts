@@ -228,7 +228,7 @@ function printToolHelp(name: ToolName): void {
   if (!spec) {
     // Every TOOLS entry has a MANIFEST entry (auditCoverage() in mcp.ts warns otherwise); this
     // is a defensive fallback, not an expected path.
-    process.stdout.write(`${name}\n`);
+    emit(process.stdout, `${name}\n`);
     return;
   }
   const required = new Set(spec.inputSchema.required ?? []);
@@ -248,7 +248,7 @@ function printToolHelp(name: ToolName): void {
     }
   }
   lines.push("", `Usage: cdp ${spec.name} [--target <sel>] [--json '<obj>'] [--<key> <value> ...]`);
-  process.stdout.write(`${lines.join("\n")}\n`);
+  emit(process.stdout, `${lines.join("\n")}\n`);
 }
 
 async function main(): Promise<number> {
@@ -271,11 +271,12 @@ async function main(): Promise<number> {
   // into a real dispatch by any branch below it.
   if (parsed.help) {
     if (!parsed.tool) {
-      process.stdout.write(`${USAGE}\n`);
+      emit(process.stdout, `${USAGE}\n`);
       return 0;
     }
     if (!isToolName(parsed.tool)) {
-      process.stderr.write(
+      emit(
+        process.stderr,
         `${JSON.stringify({ error: `unknown tool '${parsed.tool}'. Run --list to see all ${TOOL_NAMES.length} tools.` })}\n`,
       );
       return 1;
@@ -292,22 +293,23 @@ async function main(): Promise<number> {
     for (const name of availability.available) lines.push(`  ${name}`);
     lines.push("", "unavailable:");
     for (const u of availability.unavailable) lines.push(`  ${u.name}  (needs: ${u.missing.join(", ")})`);
-    process.stdout.write(`${lines.join("\n")}\n`);
+    emit(process.stdout, `${lines.join("\n")}\n`);
     return 0;
   }
 
   if (parsed.list) {
-    process.stdout.write(`${availability.available.join("\n")}\n`);
+    emit(process.stdout, `${availability.available.join("\n")}\n`);
     return 0;
   }
 
   if (!parsed.tool) {
-    process.stderr.write(`${USAGE}\n`);
+    emit(process.stderr, `${USAGE}\n`);
     return 1;
   }
 
   if (!isToolName(parsed.tool)) {
-    process.stderr.write(
+    emit(
+      process.stderr,
       `${JSON.stringify({ error: `unknown tool '${parsed.tool}'. Run --list to see all ${TOOL_NAMES.length} tools.` })}\n`,
     );
     return 1;
@@ -315,7 +317,8 @@ async function main(): Promise<number> {
 
   if (!availableSet.has(parsed.tool)) {
     const gap = availability.unavailable.find((u) => u.name === parsed.tool);
-    process.stderr.write(
+    emit(
+      process.stderr,
       `${JSON.stringify({
         error: `tool '${parsed.tool}' is not available under --browser ${browser}${gap ? ` (needs: ${gap.missing.join(", ")})` : ""}. Run --capabilities --browser ${browser} to see the full list.`,
       })}\n`,
@@ -330,7 +333,8 @@ async function main(): Promise<number> {
   // no lease, because it reads as protection that is not there. Every OTHER
   // CLI call still goes through assertLeaseOk and may present --lease.
   if (parsed.tool === "claim_page") {
-    process.stderr.write(
+    emit(
+      process.stderr,
       `${JSON.stringify({
         error:
           "claim_page is not available from the CLI: a CLI invocation is one process per call, so the lease it claimed would be reclaimable immediately by the dead-pid rule. Claim from the cdp-toolkit MCP server, which is long lived, then pass the token to CLI calls with --lease <token>.",
@@ -356,7 +360,7 @@ async function main(): Promise<number> {
       // The registry's value type is the union of all tool signatures; each tool
       // validates its own args at runtime, so we hand the parsed object through.
       const result = await withEndpointScope(endpoint, () => (fn as (args: unknown) => Promise<unknown>)(toolArgs));
-      process.stdout.write(`${JSON.stringify(result ?? null, null, 2)}\n`);
+      emit(process.stdout, `${JSON.stringify(result ?? null, null, 2)}\n`);
       return 0;
     }
 
@@ -364,18 +368,18 @@ async function main(): Promise<number> {
     // attach), run exactly one tool call, always dispose, even if the tool call itself throws —
     // in launch mode that reaps the spawned process; in attach mode it only ends the BiDi session.
     if (usesEndpointArgs(parsed.args)) {
-      process.stderr.write(`${JSON.stringify({ error: ENDPOINTS_FIREFOX_MESSAGE })}\n`);
+      emit(process.stderr, `${JSON.stringify({ error: ENDPOINTS_FIREFOX_MESSAGE })}\n`);
       return 1;
     }
     const neutralFn = FIREFOX_TOOLS[tool];
     if (!neutralFn) {
-      process.stderr.write(`${JSON.stringify({ error: `tool '${tool}' has no Firefox implementation wired` })}\n`);
+      emit(process.stderr, `${JSON.stringify({ error: `tool '${tool}' has no Firefox implementation wired` })}\n`);
       return 1;
     }
     const session = await startFirefoxSession({ endpoint });
     try {
       const result = await neutralFn(session.driver, parsed.args as never);
-      process.stdout.write(`${JSON.stringify(result ?? null, null, 2)}\n`);
+      emit(process.stdout, `${JSON.stringify(result ?? null, null, 2)}\n`);
       return 0;
     } finally {
       await session.dispose();
@@ -383,12 +387,46 @@ async function main(): Promise<number> {
   });
 }
 
+/** Callbacks of every write made through emit(), awaited by exitAfterFlush before it exits. */
+const pendingWrites: Promise<void>[] = [];
+
+/**
+ * Write `text` and remember when the runtime has handed it to the OS. Every CLI output goes through
+ * here so exitAfterFlush can wait on the write's OWN callback: under bun that callback is the only
+ * flush signal that holds for a pipe (a later zero-length write's callback fires early and
+ * writableNeedDrain stays false), so tracking it per write is what keeps bun from cutting off (#23).
+ */
+function emit(stream: NodeJS.WriteStream, text: string): void {
+  pendingWrites.push(
+    new Promise<void>((resolve) => {
+      stream.write(text, () => resolve());
+    }),
+  );
+}
+
+/**
+ * Exit with `code` only once stdout and stderr have flushed. When stdout is a pipe the write is
+ * asynchronous (node on macOS, and bun), so a bare process.exit right after a large write dropped
+ * whatever the pipe had not taken yet: piped output stopped at 64 KiB under node and 128 KiB under
+ * bun (#23). Waits on every emit() write, then on a zero-length write per stream, which under node
+ * also covers writes made outside emit (its callbacks run in order). A reader that closed early
+ * (`cdp ... | head -c 10`) surfaces as a stream error (EPIPE): nothing more can be delivered, so
+ * exit with the original code at once instead of printing a stack trace.
+ */
+export async function exitAfterFlush(code: number): Promise<never> {
+  const streams = [process.stdout, process.stderr];
+  for (const stream of streams) stream.on("error", () => process.exit(code));
+  await Promise.all(pendingWrites);
+  await Promise.all(streams.map((stream) => new Promise<void>((resolve) => stream.write("", () => resolve()))));
+  process.exit(code);
+}
+
 if (isDirectRun()) {
   main()
-    .then((code) => process.exit(code))
+    .then((code) => exitAfterFlush(code))
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`${JSON.stringify({ error: message })}\n`);
-      process.exit(1);
+      emit(process.stderr, `${JSON.stringify({ error: message })}\n`);
+      exitAfterFlush(1);
     });
 }
