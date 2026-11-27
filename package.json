@@ -62,7 +62,6 @@
     "dist/",
     "CONTRACT.md",
     "README.md",
-    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

@@ -28,8 +28,11 @@ const result = await Bun.build({
   outdir: "dist",
   target: "node",
   format: "esm",
-  splitting: false, // self-contained file per entry (no shared chunks to resolve)
-  minify: false,
+  // Shared code between the four entries goes into dist/chunk-*.js instead of being copied into
+  // each bundle, and the output is minified: together about 64% smaller (#21). In-page scripts are
+  // string literals, so minifying does not touch what runs in the browser.
+  splitting: true,
+  minify: true,
 });
 
 if (!result.success) {

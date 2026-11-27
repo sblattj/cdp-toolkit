@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **Smaller package (#21).** `dist/` is now minified and split: code the four entries share lives once in `dist/chunk-*.js` instead of being copied into each bundle. The JavaScript goes from 2.49 MB to 0.89 MB (gzip 569 KB to 253 KB). The bins, the exports and the `dist/bidi/mux-daemon.js` path are unchanged.
+- `CHANGELOG.md` is no longer in the npm tarball; it stays on GitHub. Packed size drops from 699 KB to about 322 KB, installed from 2.7 MB to 1.1 MB.
+- The bare-import guard in `test/package-files.test.ts` now scans every built file, chunks included, and matches minified imports.
+
 ## [3.8.0] - 2026-11-26
 
 ### Added
