@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-11-26
+
 ### Changed
 
 - **Smaller package (#21).** `dist/` is now minified and split: code the four entries share lives once in `dist/chunk-*.js` instead of being copied into each bundle. The JavaScript goes from 2.49 MB to 0.89 MB (gzip 569 KB to 253 KB). The bins, the exports and the `dist/bidi/mux-daemon.js` path are unchanged.
